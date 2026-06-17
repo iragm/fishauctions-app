@@ -15,7 +15,5 @@ class EnvironmentConfig {
     }
   }
 
-  static bool get enableLogging {
-    return currentEnvironment == Environment.dev;
-  }
+  static bool get enableLogging => currentEnvironment == Environment.dev;
 }
