@@ -63,20 +63,21 @@ class _PrinterScreenState extends ConsumerState<PrinterScreen> {
   Future<void> _connect(BluetoothDevice device) async {
     setState(() => _error = null);
     await ref.read(printerProvider.notifier).connect(device);
-    if (!mounted) return;
+    if (!mounted) {
+      return;
+    }
 
     final result = ref.read(printerProvider);
     if (result.hasError) {
       setState(() {
-        _error = 'Could not connect to ${device.name ?? device.address}. '
+        _error =
+            'Could not connect to ${device.name ?? device.address}. '
             'Make sure it is powered on and in range.';
       });
     } else {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text(
-            'Connected to ${device.name ?? device.address}',
-          ),
+          content: Text('Connected to ${device.name ?? device.address}'),
         ),
       );
       Navigator.of(context).pop();
@@ -147,9 +148,7 @@ class _PrinterScreenState extends ConsumerState<PrinterScreen> {
             ListTile(
               leading: Icon(
                 Icons.print,
-                color: savedPrinter.connected
-                    ? Colors.green
-                    : Colors.grey,
+                color: savedPrinter.connected ? Colors.green : Colors.grey,
               ),
               title: Text(savedPrinter.name),
               subtitle: Text(savedPrinter.address),
@@ -165,9 +164,7 @@ class _PrinterScreenState extends ConsumerState<PrinterScreen> {
               padding: const EdgeInsets.all(16),
               child: Text(
                 _error!,
-                style: TextStyle(
-                  color: Theme.of(context).colorScheme.error,
-                ),
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
               ),
             ),
           const _SectionHeader('Available devices'),
@@ -196,12 +193,12 @@ class _SectionHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
-        child: Text(
-          title.toUpperCase(),
-          style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                color: Theme.of(context).colorScheme.primary,
-              ),
-        ),
-      );
+    padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
+    child: Text(
+      title.toUpperCase(),
+      style: Theme.of(context).textTheme.labelSmall?.copyWith(
+        color: Theme.of(context).colorScheme.primary,
+      ),
+    ),
+  );
 }

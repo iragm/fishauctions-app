@@ -27,11 +27,13 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen> {
     super.initState();
     _controller = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setNavigationDelegate(NavigationDelegate(
-        onPageStarted: (_) => setState(() => _loading = true),
-        onPageFinished: _onPageFinished,
-        onNavigationRequest: _handleNavigation,
-      ))
+      ..setNavigationDelegate(
+        NavigationDelegate(
+          onPageStarted: (_) => setState(() => _loading = true),
+          onPageFinished: _onPageFinished,
+          onNavigationRequest: _handleNavigation,
+        ),
+      )
       ..setUserAgent(
         'FishAuctionsApp/1.0 (Flutter; ${defaultTargetPlatform.name})',
       );
@@ -44,11 +46,13 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen> {
     final cookie = await AuthService.instance.getWebSessionCookie();
     if (cookie != null) {
       final uri = Uri.parse(EnvironmentConfig.webBaseUrl);
-      await WebViewCookieManager().setCookie(WebViewCookie(
-        name: 'sessionid',
-        value: _extractSessionId(cookie) ?? '',
-        domain: uri.host,
-      ));
+      await WebViewCookieManager().setCookie(
+        WebViewCookie(
+          name: 'sessionid',
+          value: _extractSessionId(cookie) ?? '',
+          domain: uri.host,
+        ),
+      );
     }
     await _controller.loadRequest(Uri.parse(EnvironmentConfig.webBaseUrl));
   }
@@ -65,7 +69,8 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen> {
 
   void _onPageFinished(String url) {
     final uri = Uri.parse(url);
-    final onAuthPage = uri.path.startsWith('/accounts/login') ||
+    final onAuthPage =
+        uri.path.startsWith('/accounts/login') ||
         uri.path.startsWith('/accounts/signup');
     setState(() {
       _loading = false;
@@ -74,9 +79,7 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen> {
   }
 
   void _loadPath(String path) {
-    _controller.loadRequest(
-      Uri.parse('${EnvironmentConfig.webBaseUrl}$path'),
-    );
+    _controller.loadRequest(Uri.parse('${EnvironmentConfig.webBaseUrl}$path'));
   }
 
   void _navigate(BuildContext drawerContext, String path) {
@@ -122,86 +125,76 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen> {
   }
 
   Widget _buildDrawer(BuildContext ctx) => Drawer(
-        child: SafeArea(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 20, 16, 12),
-                child: Text(
-                  AppConstants.appName,
-                  style: Theme.of(ctx).textTheme.titleLarge?.copyWith(
-                        fontWeight: FontWeight.bold,
-                      ),
+    child: SafeArea(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 20, 16, 12),
+            child: Text(
+              AppConstants.appName,
+              style: Theme.of(
+                ctx,
+              ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
+            ),
+          ),
+          const Divider(height: 1),
+          Expanded(
+            child: ListView(
+              padding: EdgeInsets.zero,
+              children: [
+                _navTile(ctx, Icons.gavel, 'Auctions', '/auctions/'),
+                _navTile(ctx, Icons.grid_view, 'Lots', '/lots/all/'),
+                _navTile(ctx, Icons.sell, 'Selling', '/selling/'),
+                _navTile(
+                  ctx,
+                  Icons.favorite_border,
+                  'Watched lots',
+                  '/lots/watched/',
                 ),
-              ),
-              const Divider(height: 1),
-              Expanded(
-                child: ListView(
-                  padding: EdgeInsets.zero,
+                _navTile(ctx, Icons.groups, 'Clubs', '/clubs/'),
+                ExpansionTile(
+                  leading: const Icon(Icons.info_outline),
+                  title: const Text('About'),
                   children: [
-                    _navTile(ctx, Icons.gavel, 'Auctions', '/auctions/'),
-                    _navTile(ctx, Icons.grid_view, 'Lots', '/lots/all/'),
-                    _navTile(ctx, Icons.sell, 'Selling', '/selling/'),
+                    _navTile(ctx, null, 'FAQ', '/faq/', indent: true),
                     _navTile(
                       ctx,
-                      Icons.favorite_border,
-                      'Watched lots',
-                      '/lots/watched/',
-                    ),
-                    _navTile(ctx, Icons.groups, 'Clubs', '/clubs/'),
-                    ExpansionTile(
-                      leading: const Icon(Icons.info_outline),
-                      title: const Text('About'),
-                      children: [
-                        _navTile(ctx, null, 'FAQ', '/faq/', indent: true),
-                        _navTile(
-                          ctx,
-                          null,
-                          'Terms & Conditions',
-                          '/tos/',
-                          indent: true,
-                        ),
-                      ],
-                    ),
-                    const Divider(),
-                    if (_webLoggedIn)
-                      _navTile(
-                        ctx,
-                        Icons.logout,
-                        'Sign out',
-                        '/accounts/logout/',
-                      )
-                    else ...[
-                      _navTile(
-                        ctx,
-                        Icons.login,
-                        'Sign in',
-                        '/accounts/login/',
-                      ),
-                      _navTile(
-                        ctx,
-                        Icons.person_add,
-                        'Create account',
-                        '/accounts/signup/',
-                      ),
-                    ],
-                    const Divider(),
-                    ListTile(
-                      leading: const Icon(Icons.print),
-                      title: const Text('Printer setup'),
-                      onTap: () {
-                        Navigator.of(ctx).pop();
-                        context.push('/settings/printer');
-                      },
+                      null,
+                      'Terms & Conditions',
+                      '/tos/',
+                      indent: true,
                     ),
                   ],
                 ),
-              ),
-            ],
+                const Divider(),
+                if (_webLoggedIn)
+                  _navTile(ctx, Icons.logout, 'Sign out', '/accounts/logout/')
+                else ...[
+                  _navTile(ctx, Icons.login, 'Sign in', '/accounts/login/'),
+                  _navTile(
+                    ctx,
+                    Icons.person_add,
+                    'Create account',
+                    '/accounts/signup/',
+                  ),
+                ],
+                const Divider(),
+                ListTile(
+                  leading: const Icon(Icons.print),
+                  title: const Text('Printer setup'),
+                  onTap: () {
+                    Navigator.of(ctx).pop();
+                    context.push('/settings/printer');
+                  },
+                ),
+              ],
+            ),
           ),
-        ),
-      );
+        ],
+      ),
+    ),
+  );
 
   ListTile _navTile(
     BuildContext ctx,
@@ -209,40 +202,39 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen> {
     String label,
     String path, {
     bool indent = false,
-  }) =>
-      ListTile(
-        contentPadding: indent
-            ? const EdgeInsets.only(left: 56, right: 16)
-            : const EdgeInsets.symmetric(horizontal: 16),
-        leading: icon != null ? Icon(icon) : null,
-        title: Text(label),
-        onTap: () => _navigate(ctx, path),
-      );
+  }) => ListTile(
+    contentPadding: indent
+        ? const EdgeInsets.only(left: 56, right: 16)
+        : const EdgeInsets.symmetric(horizontal: 16),
+    leading: icon != null ? Icon(icon) : null,
+    title: Text(label),
+    onTap: () => _navigate(ctx, path),
+  );
 
   @override
   Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(
-          automaticallyImplyLeading: false,
-          title: GestureDetector(
-            onTap: _onTitleTap,
-            child: const Text(AppConstants.appName),
+    appBar: AppBar(
+      automaticallyImplyLeading: false,
+      title: GestureDetector(
+        onTap: _onTitleTap,
+        child: const Text(AppConstants.appName),
+      ),
+      actions: [
+        Builder(
+          builder: (ctx) => IconButton(
+            icon: const Icon(Icons.menu),
+            tooltip: 'Menu',
+            onPressed: Scaffold.of(ctx).openEndDrawer,
           ),
-          actions: [
-            Builder(
-              builder: (ctx) => IconButton(
-                icon: const Icon(Icons.menu),
-                tooltip: 'Menu',
-                onPressed: Scaffold.of(ctx).openEndDrawer,
-              ),
-            ),
-          ],
         ),
-        endDrawer: Builder(builder: _buildDrawer),
-        body: Stack(
-          children: [
-            WebViewWidget(controller: _controller),
-            if (_loading) const LinearProgressIndicator(minHeight: 3),
-          ],
-        ),
-      );
+      ],
+    ),
+    endDrawer: Builder(builder: _buildDrawer),
+    body: Stack(
+      children: [
+        WebViewWidget(controller: _controller),
+        if (_loading) const LinearProgressIndicator(minHeight: 3),
+      ],
+    ),
+  );
 }

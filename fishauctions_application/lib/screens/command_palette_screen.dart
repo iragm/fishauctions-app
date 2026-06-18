@@ -12,12 +12,11 @@ import '../services/command_palette_service.dart';
 Future<void> showCommandPalette(
   BuildContext context,
   void Function(String path) navigateToPath,
-) =>
-    showDialog<void>(
-      context: context,
-      useSafeArea: false,
-      builder: (_) => _CommandPaletteDialog(navigateToPath: navigateToPath),
-    );
+) => showDialog<void>(
+  context: context,
+  useSafeArea: false,
+  builder: (_) => _CommandPaletteDialog(navigateToPath: navigateToPath),
+);
 
 class _CommandPaletteDialog extends StatefulWidget {
   const _CommandPaletteDialog({required this.navigateToPath});
@@ -199,8 +198,10 @@ class _CommandPaletteDialogState extends State<_CommandPaletteDialog> {
                 elevation: 2,
                 color: theme.colorScheme.surface,
                 child: Padding(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 4,
+                    vertical: 4,
+                  ),
                   child: Row(
                     children: [
                       IconButton(

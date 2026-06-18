@@ -1,0 +1,82 @@
+name: Android Release
+
+# Build a production Android APK on every push to the default branch and keep
+# it as a downloadable build artifact.
+#
+# NOT YET ENABLED (intentionally, see TODOs below):
+#   - Play Store upload (needs a service-account key + release signing)
+#   - iOS / macOS builds (no Apple signing set up yet)
+on:
+  push:
+    branches: [master, main]
+
+concurrency:
+  group: android-release-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: fishauctions_application
+
+env:
+  FLUTTER_VERSION: 3.44.1
+
+jobs:
+  build-apk:
+    name: Build prod APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Android Gradle Plugin 9 requires JDK 17.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      # NOTE: release builds currently use the debug signing config (see
+      # android/app/build.gradle.kts). That's fine for internal distribution but
+      # MUST be replaced with a real keystore before any Play Store upload.
+      # TODO(signing): restore a keystore from secrets, e.g.
+      #   echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > android/app/release.jks
+      #   then write android/key.properties from secrets.
+      #
+      # The --dart-define=FLAVOR=prod is REQUIRED: the Gradle --flavor only sets
+      # the applicationId, not the Dart-side environment. Without it the prod APK
+      # would point at the staging backend.
+      - name: Build prod release APK
+        run: flutter build apk --release --flavor prod --dart-define=FLAVOR=prod
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-prod-release-${{ github.sha }}
+          path: fishauctions_application/build/app/outputs/flutter-apk/app-prod-release.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      # TODO(play-store): once signing + a Google Play service account exist,
+      # build an app bundle and upload it. The fat APK above is ~178MB because
+      # the Square SDK ships large native libs; an .aab (or --split-per-abi)
+      # is much smaller per install.
+      #   - run: flutter build appbundle --release --flavor prod \
+      #       --dart-define=FLAVOR=prod
+      #   - uses: r0adkll/upload-google-play@v1
+      #     with:
+      #       serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+      #       packageName: com.fishauctions.app
+      #       releaseFiles: fishauctions_application/build/app/outputs/bundle/prodRelease/app-prod-release.aab
+      #       track: internal
+
+  # TODO(apple): add a macos-latest job to build iOS/macOS once Apple signing
+  # (certificates, provisioning profiles, and the Tap to Pay entitlement) is
+  # configured. iOS flavor schemes are not set up yet either.

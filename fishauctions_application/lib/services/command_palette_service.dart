@@ -27,10 +27,7 @@ class CommandPaletteService {
     int? resultObjectId,
   }) async {
     try {
-      final body = <String, dynamic>{
-        'search': search,
-        'result': result,
-      };
+      final body = <String, dynamic>{'search': search, 'result': result};
       if (id != null) {
         body['id'] = id;
       }

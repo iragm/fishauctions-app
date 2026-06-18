@@ -11,3 +11,14 @@
 
 # Dart/Flutter secure storage
 -keep class com.it_nomads.fluttersecurestorage.** { *; }
+
+# Square Mobile Payments SDK (Tap to Pay). Uses reflection/native bindings;
+# release builds run R8 (isMinifyEnabled = true), so keep its classes.
+-keep class com.squareup.** { *; }
+-dontwarn com.squareup.**
+
+# Flutter's deferred-components manager references Play Core, which isn't on the
+# classpath unless the app actually uses deferred components. This app doesn't,
+# so silence the missing-class warnings R8 would otherwise fail on.
+-dontwarn com.google.android.play.core.**
+-keep class io.flutter.embedding.engine.deferredcomponents.** { *; }

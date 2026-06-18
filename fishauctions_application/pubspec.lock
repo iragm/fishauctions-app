@@ -797,6 +797,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.10.2"
+  square_mobile_payments_sdk:
+    dependency: "direct main"
+    description:
+      name: square_mobile_payments_sdk
+      sha256: f48b818586c4d30dd3fdd170f5b4aaf7cbb0c00f7501efb1fa3adca2b484a615
+      url: "https://pub.dev"
+    source: hosted
+    version: "2026.5.1"
   stack_trace:
     dependency: transitive
     description:

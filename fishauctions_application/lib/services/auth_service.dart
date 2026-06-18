@@ -1,7 +1,10 @@
 import 'package:dio/dio.dart';
+import 'package:logger/logger.dart';
 
 import '../models/auth_models.dart';
 import 'api_service.dart';
+
+final _log = Logger();
 
 class AuthService {
   AuthService._();
@@ -75,18 +78,18 @@ class AuthService {
     required String appVersion,
   }) async {
     try {
-      await _api.dio.post('devices/register/', data: {
-        'device_uuid': deviceUuid,
-        'device_name': deviceName,
-        'platform': platform,
-        'app_version': appVersion,
-      });
+      await _api.dio.post(
+        'devices/register/',
+        data: {
+          'device_uuid': deviceUuid,
+          'device_name': deviceName,
+          'platform': platform,
+          'app_version': appVersion,
+        },
+      );
     } on DioException catch (e) {
       // Non-fatal — log and continue.
-      if (e.response != null) {
-        // ignore: avoid_print
-        print('Device registration failed: ${e.response?.statusCode}');
-      }
+      _log.w('Device registration failed: ${e.response?.statusCode}');
     }
   }
 }

@@ -99,27 +99,57 @@ Labels are **3×2 inches** (thermal, landscape). Target printers: TBD (TSPL/ZPL/
 
 ### Payments (Square Tap to Pay)
 
+Uses the official **`square_mobile_payments_sdk`** Flutter plugin (the Mobile
+Payments SDK — successor to the Reader SDK). Tap to Pay completes the charge
+**on-device** via Square; there is no client-side card nonce. The app authorizes
+the SDK with OAuth credentials the Django backend already holds.
+
+App-side code: `lib/services/square_payment_service.dart` (SDK wrapper) and
+`lib/screens/payment_screen.dart` (checkout UI; mirrors the web "quick checkout"
+page but taps instead of scanning a QR).
+
+Credentials are resolved **per invoice** on the backend (the invoice's
+`club.effective_square_seller` / auction creator), so they ride along in the
+`create` response — the app never stores a Square token.
+
 ```
 POST /api/mobile/payments/create/
   Body:    { "invoice_pk": 123 }
-  Returns: {
-    "invoice_pk", "amount", "currency", "location_id",
-    "idempotency_key", "square_application_id", "square_environment"
-  }
+  Returns: { "invoice_pk", "amount" ("15.00"), "currency",
+             "location_id", "access_token",  ← access_token = NEW field needed
+             "square_environment", "idempotency_key" }
 
 POST /api/mobile/payments/confirm/
-  Body:    { "invoice_pk": 123, "source_id": "<nonce from Square SDK>", "idempotency_key": "<from create response>" }
+  Body:    { "invoice_pk": 123, "payment_id": "<Square payment id>",
+             "idempotency_key": "<from create>" }   ← payment_id, NOT source_id
   Returns: { "payment_id", "status", "receipt_number" }
 ```
 
 **Payment flow:**
-1. Call `/payments/create/` → get Square config + idempotency key
-2. Pass `square_application_id`, `location_id`, `amount` to Square In-Person SDK
-3. SDK collects card tap → returns `source_id` nonce
-4. Call `/payments/confirm/` with nonce + idempotency key
-5. Backend charges card via Square API, marks invoice PAID
+1. `/payments/create/` → per-invoice amount + seller `access_token` + `location_id`
+2. App calls the SDK's `authorize(accessToken, locationId)` (re-auth if the
+   device was authorized for a different seller)
+3. SDK runs the Tap to Pay prompt → captures the card on-device → completed
+   `Payment` with an id
+4. App posts the Square `payment_id` to `/payments/confirm/`
+5. Backend verifies via Square's GetPayment API and marks the invoice PAID
 
-Square Terminal/In-Person SDK integration lives entirely in Flutter. The backend only handles server-side creation and confirmation.
+**Server-side changes still required** (everything else already exists — the
+backend already resolves the per-invoice seller, amount, location, and
+idempotency key, and records payments idempotently):
+- Add the per-invoice seller's **`access_token`** to the `create` response (the
+  Mobile Payments SDK's `authorize()` needs it on-device; prefer a short-lived
+  token). `square_application_id` is no longer needed (that was for the In-App
+  Payments SDK nonce flow).
+- Change `/payments/confirm/` to accept **`payment_id`** instead of `source_id`:
+  the charge already happened on-device, so verify it via Square's GetPayment
+  (with the per-invoice seller token) and record/mark PAID — reuse the existing
+  idempotent `get_or_create(invoice, external_id)` recording, just swap the
+  `payments.create(source_id=...)` call for a `payments.get(payment_id)` verify.
+
+Runtime Tap to Pay still needs: a real NFC device on API 31+, Square production
+approval for Tap to Pay, and the iOS Tap to Pay entitlement (iOS not wired yet).
+None of that is testable in CI; CI only verifies the app compiles and links.
 
 ## Django Backend Notes (from CLAUDE.md in iragm/fishauctions)
 
@@ -133,9 +163,18 @@ Square Terminal/In-Person SDK integration lives entirely in Flutter. The backend
 
 - **Tests:** No mobile endpoint tests exist on the backend. When adding features, push backend tests too.
 - **PaymentIntent model:** The prompt specified a standalone PaymentIntent model but the backend uses `InvoicePayment` directly. This works — just don't expect a `/payments/<id>/status/` endpoint to exist yet.
-- **iOS flavor config:** Android flavors are fully configured. iOS build configurations are not set up yet.
+- **iOS flavor config:** Android flavors are fully configured. iOS build configurations are not set up yet (and the Square Tap to Pay entitlement is iOS-only work).
 - **Push notifications:** Not implemented on either side. `MobileDevice` model exists for future use.
-- **CI/CD:** No pipelines on the backend or Flutter side.
+- **Square server endpoints:** See the three server-side changes in the Payments section above. The app side is built and build-verified; it can't charge until those land plus Square production approval.
+- **Release signing:** Release builds are debug-signed. Add a real keystore before any Play Store upload.
+
+## CI/CD
+
+GitHub Actions live in `.github/workflows/` (repo root, above `fishauctions_application/`):
+- **ci.yml** — PRs + master pushes: pub get, generated-code freshness check, `dart format` check, `flutter analyze`, `flutter test`.
+- **android-release.yml** — master pushes: builds the prod release APK (requires JDK 17) and uploads it as an artifact. Play Store + iOS/macOS steps are scaffolded but disabled pending signing.
+
+Builds require **JDK 17** (AGP 9). `minSdk` is **28** (Square SDK floor).
 
 ## WebView Integration Notes
 

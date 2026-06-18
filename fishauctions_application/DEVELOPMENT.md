@@ -60,20 +60,42 @@ Place API services in `lib/services/`.
 ## Useful Commands
 
 ```bash
-# Run dev build
-flutter run --flavor dev
+# Run dev build (always pass --dart-define=FLAVOR with --flavor; see BUILD_VARIANTS.md)
+flutter run --flavor dev --dart-define=FLAVOR=dev
 
 # Analyze code quality
 flutter analyze
 
-# Generate code (Riverpod)
-flutter pub run build_runner build
+# Generate code (freezed / json_serializable / Riverpod)
+dart run build_runner build --delete-conflicting-outputs
 
-# Build release APK
-flutter build apk --flavor prod --release
+# Build release APK (requires JDK 17)
+flutter build apk --release --flavor prod --dart-define=FLAVOR=prod
 
 # Format code
-flutter format .
+dart format .
+
+# Run tests
+flutter test
+```
+
+## CI
+
+GitHub Actions live in `.github/workflows/` at the repo root:
+
+- **ci.yml** — on every PR (and pushes to master): `flutter pub get`, a
+  generated-code freshness check, `dart format --set-exit-if-changed`,
+  `flutter analyze`, and `flutter test`.
+- **android-release.yml** — on push to master: builds the prod release APK and
+  uploads it as a build artifact. Play Store upload and iOS/macOS builds are
+  scaffolded but intentionally disabled until signing is set up.
+
+Run the same gates locally before pushing:
+
+```bash
+dart format --output=none --set-exit-if-changed .
+flutter analyze
+flutter test
 ```
 
 That's it! Keep the structure clean and you'll scale easily to hundreds of features.

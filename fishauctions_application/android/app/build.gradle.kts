@@ -16,9 +16,10 @@ android {
 
     defaultConfig {
         applicationId = "com.fishauctions.app"
-        // You can update the following values to match your application needs.
-        // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = flutter.minSdkVersion
+        // Square Mobile Payments SDK requires minSdk 28. Tap to Pay on Android
+        // itself needs API 31+; on 28-30 the app installs but Tap to Pay reports
+        // the device as unsupported at runtime.
+        minSdk = maxOf(28, flutter.minSdkVersion)
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName

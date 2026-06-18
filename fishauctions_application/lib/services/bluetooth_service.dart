@@ -15,8 +15,7 @@ class BluetoothService {
   BluetoothPrinter? _connectedPrinter;
 
   BluetoothPrinter? get connectedPrinter => _connectedPrinter;
-  bool get isConnected =>
-      _connection != null && (_connection!.isConnected);
+  bool get isConnected => _connection != null && (_connection!.isConnected);
 
   // ── Permissions ───────────────────────────────────────────────────────────
 
@@ -34,7 +33,8 @@ class BluetoothService {
 
   // ── Discovery ─────────────────────────────────────────────────────────────
 
-  /// Returns already-paired BT devices (no active scan needed for known printers).
+  /// Returns already-paired BT devices. No active scan is needed to reconnect
+  /// to a printer the user has paired before.
   Future<List<BluetoothDevice>> getPairedDevices() =>
       FlutterBluetoothSerial.instance.getBondedDevices();
 
@@ -64,21 +64,34 @@ class BluetoothService {
       _connection = null;
     }
     if (_connectedPrinter != null) {
-      _connectedPrinter =
-          _connectedPrinter!.copyWith(connected: false);
+      _connectedPrinter = _connectedPrinter!.copyWith(connected: false);
     }
   }
 
   // ── Printing ──────────────────────────────────────────────────────────────
 
   /// Sends raw bytes to the connected printer.
+  ///
   /// [data] is whatever the backend returns — currently a PNG, eventually
   /// raw TSPL commands when the backend gains that capability.
-  Future<void> sendBytes(Uint8List data) async {
-    if (_connection == null || !_connection!.isConnected) {
+  ///
+  /// Writes in [chunkSize]-byte chunks and waits for each to drain. Sending a
+  /// whole label image in one `add()` can overflow the RFCOMM output buffer on
+  /// many thermal printers and silently truncate the print.
+  Future<void> sendBytes(Uint8List data, {int chunkSize = 512}) async {
+    final conn = _connection;
+    if (conn == null || !conn.isConnected) {
       throw StateError('No printer connected');
     }
-    _connection!.output.add(data);
-    await _connection!.output.allSent;
+    if (chunkSize <= 0) {
+      throw ArgumentError.value(chunkSize, 'chunkSize', 'must be positive');
+    }
+    for (var offset = 0; offset < data.length; offset += chunkSize) {
+      final end = (offset + chunkSize < data.length)
+          ? offset + chunkSize
+          : data.length;
+      conn.output.add(Uint8List.sublistView(data, offset, end));
+      await conn.output.allSent;
+    }
   }
 }

@@ -21,9 +21,7 @@ class PrinterNotifier extends AsyncNotifier<BluetoothPrinter?> {
     if (raw == null) {
       return null;
     }
-    return BluetoothPrinter.fromJson(
-      jsonDecode(raw) as Map<String, dynamic>,
-    );
+    return BluetoothPrinter.fromJson(jsonDecode(raw) as Map<String, dynamic>);
   }
 
   Future<void> _persist(BluetoothPrinter? printer) async {
@@ -67,5 +65,5 @@ class PrinterNotifier extends AsyncNotifier<BluetoothPrinter?> {
 
 final printerProvider =
     AsyncNotifierProvider<PrinterNotifier, BluetoothPrinter?>(
-  PrinterNotifier.new,
-);
+      PrinterNotifier.new,
+    );

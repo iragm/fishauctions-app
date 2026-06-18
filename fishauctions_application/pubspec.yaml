@@ -8,53 +8,44 @@ environment:
   sdk: ^3.12.1
 
 dependencies:
-  flutter:
-    sdk: flutter
-
   cupertino_icons: ^1.0.8
-
-  # State management
-  riverpod: ^2.5.1
-  flutter_riverpod: ^2.5.1
-  riverpod_annotation: ^2.3.5
-
-  # Navigation
-  go_router: ^14.6.2
-
   # HTTP & Networking
   dio: ^5.4.1
-
-  # Serialization
-  freezed_annotation: ^2.4.4
-  json_annotation: ^4.9.0
-
+  flutter:
+    sdk: flutter
+  # Bluetooth (classic BT — Android only; iOS requires MFi)
+  flutter_bluetooth_serial: ^0.4.0
+  # State management
+  flutter_riverpod: ^2.5.1
   # Secure token storage
   flutter_secure_storage: ^9.2.2
-
+  # Serialization
+  freezed_annotation: ^2.4.4
+  # Navigation
+  go_router: ^14.6.2
+  json_annotation: ^4.9.0
+  # Logging
+  logger: ^2.1.0
+  # Runtime permissions (Bluetooth, NFC)
+  permission_handler: ^11.3.1
+  riverpod: ^2.5.1
+  riverpod_annotation: ^2.3.5
+  # Square Mobile Payments SDK — in-person / Tap to Pay.
+  # Requires Android minSdk 28 (set in android/app/build.gradle.kts) and the
+  # public Square Maven repo (no token). iOS needs the Tap to Pay entitlement
+  # and is not wired up yet. See lib/services/square_payment_service.dart.
+  square_mobile_payments_sdk: ^2026.5.1
   # WebView
   webview_flutter: ^4.10.0
 
-  # Bluetooth (classic BT — Android only; iOS requires MFi)
-  flutter_bluetooth_serial: ^0.4.0
-
-  # Runtime permissions (Bluetooth, NFC)
-  permission_handler: ^11.3.1
-
-  # Logging
-  logger: ^2.1.0
-
-  # Square In-Person SDK (Tap to Pay)
-  # Verify exact package name at pub.dev before enabling:
-  # square_in_person_sdk: ^3.0.0
-
 dev_dependencies:
+  build_runner: ^2.4.8
+  flutter_lints: ^6.0.0
   flutter_test:
     sdk: flutter
-  flutter_lints: ^6.0.0
-  build_runner: ^2.4.8
-  riverpod_generator: ^2.4.0
   freezed: ^2.5.7
   json_serializable: ^6.8.0
+  riverpod_generator: ^2.4.0
 
 flutter:
   uses-material-design: true
