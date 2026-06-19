@@ -11,10 +11,13 @@ import '../services/square_payment_service.dart';
 /// but takes a contactless tap instead of showing a QR code.
 ///
 /// Flow:
-///   1. POST /payments/create/ → amount, currency, idempotency key
+///   1. POST /payments/create/ → amount, currency, idempotency key,
+///      reference_id (+ per-invoice seller access_token/location_id)
 ///   2. Authorize the Square SDK with OAuth creds fetched from the backend
-///   3. startPayment() → user taps card → Square captures on-device
-///   4. POST /payments/confirm/ → backend verifies + marks the invoice PAID
+///   3. startPayment() with the backend's reference_id → user taps card →
+///      Square captures on-device
+///   4. POST /payments/confirm/ → backend verifies the reference_id matches +
+///      marks the invoice PAID
 ///   5. Show the result and pop back to the WebView
 class PaymentScreen extends ConsumerStatefulWidget {
   const PaymentScreen({required this.invoicePk, super.key});
@@ -30,6 +33,12 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
   String? _error;
   _PaymentContext? _ctx;
 
+  /// Set once Square captures the card on-device. While a capture is
+  /// outstanding the card has already been charged, so the only safe recovery
+  /// is to re-finalize *this* payment — never to start a second charge.
+  String? _capturedPaymentId;
+  bool _captureOutstanding = false;
+
   @override
   void initState() {
     super.initState();
@@ -37,6 +46,9 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
   }
 
   Future<void> _createPayment() async {
+    // Starting over is only safe when no charge is in flight.
+    _capturedPaymentId = null;
+    _captureOutstanding = false;
     setState(() {
       _phase = _Phase.loading;
       _error = null;
@@ -92,10 +104,24 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
         currencyCode: ctx.currency,
         paymentAttemptId: ctx.idempotencyKey,
         note: 'Invoice #${widget.invoicePk}',
-        referenceId: 'invoice:${widget.invoicePk}',
+        // Must be the backend-issued reference_id verbatim — confirm rejects
+        // the charge if Square's reference_id doesn't match.
+        referenceId: ctx.referenceId,
       );
 
-      await _confirmPayment(ctx, result.paymentId);
+      // The card has now been charged on-device. From here on, recovery means
+      // re-confirming this payment — we must never start a second charge.
+      _capturedPaymentId = result.paymentId;
+      _captureOutstanding = true;
+      if (_capturedPaymentId == null) {
+        _fail(
+          'The card was charged, but the reader did not return a payment id. '
+          'Please check the invoice before charging again.',
+        );
+        return;
+      }
+
+      await _confirmCaptured();
     } on PaymentError catch (e) {
       if (e.code == PaymentErrorCode.canceled) {
         // User backed out — return to the ready state, no error banner.
@@ -107,32 +133,54 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
       _fail('Payment failed: ${e.message}');
     } on AuthorizeError catch (e) {
       _fail('Could not start the card reader: ${e.message}');
-    } on DioException catch (e) {
-      _fail(_detail(e) ?? 'Network error while finalizing the payment.');
+    } on Exception catch (e) {
+      // Any other SDK/platform failure — never leave the spinner hanging.
+      _fail('Payment could not be completed: $e');
     }
   }
 
-  Future<void> _confirmPayment(_PaymentContext ctx, String? paymentId) async {
-    final res = await ApiService.instance.dio.post<Map<String, dynamic>>(
-      'payments/confirm/',
-      data: {
-        'invoice_pk': widget.invoicePk,
-        'payment_id': paymentId,
-        'idempotency_key': ctx.idempotencyKey,
-      },
-    );
-    if (!mounted) {
+  /// Finalizes the already-captured payment with the backend. Safe to retry:
+  /// it always posts the same [_capturedPaymentId] + idempotency key, so the
+  /// card is never charged twice.
+  Future<void> _confirmCaptured() async {
+    final ctx = _ctx;
+    if (ctx == null) {
       return;
     }
-    final data = res.data ?? const {};
-    final receipt = data['receipt_number'] ?? data['payment_id'] ?? paymentId;
     setState(() {
-      _phase = _Phase.success;
-      _error = receipt == null ? null : 'Receipt $receipt';
+      _phase = _Phase.processing;
+      _error = null;
     });
-    await _showResult(success: true, message: 'Payment confirmed.');
-    if (mounted) {
-      context.pop();
+    try {
+      final res = await ApiService.instance.dio.post<Map<String, dynamic>>(
+        'payments/confirm/',
+        data: {
+          'invoice_pk': widget.invoicePk,
+          'payment_id': _capturedPaymentId,
+          'idempotency_key': ctx.idempotencyKey,
+        },
+      );
+      if (!mounted) {
+        return;
+      }
+      final data = res.data ?? const {};
+      final receipt =
+          data['receipt_number'] ?? data['payment_id'] ?? _capturedPaymentId;
+      _captureOutstanding = false;
+      setState(() {
+        _phase = _Phase.success;
+        _error = receipt == null ? null : 'Receipt $receipt';
+      });
+      await _showResult(success: true, message: 'Payment confirmed.');
+      if (mounted) {
+        context.pop();
+      }
+    } on DioException catch (e) {
+      _fail(
+        _detail(e) ??
+            'The card was charged, but we could not confirm it. Tap to finish '
+                '— you will not be charged again.',
+      );
     }
   }
 
@@ -176,7 +224,10 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
           _Phase.loading => const Center(child: CircularProgressIndicator()),
           _Phase.error => _ErrorView(
             message: _error ?? 'Something went wrong.',
-            onRetry: _createPayment,
+            // While a capture is outstanding, retry must re-confirm the same
+            // payment, not start a new charge.
+            onRetry: _captureOutstanding ? _confirmCaptured : _createPayment,
+            retryLabel: _captureOutstanding ? 'Finish Payment' : 'Try Again',
           ),
           _Phase.ready => _ReadyView(
             invoicePk: widget.invoicePk,
@@ -195,7 +246,9 @@ enum _Phase { loading, ready, processing, success, error }
 
 /// Parsed `/payments/create/` response (fields resolved per invoice on the
 /// backend). [accessToken] + [locationId] authorize the Square SDK for the
-/// invoice's seller; [amountCents] is the amount in integer minor units.
+/// invoice's seller; [amountCents] is the amount in integer minor units;
+/// [referenceId] must be passed to Square verbatim so the backend can match
+/// the charge at confirm time.
 class _PaymentContext {
   const _PaymentContext({
     required this.amountCents,
@@ -204,6 +257,7 @@ class _PaymentContext {
     required this.accessToken,
     required this.locationId,
     required this.idempotencyKey,
+    required this.referenceId,
   });
 
   factory _PaymentContext.fromJson(Map<String, dynamic> json) {
@@ -220,13 +274,21 @@ class _PaymentContext {
     if (key == null) {
       throw const FormatException('missing idempotency_key');
     }
+    // The backend ties the charge to this reference_id and rejects confirm if
+    // Square's reference_id doesn't match — so it's required, not optional.
+    final referenceId = json['reference_id'] as String?;
+    if (referenceId == null || referenceId.isEmpty) {
+      throw const FormatException('missing reference_id');
+    }
+    final currency = json['currency'] as String? ?? 'USD';
     return _PaymentContext(
-      amountCents: _toMinorUnits(amount),
+      amountCents: _toMinorUnits(amount, currency),
       amountDisplay: amount,
-      currency: json['currency'] as String? ?? 'USD',
+      currency: currency,
       accessToken: accessToken,
       locationId: locationId,
       idempotencyKey: key,
+      referenceId: referenceId,
     );
   }
 
@@ -236,11 +298,20 @@ class _PaymentContext {
   final String accessToken;
   final String locationId;
   final String idempotencyKey;
+  final String referenceId;
 
-  // Backend sends a decimal string ("15.00"). Square wants integer minor units.
-  // Assumes a 2-decimal currency (USD et al.); revisit if JPY is ever enabled.
-  static int _toMinorUnits(String amount) =>
-      (double.parse(amount) * 100).round();
+  // Most currencies use 2 minor-unit decimals; a few (JPY) use 0. Anything not
+  // listed defaults to 2.
+  static const _zeroDecimalCurrencies = {'JPY'};
+
+  // Backend sends a decimal string ("15.00"). Square wants integer minor units
+  // (cents for USD, whole yen for JPY).
+  static int _toMinorUnits(String amount, String currency) {
+    final factor = _zeroDecimalCurrencies.contains(currency.toUpperCase())
+        ? 1
+        : 100;
+    return (double.parse(amount) * factor).round();
+  }
 }
 
 class _ReadyView extends StatelessWidget {
@@ -317,10 +388,15 @@ class _SuccessView extends StatelessWidget {
 }
 
 class _ErrorView extends StatelessWidget {
-  const _ErrorView({required this.message, required this.onRetry});
+  const _ErrorView({
+    required this.message,
+    required this.onRetry,
+    this.retryLabel = 'Try Again',
+  });
 
   final String message;
   final VoidCallback onRetry;
+  final String retryLabel;
 
   @override
   Widget build(BuildContext context) => Column(
@@ -335,7 +411,7 @@ class _ErrorView extends StatelessWidget {
       const SizedBox(height: 16),
       Text(message, textAlign: TextAlign.center),
       const SizedBox(height: 24),
-      FilledButton(onPressed: onRetry, child: const Text('Try Again')),
+      FilledButton(onPressed: onRetry, child: Text(retryLabel)),
     ],
   );
 }

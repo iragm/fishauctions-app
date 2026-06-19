@@ -116,8 +116,10 @@ Credentials are resolved **per invoice** on the backend (the invoice's
 POST /api/mobile/payments/create/
   Body:    { "invoice_pk": 123 }
   Returns: { "invoice_pk", "amount" ("15.00"), "currency",
-             "location_id", "access_token",  ← access_token = NEW field needed
-             "square_environment", "idempotency_key" }
+             "location_id", "access_token",
+             "square_environment", "idempotency_key",
+             "reference_id" }   ← reference_id: app MUST tap with this exact value
+  (Requires the authenticated operator to be an auction/club admin.)
 
 POST /api/mobile/payments/confirm/
   Body:    { "invoice_pk": 123, "payment_id": "<Square payment id>",
@@ -126,13 +128,16 @@ POST /api/mobile/payments/confirm/
 ```
 
 **Payment flow:**
-1. `/payments/create/` → per-invoice amount + seller `access_token` + `location_id`
+1. `/payments/create/` → per-invoice amount + seller `access_token` +
+   `location_id` + `reference_id`
 2. App calls the SDK's `authorize(accessToken, locationId)` (re-auth if the
    device was authorized for a different seller)
-3. SDK runs the Tap to Pay prompt → captures the card on-device → completed
-   `Payment` with an id
+3. SDK runs the Tap to Pay prompt **with the backend's `reference_id`** →
+   captures the card on-device → completed `Payment` with an id
 4. App posts the Square `payment_id` to `/payments/confirm/`
-5. Backend verifies via Square's GetPayment API and marks the invoice PAID
+5. Backend verifies via Square's GetPayment API, checks the `reference_id`
+   matches what it issued, and marks the invoice PAID. A mismatched (or
+   client-invented) reference_id is rejected.
 
 **Server-side changes still required** (everything else already exists — the
 backend already resolves the per-invoice seller, amount, location, and

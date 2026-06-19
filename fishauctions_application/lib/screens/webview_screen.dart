@@ -88,9 +88,11 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen> {
   }
 
   void _onTitleTap() {
+    // The command palette is backed by the JWT API, so it needs a native
+    // sign-in. Prompt for one if missing; otherwise open search.
     final user = ref.read(authProvider).valueOrNull;
     if (user == null) {
-      _loadPath('/auctions/');
+      context.push('/login');
       return;
     }
     showCommandPalette(context, _loadPath);
@@ -104,9 +106,18 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen> {
       return NavigationDecision.prevent;
     }
 
-    // When the user logs out via the website, also clear any stored JWT.
+    // Only allow standard web navigation. Block javascript:, intent:, file:,
+    // and other schemes that injected or remote content could abuse. http(s)
+    // stays open so allauth social-login redirects (Google, Discord) work.
+    if (uri.scheme != 'http' && uri.scheme != 'https') {
+      return NavigationDecision.prevent;
+    }
+
+    // When the user logs out via the website, also clear the native JWT
+    // session and drop the WebView's own cookies so no stale session lingers.
     if (uri.path == '/accounts/logout/') {
       ref.read(authProvider.notifier).logout();
+      WebViewCookieManager().clearCookies();
     }
 
     return NavigationDecision.navigate;
@@ -120,7 +131,14 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen> {
           context.push('/pay/$invoicePk');
         }
       case 'print':
-        context.push('/settings/printer');
+        // fishauctions://print/<lot_pk> — print a label. Without a valid pk
+        // (e.g. a bare "set up printer" link) fall back to printer settings.
+        final lotPk = int.tryParse(uri.pathSegments.firstOrNull ?? '');
+        if (lotPk != null) {
+          context.push('/print/$lotPk');
+        } else {
+          context.push('/settings/printer');
+        }
     }
   }
 
@@ -180,6 +198,16 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen> {
                   ),
                 ],
                 const Divider(),
+                if (ref.watch(authProvider).valueOrNull == null)
+                  ListTile(
+                    leading: const Icon(Icons.lock_open),
+                    title: const Text('Sign in for app features'),
+                    subtitle: const Text('Payments, printing & search'),
+                    onTap: () {
+                      Navigator.of(ctx).pop();
+                      context.push('/login');
+                    },
+                  ),
                 ListTile(
                   leading: const Icon(Icons.print),
                   title: const Text('Printer setup'),

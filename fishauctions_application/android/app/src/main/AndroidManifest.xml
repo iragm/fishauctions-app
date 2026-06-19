@@ -13,9 +13,12 @@
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
         android:usesPermissionFlags="neverForLocation"/>
-    <!-- Required for BT device discovery on Android < 12 -->
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
-    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+    <!-- Required for BT device discovery on Android < 12 only; on 12+ we use
+         BLUETOOTH_SCAN with neverForLocation, so location is not requested. -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"
+        android:maxSdkVersion="30"/>
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"
+        android:maxSdkVersion="30"/>
 
     <!-- NFC — Square Tap to Pay -->
     <uses-feature android:name="android.hardware.nfc" android:required="false"/>

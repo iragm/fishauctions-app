@@ -21,7 +21,13 @@ class PrinterNotifier extends AsyncNotifier<BluetoothPrinter?> {
     if (raw == null) {
       return null;
     }
-    return BluetoothPrinter.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+    final saved = BluetoothPrinter.fromJson(
+      jsonDecode(raw) as Map<String, dynamic>,
+    );
+    // A persisted printer is only *remembered*, not connected — there is no
+    // live RFCOMM link on a fresh launch. Never trust a stored `connected:true`
+    // or the UI would show a green dot for a socket that doesn't exist.
+    return saved.copyWith(connected: BluetoothService.instance.isConnected);
   }
 
   Future<void> _persist(BluetoothPrinter? printer) async {
@@ -44,6 +50,24 @@ class PrinterNotifier extends AsyncNotifier<BluetoothPrinter?> {
       await _persist(printer);
       return printer;
     });
+  }
+
+  /// Ensures a live link to the remembered printer, reconnecting if the socket
+  /// dropped (e.g. after an app restart). Returns the connected printer.
+  /// Throws [StateError] if no printer has been set up.
+  Future<BluetoothPrinter> ensureConnected() async {
+    final saved = state.valueOrNull;
+    if (saved == null) {
+      throw StateError('No printer configured');
+    }
+    final bt = BluetoothService.instance;
+    if (bt.isConnectedTo(saved.address)) {
+      return saved;
+    }
+    final printer = await bt.connectToAddress(saved.address, name: saved.name);
+    state = AsyncData(printer);
+    await _persist(printer);
+    return printer;
   }
 
   Future<void> disconnect() async {

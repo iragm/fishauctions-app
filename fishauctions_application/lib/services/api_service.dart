@@ -87,18 +87,57 @@ class ApiService {
       final access = data is Map ? data['access'] : null;
       final newRefresh = data is Map ? data['refresh'] : null;
       if (access is! String || newRefresh is! String) {
+        // A 200 with no tokens is a server-side anomaly, not a rejected
+        // credential — keep the refresh token so a later attempt can recover.
         _log.w('Token refresh returned an unexpected payload');
-        await clearTokens();
         return false;
       }
       await saveTokens(access, newRefresh);
       return true;
-    } on Exception catch (e) {
-      _log.w('Token refresh failed: $e');
-      await clearTokens();
+    } on DioException catch (e) {
+      // Only a definitive rejection of the refresh token (expired, blacklisted
+      // after rotation, or malformed) should end the session. Transient
+      // failures — timeouts, offline, 5xx — must NOT wipe the tokens, or a
+      // flaky network would silently log the user out.
+      final status = e.response?.statusCode;
+      if (status == 400 || status == 401 || status == 403) {
+        _log.w('Refresh token rejected ($status); clearing session');
+        await clearTokens();
+      } else {
+        _log.w('Token refresh failed transiently: $e');
+      }
       return false;
     }
   }
+
+  // ── Logging ───────────────────────────────────────────────────────────────
+
+  /// Dev-only request logger that never prints secrets. Bodies of auth and
+  /// payment calls (passwords, JWTs, Square access tokens) are redacted, and
+  /// the Authorization header is masked on every request.
+  static const _sensitivePaths = ['auth/login', 'auth/refresh', 'payments/'];
+
+  static bool _isSensitive(String path) => _sensitivePaths.any(path.contains);
+
+  Interceptor _buildLogInterceptor() => InterceptorsWrapper(
+    onRequest: (options, handler) {
+      final body = _isSensitive(options.path) ? '<redacted>' : options.data;
+      _log.d('→ ${options.method} ${options.uri} $body');
+      handler.next(options);
+    },
+    onResponse: (response, handler) {
+      final path = response.requestOptions.path;
+      final body = _isSensitive(path) ? '<redacted>' : response.data;
+      _log.d('← ${response.statusCode} $path $body');
+      handler.next(response);
+    },
+    onError: (error, handler) {
+      final path = error.requestOptions.path;
+      final body = _isSensitive(path) ? '<redacted>' : error.response?.data;
+      _log.w('✗ ${error.response?.statusCode} $path $body');
+      handler.next(error);
+    },
+  );
 
   // ── Dio factory ───────────────────────────────────────────────────────────
 
@@ -113,13 +152,7 @@ class ApiService {
     );
 
     if (EnvironmentConfig.enableLogging) {
-      dio.interceptors.add(
-        LogInterceptor(
-          requestBody: true,
-          responseBody: true,
-          logPrint: (o) => _log.d(o.toString()),
-        ),
-      );
+      dio.interceptors.add(_buildLogInterceptor());
     }
 
     // Attach JWT to every request; auto-refresh on 401.

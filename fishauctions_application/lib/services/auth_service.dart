@@ -2,7 +2,9 @@ import 'package:dio/dio.dart';
 import 'package:logger/logger.dart';
 
 import '../models/auth_models.dart';
+import '../utils/device_identity.dart';
 import 'api_service.dart';
+import 'square_payment_service.dart';
 
 final _log = Logger();
 
@@ -29,8 +31,18 @@ class AuthService {
     return AppUser.fromJson(res.data as Map<String, dynamic>);
   }
 
-  /// Clear stored tokens. The WebView session is cleared separately.
-  Future<void> logout() => _api.clearTokens();
+  /// Clear stored tokens and release the Square authorization. The WebView
+  /// cookie session is cleared separately by the WebView screen.
+  Future<void> logout() async {
+    // Best-effort: a device left authorized for a seller after sign-out is a
+    // security risk, but a deauthorize failure must not block logout.
+    try {
+      await SquarePaymentService.instance.deauthorize();
+    } on Object catch (e) {
+      _log.w('Square deauthorize on logout failed: $e');
+    }
+    await _api.clearTokens();
+  }
 
   /// Returns a user if valid tokens exist, null otherwise.
   Future<AppUser?> tryRestoreSession() async {
@@ -68,6 +80,17 @@ class AuthService {
       // Endpoint not yet implemented — WebView will fall back to its own login.
     }
     return null;
+  }
+
+  /// Registers the current install using its stable identity. Best-effort;
+  /// safe to call repeatedly (the backend upserts on `device_uuid`).
+  Future<void> registerThisDevice() async {
+    await registerDevice(
+      deviceUuid: await DeviceIdentity.uuid(),
+      deviceName: DeviceIdentity.deviceName,
+      platform: DeviceIdentity.platformTag,
+      appVersion: DeviceIdentity.appVersion,
+    );
   }
 
   /// Register or update this device on the backend.

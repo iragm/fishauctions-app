@@ -4,6 +4,7 @@ import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../models/printer_model.dart';
+import '../utils/android_platform.dart';
 
 /// Wraps flutter_bluetooth_serial for thermal label printing.
 /// Android only — iOS classic BT requires MFi certification.
@@ -19,15 +20,29 @@ class BluetoothService {
 
   // ── Permissions ───────────────────────────────────────────────────────────
 
-  Future<bool> requestPermissions() async {
-    // Android 12+: BLUETOOTH_SCAN is neverForLocation in the manifest so
-    // location isn't needed. Older Android needs it for discovery, but
-    // paired-device listing works without it.
+  /// Minimum permissions to open an RFCOMM link to a known/paired printer.
+  /// Listing bonded devices and connecting needs CONNECT but not SCAN, so this
+  /// never triggers a location prompt.
+  Future<bool> requestConnectPermissions() async {
     final statuses = await [
       Permission.bluetooth,
       Permission.bluetoothConnect,
-      Permission.bluetoothScan,
     ].request();
+    return statuses.values.every((s) => s.isGranted);
+  }
+
+  /// Extra permissions needed to *discover* new (unpaired) printers.
+  ///
+  /// Android 12+ (API 31+) uses BLUETOOTH_SCAN (declared neverForLocation, so
+  /// no location prompt). Android 11 and below cannot return classic-BT
+  /// discovery results without the runtime location permission, so request it
+  /// there. Connecting to already-paired printers does not need this.
+  Future<bool> requestScanPermissions() async {
+    final perms = <Permission>[Permission.bluetoothScan];
+    if (await AndroidPlatform.sdkInt() < 31) {
+      perms.add(Permission.locationWhenInUse);
+    }
+    final statuses = await perms.request();
     return statuses.values.every((s) => s.isGranted);
   }
 
@@ -47,16 +62,29 @@ class BluetoothService {
 
   // ── Connection ────────────────────────────────────────────────────────────
 
-  Future<BluetoothPrinter> connect(BluetoothDevice device) async {
+  Future<BluetoothPrinter> connect(BluetoothDevice device) =>
+      connectToAddress(device.address, name: device.name);
+
+  /// Opens an RFCOMM connection to a MAC [address]. Used both for the initial
+  /// pairing (from a discovered [BluetoothDevice]) and to silently reconnect to
+  /// a remembered printer before a print job.
+  Future<BluetoothPrinter> connectToAddress(
+    String address, {
+    String? name,
+  }) async {
     await disconnect();
-    _connection = await BluetoothConnection.toAddress(device.address);
+    _connection = await BluetoothConnection.toAddress(address);
     _connectedPrinter = BluetoothPrinter(
-      address: device.address,
-      name: device.name ?? device.address,
+      address: address,
+      name: (name == null || name.isEmpty) ? address : name,
       connected: true,
     );
     return _connectedPrinter!;
   }
+
+  /// True when an RFCOMM link to [address] is currently open.
+  bool isConnectedTo(String address) =>
+      isConnected && _connectedPrinter?.address == address;
 
   Future<void> disconnect() async {
     if (_connection != null) {

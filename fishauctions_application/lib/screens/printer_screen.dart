@@ -24,26 +24,67 @@ class _PrinterScreenState extends ConsumerState<PrinterScreen> {
   }
 
   Future<void> _checkPermissionsAndScan() async {
-    final granted = await BluetoothService.instance.requestPermissions();
-    if (!granted) {
-      setState(() => _error = 'Bluetooth permission denied.');
+    final canConnect = await BluetoothService.instance
+        .requestConnectPermissions();
+    if (!mounted) {
+      return;
+    }
+    if (!canConnect) {
+      setState(
+        () => _error =
+            'Bluetooth permission is required to use a '
+            'printer.',
+      );
       return;
     }
     await _scan();
   }
 
   Future<void> _scan() async {
+    if (_scanning) {
+      return;
+    }
     setState(() {
       _scanning = true;
       _discovered = [];
       _error = null;
     });
 
-    // Start with paired devices (instant, no scan needed for known printers).
-    final paired = await BluetoothService.instance.getPairedDevices();
-    setState(() => _discovered = paired);
+    // Paired devices first — instant, and enough to reconnect a known printer.
+    try {
+      final paired = await BluetoothService.instance.getPairedDevices();
+      if (!mounted) {
+        return;
+      }
+      setState(() => _discovered = paired);
+    } on Exception {
+      if (!mounted) {
+        return;
+      }
+      setState(
+        () => _error =
+            'Could not read paired devices. Is Bluetooth '
+            'turned on?',
+      );
+    }
 
-    // Then run a discovery scan for unpaired devices.
+    // Discovering *new* (unpaired) devices needs scan/location permission.
+    // Without it we still show the paired list above rather than dead-ending.
+    final canScan = await BluetoothService.instance.requestScanPermissions();
+    if (!mounted) {
+      return;
+    }
+    if (!canScan) {
+      setState(() {
+        _scanning = false;
+        _error =
+            'Allow nearby-device scanning to find new printers. '
+            'Paired printers above still work.';
+      });
+      return;
+    }
+
+    await BluetoothService.instance.cancelDiscovery();
     final stream = BluetoothService.instance.startDiscovery();
     await for (final result in stream) {
       if (!mounted) {
@@ -57,6 +98,32 @@ class _PrinterScreenState extends ConsumerState<PrinterScreen> {
 
     if (mounted) {
       setState(() => _scanning = false);
+    }
+  }
+
+  Future<void> _disconnect() async {
+    await ref.read(printerProvider.notifier).disconnect();
+  }
+
+  Future<void> _reconnect() async {
+    setState(() => _error = null);
+    try {
+      await ref.read(printerProvider.notifier).ensureConnected();
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Reconnected')));
+    } on Exception {
+      if (!mounted) {
+        return;
+      }
+      setState(
+        () => _error =
+            'Could not reconnect. Make sure the printer is '
+            'on and in range.',
+      );
     }
   }
 
@@ -151,10 +218,33 @@ class _PrinterScreenState extends ConsumerState<PrinterScreen> {
                 color: savedPrinter.connected ? Colors.green : Colors.grey,
               ),
               title: Text(savedPrinter.name),
-              subtitle: Text(savedPrinter.address),
-              trailing: TextButton(
-                onPressed: _forget,
-                child: const Text('Forget'),
+              subtitle: Text(
+                savedPrinter.connected ? 'Connected' : 'Saved (not connected)',
+              ),
+              trailing: PopupMenuButton<String>(
+                onSelected: (value) {
+                  switch (value) {
+                    case 'connect':
+                      _reconnect();
+                    case 'disconnect':
+                      _disconnect();
+                    case 'forget':
+                      _forget();
+                  }
+                },
+                itemBuilder: (_) => [
+                  if (savedPrinter.connected)
+                    const PopupMenuItem(
+                      value: 'disconnect',
+                      child: Text('Disconnect'),
+                    )
+                  else
+                    const PopupMenuItem(
+                      value: 'connect',
+                      child: Text('Connect'),
+                    ),
+                  const PopupMenuItem(value: 'forget', child: Text('Forget')),
+                ],
               ),
             ),
             const Divider(),
