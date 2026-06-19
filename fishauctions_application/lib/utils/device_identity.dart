@@ -1,9 +1,9 @@
 import 'dart:math';
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import '../constants/app_constants.dart';
+import 'secure_storage.dart';
 
 /// Stable per-install identity for `POST /api/mobile/devices/register/`.
 /// The UUID is generated once and persisted so the backend upsert keys on the
@@ -11,7 +11,7 @@ import '../constants/app_constants.dart';
 class DeviceIdentity {
   const DeviceIdentity._();
 
-  static const _storage = FlutterSecureStorage();
+  static const _storage = secureStorage;
   static const _key = 'device_uuid';
 
   static Future<String> uuid() async {

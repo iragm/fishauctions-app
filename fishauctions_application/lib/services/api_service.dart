@@ -1,8 +1,8 @@
 import 'package:dio/dio.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:logger/logger.dart';
 
 import '../config/environment.dart';
+import '../utils/secure_storage.dart';
 
 const _keyAccess = 'jwt_access';
 const _keyRefresh = 'jwt_refresh';
@@ -17,7 +17,7 @@ class ApiService {
   static final ApiService instance = ApiService._();
 
   late final Dio _dio;
-  final _storage = const FlutterSecureStorage();
+  final _storage = secureStorage;
 
   /// Tracks an in-flight refresh so concurrent 401s share one call.
   Future<bool>? _pendingRefresh;

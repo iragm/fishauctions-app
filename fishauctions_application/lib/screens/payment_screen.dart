@@ -47,6 +47,13 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
 
   Future<void> _createPayment() async {
     // Starting over is only safe when no charge is in flight.
+    //
+    // The in-memory `_captureOutstanding` guard below protects retries within
+    // this screen instance. The cross-instance backstop (screen recreated, or
+    // the process is killed mid-tap) is the backend's idempotency key: it is
+    // derived from the invoice pk, so a brand-new create returns the *same*
+    // key, which we pass to Square as the paymentAttemptId — Square then
+    // de-dupes and the card is never charged twice for one invoice.
     _capturedPaymentId = null;
     _captureOutstanding = false;
     setState(() {
@@ -167,6 +174,11 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
       final receipt =
           data['receipt_number'] ?? data['payment_id'] ?? _capturedPaymentId;
       _captureOutstanding = false;
+      // Intentionally keep the Square authorization after a settled charge. An
+      // in-person checkout runs many invoices for the same seller back-to-back,
+      // and a fresh authorize() per charge would add a slow reader re-init each
+      // time. ensureAuthorized() already deauthorizes when the seller changes,
+      // and logout releases it — so it's never left authorized across sellers.
       setState(() {
         _phase = _Phase.success;
         _error = receipt == null ? null : 'Receipt $receipt';
@@ -304,13 +316,37 @@ class _PaymentContext {
   // listed defaults to 2.
   static const _zeroDecimalCurrencies = {'JPY'};
 
+  static final _digitsOnly = RegExp(r'^\d*$');
+
   // Backend sends a decimal string ("15.00"). Square wants integer minor units
-  // (cents for USD, whole yen for JPY).
+  // (cents for USD, whole yen for JPY). Parse the digits directly — never via
+  // `double` — so the amount the card is charged is exact, with no
+  // binary-floating-point drift (e.g. 0.07 * 100 = 7.0000000000000009).
   static int _toMinorUnits(String amount, String currency) {
-    final factor = _zeroDecimalCurrencies.contains(currency.toUpperCase())
-        ? 1
-        : 100;
-    return (double.parse(amount) * factor).round();
+    final decimals = _zeroDecimalCurrencies.contains(currency.toUpperCase())
+        ? 0
+        : 2;
+    final parts = amount.trim().split('.');
+    if (parts.length > 2) {
+      throw FormatException('invalid amount: $amount');
+    }
+    final whole = parts[0];
+    final frac = parts.length == 2 ? parts[1] : '';
+    if ((whole.isEmpty && frac.isEmpty) ||
+        !_digitsOnly.hasMatch(whole) ||
+        !_digitsOnly.hasMatch(frac)) {
+      throw FormatException('invalid amount: $amount');
+    }
+    // Normalize the fractional part to exactly `decimals` digits. If the
+    // backend ever sends more precision than the currency holds, round half-up
+    // rather than truncate so we never undercharge by a cent.
+    final padded = frac.padRight(decimals, '0');
+    final wholePart = whole.isEmpty ? '0' : whole;
+    var minor = int.parse('$wholePart${padded.substring(0, decimals)}');
+    if (padded.length > decimals && padded.codeUnitAt(decimals) - 0x30 >= 5) {
+      minor += 1;
+    }
+    return minor;
   }
 }
 

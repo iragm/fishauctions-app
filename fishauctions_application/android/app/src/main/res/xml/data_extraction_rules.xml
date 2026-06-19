@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 12+ (API 31+) backup/transfer rules. allowBackup="false" already
+  disables cloud Auto Backup on older APIs; these rules additionally exclude the
+  secret stores from both cloud backup and device-to-device transfer on 12+.
+
+  flutter_secure_storage keeps its data in the "FlutterSecureStorage" shared
+  prefs and (on the legacy cipher path) its wrapped key in
+  "FlutterSecureKeyStorage". The real encryption key lives in the Android
+  KeyStore and is never backed up or transferred, so a restored blob would be
+  undecryptable and can crash on read — keep both files device-local.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="FlutterSecureStorage.xml" />
+        <exclude domain="sharedpref" path="FlutterSecureKeyStorage.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="FlutterSecureStorage.xml" />
+        <exclude domain="sharedpref" path="FlutterSecureKeyStorage.xml" />
+    </device-transfer>
+</data-extraction-rules>

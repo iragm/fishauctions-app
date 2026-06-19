@@ -14,6 +14,7 @@ class BluetoothService {
 
   BluetoothConnection? _connection;
   BluetoothPrinter? _connectedPrinter;
+  bool _sending = false;
 
   BluetoothPrinter? get connectedPrinter => _connectedPrinter;
   bool get isConnected => _connection != null && (_connection!.isConnected);
@@ -114,12 +115,22 @@ class BluetoothService {
     if (chunkSize <= 0) {
       throw ArgumentError.value(chunkSize, 'chunkSize', 'must be positive');
     }
-    for (var offset = 0; offset < data.length; offset += chunkSize) {
-      final end = (offset + chunkSize < data.length)
-          ? offset + chunkSize
-          : data.length;
-      conn.output.add(Uint8List.sublistView(data, offset, end));
-      await conn.output.allSent;
+    // One job at a time: interleaving two jobs on the single RFCOMM socket
+    // would corrupt both labels. Callers must let one finish (or fail) first.
+    if (_sending) {
+      throw StateError('A print job is already in progress');
+    }
+    _sending = true;
+    try {
+      for (var offset = 0; offset < data.length; offset += chunkSize) {
+        final end = (offset + chunkSize < data.length)
+            ? offset + chunkSize
+            : data.length;
+        conn.output.add(Uint8List.sublistView(data, offset, end));
+        await conn.output.allSent;
+      }
+    } finally {
+      _sending = false;
     }
   }
 }

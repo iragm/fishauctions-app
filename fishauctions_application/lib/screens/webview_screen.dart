@@ -115,7 +115,10 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen> {
 
     // When the user logs out via the website, also clear the native JWT
     // session and drop the WebView's own cookies so no stale session lingers.
-    if (uri.path == '/accounts/logout/') {
+    // Scope this to our own host so an external page (e.g. a social-login
+    // redirect) that happens to use the same path can't log the user out.
+    final webHost = Uri.parse(EnvironmentConfig.webBaseUrl).host;
+    if (uri.path == '/accounts/logout/' && uri.host == webHost) {
       ref.read(authProvider.notifier).logout();
       WebViewCookieManager().clearCookies();
     }
@@ -198,6 +201,14 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen> {
                   ),
                 ],
                 const Divider(),
+                const Padding(
+                  padding: EdgeInsets.fromLTRB(16, 4, 16, 8),
+                  child: Text(
+                    'Browsing and app features (payments, printing) sign in '
+                    'separately.',
+                    style: TextStyle(fontSize: 12, color: Colors.grey),
+                  ),
+                ),
                 if (ref.watch(authProvider).valueOrNull == null)
                   ListTile(
                     leading: const Icon(Icons.lock_open),
@@ -206,6 +217,18 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen> {
                     onTap: () {
                       Navigator.of(ctx).pop();
                       context.push('/login');
+                    },
+                  )
+                // Web logout already clears the native session too, so only
+                // surface a separate app sign-out when the two have drifted:
+                // signed in for app features but logged out on the website.
+                else if (!_webLoggedIn)
+                  ListTile(
+                    leading: const Icon(Icons.logout),
+                    title: const Text('Sign out of app features'),
+                    onTap: () {
+                      Navigator.of(ctx).pop();
+                      ref.read(authProvider.notifier).logout();
                     },
                   ),
                 ListTile(

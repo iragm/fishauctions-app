@@ -2,13 +2,13 @@ import 'dart:convert';
 
 import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import '../models/printer_model.dart';
 import '../services/bluetooth_service.dart';
+import '../utils/secure_storage.dart';
 
 const _keyPrinter = 'saved_printer';
-const _storage = FlutterSecureStorage();
+const _storage = secureStorage;
 
 class PrinterNotifier extends AsyncNotifier<BluetoothPrinter?> {
   @override
