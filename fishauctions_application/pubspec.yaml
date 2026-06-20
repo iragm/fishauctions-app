@@ -21,6 +21,9 @@ dependencies:
   flutter_secure_storage: ^9.2.2
   # Serialization
   freezed_annotation: ^2.4.4
+  # Device location → latitude/longitude cookies for the WebView (auction/lot
+  # distances). Replaces the browser geolocation prompt the web UI uses.
+  geolocator: ^14.0.2
   # Navigation
   go_router: ^14.6.2
   json_annotation: ^4.9.0
