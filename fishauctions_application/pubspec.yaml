@@ -13,8 +13,10 @@ dependencies:
   dio: ^5.4.1
   flutter:
     sdk: flutter
-  # Bluetooth (classic BT — Android only; iOS requires MFi)
-  flutter_bluetooth_serial: ^0.4.0
+  # Bluetooth Low Energy — thermal label printing on iOS + Android. BLE (not
+  # classic SPP) so iOS works without MFi. Actively maintained; the transport
+  # only — label bytes are produced in LabelRenderer/LabelRaster.
+  flutter_blue_plus: ^2.3.9
   # State management
   flutter_riverpod: ^2.5.1
   # Secure token storage
@@ -26,6 +28,8 @@ dependencies:
   geolocator: ^14.0.2
   # Navigation
   go_router: ^14.6.2
+  # PNG decode → 1-bit packing for label rasters (pure Dart, test-friendly).
+  image: ^4.3.0
   json_annotation: ^4.9.0
   # Logging
   logger: ^2.1.0

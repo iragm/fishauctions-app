@@ -1,5 +1,7 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
-import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
+import 'package:flutter_blue_plus/flutter_blue_plus.dart' hide BluetoothService;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../providers/printer_provider.dart';
@@ -13,96 +15,157 @@ class PrinterScreen extends ConsumerStatefulWidget {
 }
 
 class _PrinterScreenState extends ConsumerState<PrinterScreen> {
-  List<BluetoothDevice> _discovered = [];
+  // Discovered + known printers, keyed by BLE remote id (de-dups scan repeats).
+  final Map<String, ({BluetoothDevice device, String name})> _devices = {};
   bool _scanning = false;
   String? _error;
+  // When set, the error has a concrete fix the user can take from here.
+  bool _needsBluetoothOn = false;
+  bool _needsSettings = false;
+
+  StreamSubscription<List<ScanResult>>? _scanResultsSub;
+  StreamSubscription<bool>? _scanStateSub;
 
   @override
   void initState() {
     super.initState();
+    // Keep the spinner in sync with the real scan state (it auto-stops on
+    // timeout).
+    _scanStateSub = BluetoothService.instance.isScanningStream.listen((on) {
+      if (mounted) {
+        setState(() => _scanning = on);
+      }
+    });
     _checkPermissionsAndScan();
   }
 
   Future<void> _checkPermissionsAndScan() async {
+    setState(() => _needsSettings = false);
     final canConnect = await BluetoothService.instance
         .requestConnectPermissions();
     if (!mounted) {
       return;
     }
     if (!canConnect) {
-      setState(
-        () => _error =
-            'Bluetooth permission is required to use a '
-            'printer.',
-      );
+      // A permanent denial can't be re-prompted — the only fix is OS settings,
+      // so point the user there instead of repeating an unactionable message.
+      final permanent = await BluetoothService.instance
+          .isPermissionPermanentlyDenied();
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _needsSettings = permanent;
+        _error = permanent
+            ? 'Bluetooth permission is off for this app. Open settings to '
+                  'allow it, then come back and scan.'
+            : 'Bluetooth permission is required to use a printer.';
+      });
       return;
     }
     await _scan();
   }
 
   Future<void> _scan() async {
-    if (_scanning) {
-      return;
-    }
     setState(() {
-      _scanning = true;
-      _discovered = [];
       _error = null;
+      _needsBluetoothOn = false;
+      _devices.clear();
     });
 
-    // Paired devices first — instant, and enough to reconnect a known printer.
-    try {
-      final paired = await BluetoothService.instance.getPairedDevices();
+    // The radio has to be on before anything else; otherwise reads and
+    // connections fail with opaque errors. Offer to turn it on right here.
+    if (!await BluetoothService.instance.isAdapterOn()) {
       if (!mounted) {
         return;
       }
-      setState(() => _discovered = paired);
-    } on Exception {
-      if (!mounted) {
-        return;
-      }
-      setState(
-        () => _error =
-            'Could not read paired devices. Is Bluetooth '
-            'turned on?',
-      );
+      setState(() {
+        _needsBluetoothOn = true;
+        _error = 'Bluetooth is off. Turn it on to find your printer.';
+      });
+      return;
     }
 
-    // Discovering *new* (unpaired) devices needs scan/location permission.
-    // Without it we still show the paired list above rather than dead-ending.
+    // Known/bonded printers first — instant, and enough to reconnect.
+    for (final d in await BluetoothService.instance.knownDevices()) {
+      _addDevice(d, d.platformName);
+    }
+    if (!mounted) {
+      return;
+    }
+    setState(() {});
+
+    // Discovering *new* printers needs scan/location permission. Without it we
+    // still show the known list above rather than dead-ending.
     final canScan = await BluetoothService.instance.requestScanPermissions();
     if (!mounted) {
       return;
     }
     if (!canScan) {
       setState(() {
-        _scanning = false;
         _error =
             'Allow nearby-device scanning to find new printers. '
-            'Paired printers above still work.';
+            'Known printers above still work.';
       });
       return;
     }
 
-    await BluetoothService.instance.cancelDiscovery();
-    final stream = BluetoothService.instance.startDiscovery();
-    await for (final result in stream) {
+    await _scanResultsSub?.cancel();
+    _scanResultsSub = BluetoothService.instance.scanResults.listen((results) {
       if (!mounted) {
-        break;
+        return;
       }
-      final device = result.device;
-      if (!_discovered.any((d) => d.address == device.address)) {
-        setState(() => _discovered = [..._discovered, device]);
-      }
-    }
+      setState(() {
+        for (final r in results) {
+          final advName = r.advertisementData.advName;
+          _addDevice(
+            r.device,
+            advName.isNotEmpty ? advName : r.device.platformName,
+          );
+        }
+      });
+    });
 
-    if (mounted) {
-      setState(() => _scanning = false);
+    try {
+      await BluetoothService.instance.stopScan();
+      await BluetoothService.instance.startScan();
+    } on Exception {
+      if (!mounted) {
+        return;
+      }
+      setState(
+        () => _error = 'Could not start scanning. Make sure Bluetooth is on.',
+      );
     }
+  }
+
+  void _addDevice(BluetoothDevice device, String name) {
+    final id = device.remoteId.str;
+    _devices[id] = (device: device, name: name.isNotEmpty ? name : id);
   }
 
   Future<void> _disconnect() async {
     await ref.read(printerProvider.notifier).disconnect();
+  }
+
+  Future<void> _turnOnBluetooth() async {
+    final on = await BluetoothService.instance.requestEnableAdapter();
+    if (!mounted) {
+      return;
+    }
+    if (on) {
+      await _checkPermissionsAndScan();
+    } else {
+      setState(
+        () => _error =
+            'Bluetooth is still off. Turn it on in Quick Settings, then '
+            'tap Scan again.',
+      );
+    }
+  }
+
+  Future<void> _openSettings() async {
+    await BluetoothService.instance.openSettings();
   }
 
   Future<void> _reconnect() async {
@@ -115,7 +178,12 @@ class _PrinterScreenState extends ConsumerState<PrinterScreen> {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text('Reconnected')));
-    } on Exception {
+    } on PrinterException catch (e) {
+      if (!mounted) {
+        return;
+      }
+      setState(() => _error = e.message);
+    } on Object {
       if (!mounted) {
         return;
       }
@@ -127,26 +195,27 @@ class _PrinterScreenState extends ConsumerState<PrinterScreen> {
     }
   }
 
-  Future<void> _connect(BluetoothDevice device) async {
+  Future<void> _connect(BluetoothDevice device, String name) async {
     setState(() => _error = null);
-    await ref.read(printerProvider.notifier).connect(device);
+    await BluetoothService.instance.stopScan();
+    await ref.read(printerProvider.notifier).connect(device, name: name);
     if (!mounted) {
       return;
     }
 
     final result = ref.read(printerProvider);
     if (result.hasError) {
+      final err = result.error;
       setState(() {
-        _error =
-            'Could not connect to ${device.name ?? device.address}. '
-            'Make sure it is powered on and in range.';
+        _error = err is PrinterException
+            ? err.message
+            : 'Could not connect to $name. '
+                  'Make sure it is powered on and in range.';
       });
     } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Connected to ${device.name ?? device.address}'),
-        ),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Connected to $name')));
       Navigator.of(context).pop();
     }
   }
@@ -178,7 +247,9 @@ class _PrinterScreenState extends ConsumerState<PrinterScreen> {
 
   @override
   void dispose() {
-    BluetoothService.instance.cancelDiscovery();
+    _scanResultsSub?.cancel();
+    _scanStateSub?.cancel();
+    BluetoothService.instance.stopScan();
     super.dispose();
   }
 
@@ -204,7 +275,7 @@ class _PrinterScreenState extends ConsumerState<PrinterScreen> {
             IconButton(
               icon: const Icon(Icons.refresh),
               tooltip: 'Scan again',
-              onPressed: _scan,
+              onPressed: _checkPermissionsAndScan,
             ),
         ],
       ),
@@ -252,23 +323,48 @@ class _PrinterScreenState extends ConsumerState<PrinterScreen> {
           if (_error != null)
             Padding(
               padding: const EdgeInsets.all(16),
-              child: Text(
-                _error!,
-                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    _error!,
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.error,
+                    ),
+                  ),
+                  if (_needsBluetoothOn)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: FilledButton.icon(
+                        onPressed: _turnOnBluetooth,
+                        icon: const Icon(Icons.bluetooth),
+                        label: const Text('Turn on Bluetooth'),
+                      ),
+                    ),
+                  if (_needsSettings)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: FilledButton.icon(
+                        onPressed: _openSettings,
+                        icon: const Icon(Icons.settings),
+                        label: const Text('Open settings'),
+                      ),
+                    ),
+                ],
               ),
             ),
           const _SectionHeader('Available devices'),
-          if (_discovered.isEmpty && !_scanning)
+          if (_devices.isEmpty && !_scanning)
             const Padding(
               padding: EdgeInsets.all(16),
               child: Text('No devices found. Make sure the printer is on.'),
             ),
-          ..._discovered.map(
-            (device) => ListTile(
+          ..._devices.values.map(
+            (entry) => ListTile(
               leading: const Icon(Icons.bluetooth),
-              title: Text(device.name ?? 'Unknown device'),
-              subtitle: Text(device.address),
-              onTap: () => _connect(device),
+              title: Text(entry.name),
+              subtitle: Text(entry.device.remoteId.str),
+              onTap: () => _connect(entry.device, entry.name),
             ),
           ),
         ],

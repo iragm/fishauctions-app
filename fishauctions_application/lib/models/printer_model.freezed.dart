@@ -21,8 +21,15 @@ BluetoothPrinter _$BluetoothPrinterFromJson(Map<String, dynamic> json) {
 
 /// @nodoc
 mixin _$BluetoothPrinter {
+  // The BLE remote identifier (Android MAC, iOS OS-assigned UUID). Used to
+  // reconnect without a fresh scan via `BluetoothDevice.fromId`.
   String get address => throw _privateConstructorUsedError;
   String get name =>
+      throw _privateConstructorUsedError; // The GATT characteristic we write label bytes to, once discovered. Stored
+  // so a reconnect can target it directly instead of re-sniffing the device.
+  // Null until the printer has been connected at least once.
+  String? get serviceUuid => throw _privateConstructorUsedError;
+  String? get characteristicUuid =>
       throw _privateConstructorUsedError; // True while an active connection is open.
   bool get connected => throw _privateConstructorUsedError;
 
@@ -43,7 +50,13 @@ abstract class $BluetoothPrinterCopyWith<$Res> {
     $Res Function(BluetoothPrinter) then,
   ) = _$BluetoothPrinterCopyWithImpl<$Res, BluetoothPrinter>;
   @useResult
-  $Res call({String address, String name, bool connected});
+  $Res call({
+    String address,
+    String name,
+    String? serviceUuid,
+    String? characteristicUuid,
+    bool connected,
+  });
 }
 
 /// @nodoc
@@ -63,6 +76,8 @@ class _$BluetoothPrinterCopyWithImpl<$Res, $Val extends BluetoothPrinter>
   $Res call({
     Object? address = null,
     Object? name = null,
+    Object? serviceUuid = freezed,
+    Object? characteristicUuid = freezed,
     Object? connected = null,
   }) {
     return _then(
@@ -75,6 +90,14 @@ class _$BluetoothPrinterCopyWithImpl<$Res, $Val extends BluetoothPrinter>
                 ? _value.name
                 : name // ignore: cast_nullable_to_non_nullable
                       as String,
+            serviceUuid: freezed == serviceUuid
+                ? _value.serviceUuid
+                : serviceUuid // ignore: cast_nullable_to_non_nullable
+                      as String?,
+            characteristicUuid: freezed == characteristicUuid
+                ? _value.characteristicUuid
+                : characteristicUuid // ignore: cast_nullable_to_non_nullable
+                      as String?,
             connected: null == connected
                 ? _value.connected
                 : connected // ignore: cast_nullable_to_non_nullable
@@ -94,7 +117,13 @@ abstract class _$$BluetoothPrinterImplCopyWith<$Res>
   ) = __$$BluetoothPrinterImplCopyWithImpl<$Res>;
   @override
   @useResult
-  $Res call({String address, String name, bool connected});
+  $Res call({
+    String address,
+    String name,
+    String? serviceUuid,
+    String? characteristicUuid,
+    bool connected,
+  });
 }
 
 /// @nodoc
@@ -113,6 +142,8 @@ class __$$BluetoothPrinterImplCopyWithImpl<$Res>
   $Res call({
     Object? address = null,
     Object? name = null,
+    Object? serviceUuid = freezed,
+    Object? characteristicUuid = freezed,
     Object? connected = null,
   }) {
     return _then(
@@ -125,6 +156,14 @@ class __$$BluetoothPrinterImplCopyWithImpl<$Res>
             ? _value.name
             : name // ignore: cast_nullable_to_non_nullable
                   as String,
+        serviceUuid: freezed == serviceUuid
+            ? _value.serviceUuid
+            : serviceUuid // ignore: cast_nullable_to_non_nullable
+                  as String?,
+        characteristicUuid: freezed == characteristicUuid
+            ? _value.characteristicUuid
+            : characteristicUuid // ignore: cast_nullable_to_non_nullable
+                  as String?,
         connected: null == connected
             ? _value.connected
             : connected // ignore: cast_nullable_to_non_nullable
@@ -140,16 +179,27 @@ class _$BluetoothPrinterImpl implements _BluetoothPrinter {
   const _$BluetoothPrinterImpl({
     required this.address,
     required this.name,
+    this.serviceUuid,
+    this.characteristicUuid,
     this.connected = false,
   });
 
   factory _$BluetoothPrinterImpl.fromJson(Map<String, dynamic> json) =>
       _$$BluetoothPrinterImplFromJson(json);
 
+  // The BLE remote identifier (Android MAC, iOS OS-assigned UUID). Used to
+  // reconnect without a fresh scan via `BluetoothDevice.fromId`.
   @override
   final String address;
   @override
   final String name;
+  // The GATT characteristic we write label bytes to, once discovered. Stored
+  // so a reconnect can target it directly instead of re-sniffing the device.
+  // Null until the printer has been connected at least once.
+  @override
+  final String? serviceUuid;
+  @override
+  final String? characteristicUuid;
   // True while an active connection is open.
   @override
   @JsonKey()
@@ -157,7 +207,7 @@ class _$BluetoothPrinterImpl implements _BluetoothPrinter {
 
   @override
   String toString() {
-    return 'BluetoothPrinter(address: $address, name: $name, connected: $connected)';
+    return 'BluetoothPrinter(address: $address, name: $name, serviceUuid: $serviceUuid, characteristicUuid: $characteristicUuid, connected: $connected)';
   }
 
   @override
@@ -167,13 +217,24 @@ class _$BluetoothPrinterImpl implements _BluetoothPrinter {
             other is _$BluetoothPrinterImpl &&
             (identical(other.address, address) || other.address == address) &&
             (identical(other.name, name) || other.name == name) &&
+            (identical(other.serviceUuid, serviceUuid) ||
+                other.serviceUuid == serviceUuid) &&
+            (identical(other.characteristicUuid, characteristicUuid) ||
+                other.characteristicUuid == characteristicUuid) &&
             (identical(other.connected, connected) ||
                 other.connected == connected));
   }
 
   @JsonKey(includeFromJson: false, includeToJson: false)
   @override
-  int get hashCode => Object.hash(runtimeType, address, name, connected);
+  int get hashCode => Object.hash(
+    runtimeType,
+    address,
+    name,
+    serviceUuid,
+    characteristicUuid,
+    connected,
+  );
 
   /// Create a copy of BluetoothPrinter
   /// with the given fields replaced by the non-null parameter values.
@@ -196,16 +257,26 @@ abstract class _BluetoothPrinter implements BluetoothPrinter {
   const factory _BluetoothPrinter({
     required final String address,
     required final String name,
+    final String? serviceUuid,
+    final String? characteristicUuid,
     final bool connected,
   }) = _$BluetoothPrinterImpl;
 
   factory _BluetoothPrinter.fromJson(Map<String, dynamic> json) =
       _$BluetoothPrinterImpl.fromJson;
 
+  // The BLE remote identifier (Android MAC, iOS OS-assigned UUID). Used to
+  // reconnect without a fresh scan via `BluetoothDevice.fromId`.
   @override
   String get address;
   @override
-  String get name; // True while an active connection is open.
+  String get name; // The GATT characteristic we write label bytes to, once discovered. Stored
+  // so a reconnect can target it directly instead of re-sniffing the device.
+  // Null until the printer has been connected at least once.
+  @override
+  String? get serviceUuid;
+  @override
+  String? get characteristicUuid; // True while an active connection is open.
   @override
   bool get connected;
 

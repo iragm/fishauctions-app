@@ -11,6 +11,8 @@ _$BluetoothPrinterImpl _$$BluetoothPrinterImplFromJson(
 ) => _$BluetoothPrinterImpl(
   address: json['address'] as String,
   name: json['name'] as String,
+  serviceUuid: json['serviceUuid'] as String?,
+  characteristicUuid: json['characteristicUuid'] as String?,
   connected: json['connected'] as bool? ?? false,
 );
 
@@ -19,5 +21,7 @@ Map<String, dynamic> _$$BluetoothPrinterImplToJson(
 ) => <String, dynamic>{
   'address': instance.address,
   'name': instance.name,
+  'serviceUuid': instance.serviceUuid,
+  'characteristicUuid': instance.characteristicUuid,
   'connected': instance.connected,
 };

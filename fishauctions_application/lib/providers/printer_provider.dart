@@ -1,6 +1,6 @@
 import 'dart:convert';
 
-import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
+import 'package:flutter_blue_plus/flutter_blue_plus.dart' hide BluetoothService;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/printer_model.dart';
@@ -43,10 +43,13 @@ class PrinterNotifier extends AsyncNotifier<BluetoothPrinter?> {
 
   // ── Actions ───────────────────────────────────────────────────────────────
 
-  Future<void> connect(BluetoothDevice device) async {
+  Future<void> connect(BluetoothDevice device, {String? name}) async {
     state = const AsyncLoading();
     state = await AsyncValue.guard(() async {
-      final printer = await BluetoothService.instance.connect(device);
+      final printer = await BluetoothService.instance.connect(
+        device,
+        name: name,
+      );
       await _persist(printer);
       return printer;
     });
@@ -64,7 +67,7 @@ class PrinterNotifier extends AsyncNotifier<BluetoothPrinter?> {
     if (bt.isConnectedTo(saved.address)) {
       return saved;
     }
-    final printer = await bt.connectToAddress(saved.address, name: saved.name);
+    final printer = await bt.reconnect(saved);
     state = AsyncData(printer);
     await _persist(printer);
     return printer;

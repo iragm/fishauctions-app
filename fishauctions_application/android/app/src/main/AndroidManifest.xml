@@ -3,8 +3,9 @@
     <!-- Network -->
     <uses-permission android:name="android.permission.INTERNET"/>
 
-    <!-- Bluetooth (classic BT for thermal label printing — Android only) -->
+    <!-- Bluetooth Low Energy for thermal label printing (iOS + Android) -->
     <uses-feature android:name="android.hardware.bluetooth" android:required="false"/>
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="false"/>
     <uses-permission android:name="android.permission.BLUETOOTH"
         android:maxSdkVersion="30"/>
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN"
