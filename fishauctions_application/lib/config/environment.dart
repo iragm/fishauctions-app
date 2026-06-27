@@ -40,4 +40,14 @@ class EnvironmentConfig {
 
   // Custom URL scheme Flutter intercepts from the WebView.
   static const String urlScheme = 'fishauctions';
+
+  // Google Sign-In server (Web) OAuth client id. Native Google login asks the
+  // SDK for an ID token whose audience is THIS client id; the backend verifies
+  // it against the same id. It is not a secret (it ships in every web page's
+  // GSI button), so it can be hardcoded, but we read it from a --dart-define so
+  // forks can supply their own without editing code. Empty → the "Continue with
+  // Google" button reports that Google sign-in isn't configured.
+  static const String googleServerClientId = String.fromEnvironment(
+    'GOOGLE_SERVER_CLIENT_ID',
+  );
 }

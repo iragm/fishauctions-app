@@ -16,6 +16,13 @@ class AuthNotifier extends AsyncNotifier<AppUser?> {
     );
   }
 
+  Future<void> loginWithGoogle(String idToken) async {
+    state = const AsyncLoading();
+    state = await AsyncValue.guard(
+      () => AuthService.instance.loginWithGoogle(idToken),
+    );
+  }
+
   Future<void> logout() async {
     await AuthService.instance.logout();
     state = const AsyncData(null);

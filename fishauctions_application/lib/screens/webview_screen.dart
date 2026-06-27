@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -7,6 +9,7 @@ import 'package:webview_flutter/webview_flutter.dart';
 
 import '../config/environment.dart';
 import '../constants/app_constants.dart';
+import '../models/auth_models.dart';
 import '../providers/auth_provider.dart';
 import '../services/auth_service.dart';
 import '../services/location_service.dart';
@@ -23,10 +26,25 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     with WidgetsBindingObserver {
   late final WebViewController _controller;
   bool _loading = true;
-  bool _webLoggedIn = false;
   // The soft location banner is offered at most once per app session, the first
   // time the user reaches a location-aware screen. See _maybeOfferLocation.
   bool _locationOffered = false;
+
+  // ── Single sign-on bridging ───────────────────────────────────────────────
+  // The native JWT (authProvider) is the source of truth for "signed in". When
+  // it flips to signed-in we log the WebView's Django session in too, via the
+  // backend handoff, so one sign-in covers both. These guard that bridging:
+  //
+  // _sawInitialAuth  – skip the first authProvider resolution (session restore
+  //                    on launch); the WebView's own persisted cookie usually
+  //                    already covers it, and _reconcileWebSession repairs the
+  //                    rare case where it doesn't.
+  // _lastSignedIn    – the last signed-in state we acted on (edge detection).
+  // _handoffAttempts – at most one handoff per signed-in state, reset on every
+  //                    auth transition, so a failed/looping handoff can't spin.
+  bool _sawInitialAuth = false;
+  bool _lastSignedIn = false;
+  int _handoffAttempts = 0;
 
   @override
   void initState() {
@@ -65,19 +83,11 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   }
 
   Future<void> _initWebView() async {
-    // Try to inject a Django session cookie so the WebView is
-    // pre-authenticated. Falls back gracefully if not yet deployed.
-    final cookie = await AuthService.instance.getWebSessionCookie();
-    if (cookie != null) {
-      final uri = Uri.parse(EnvironmentConfig.webBaseUrl);
-      await WebViewCookieManager().setCookie(
-        WebViewCookie(
-          name: 'sessionid',
-          value: _extractSessionId(cookie) ?? '',
-          domain: uri.host,
-        ),
-      );
-    }
+    // The system WebView persists its cookies, so a returning signed-in user is
+    // usually still logged in here without any work. We don't block first paint
+    // on auth: if the native JWT is present but the web cookie has lapsed,
+    // _reconcileWebSession (on page-finished) silently re-establishes it.
+    //
     // If location is already granted, seed the cookies from the instant cached
     // fix so distances render on the first page without delaying it. We never
     // prompt at app open — that happens contextually on a location-aware screen
@@ -189,16 +199,6 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     }
   }
 
-  String? _extractSessionId(String cookieHeader) {
-    for (final part in cookieHeader.split(';')) {
-      final kv = part.trim().split('=');
-      if (kv.length >= 2 && kv[0].trim() == 'sessionid') {
-        return kv[1].trim();
-      }
-    }
-    return null;
-  }
-
   void _onPageStarted(String url) {
     // A new page load supersedes any location banner the user hasn't acted on,
     // so it doesn't float over an unrelated screen.
@@ -208,19 +208,135 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     setState(() => _loading = true);
   }
 
-  void _onPageFinished(String url) {
+  Future<void> _onPageFinished(String url) async {
+    if (mounted) {
+      setState(() => _loading = false);
+    }
     final uri = Uri.parse(url);
-    final onAuthPage =
-        uri.path.startsWith('/accounts/login') ||
-        uri.path.startsWith('/accounts/signup');
-    setState(() {
-      _loading = false;
-      _webLoggedIn = !onAuthPage;
-    });
     // On the auctions/lots screens, offer location in context (once per
     // session). The home page and everything else never triggers this.
-    _maybeOfferLocation(uri.path);
+    unawaited(_maybeOfferLocation(uri.path));
+    await _reconcileWebSession(uri);
   }
+
+  // ── WebView ↔ native session bridging ─────────────────────────────────────
+
+  /// Reacts to the native auth state changing. When the user signs in, log the
+  /// WebView's Django session in too (handoff) so one sign-in covers both. The
+  /// first resolution (session restore on launch) is skipped — the WebView
+  /// usually already holds a valid cookie, and _reconcileWebSession covers the
+  /// case it doesn't.
+  void _onAuthChanged(
+    AsyncValue<AppUser?>? previous,
+    AsyncValue<AppUser?> next,
+  ) {
+    if (next.isLoading) {
+      return;
+    }
+    final signedIn = next.valueOrNull != null;
+    if (!_sawInitialAuth) {
+      _sawInitialAuth = true;
+      _lastSignedIn = signedIn;
+      return;
+    }
+    if (signedIn == _lastSignedIn) {
+      return;
+    }
+    _lastSignedIn = signedIn;
+    _handoffAttempts = 0; // a new auth state gets a fresh handoff budget
+    if (signedIn) {
+      // Land back on the page the user was on, now authenticated.
+      _ensureWebSession();
+    }
+    // Sign-out needs no action here: the logout navigation clears the web
+    // session, and the menu follows authProvider.
+  }
+
+  /// Repairs session drift on each page load. The web navbar is hidden in-app
+  /// (the server detects the app from its User-Agent), so the reliable signal
+  /// that the WebView's session has lapsed is the server bouncing an
+  /// auth-required page to /accounts/login/:
+  ///  • signed in natively → run the handoff to re-establish the web session
+  ///    and resume the intended ?next= destination;
+  ///  • signed out → funnel sign-in through the native screen (the one front
+  ///    door for both sessions) rather than the web login form, which would
+  ///    create a web-only session with no JWT.
+  Future<void> _reconcileWebSession(Uri uri) async {
+    final webHost = Uri.parse(EnvironmentConfig.webBaseUrl).host;
+    if (uri.path != '/accounts/login/' || uri.host != webHost) {
+      return;
+    }
+    if (ref.read(authProvider).valueOrNull != null) {
+      await _ensureWebSession(next: uri.queryParameters['next']);
+    } else if (mounted) {
+      unawaited(context.push('/login'));
+    }
+  }
+
+  /// Logs the WebView into the Django session matching the native JWT, via the
+  /// backend handoff. Bounded to one attempt per signed-in state (reset on each
+  /// auth transition) so a failed handoff can't loop.
+  Future<void> _ensureWebSession({String? next}) async {
+    if (_handoffAttempts > 0) {
+      return;
+    }
+    _handoffAttempts++;
+    final target = next ?? await _currentWebPath();
+    final url = await AuthService.instance.createWebSessionHandoffUrl(
+      next: target,
+    );
+    if (url != null) {
+      await _controller.loadRequest(Uri.parse(url));
+    }
+  }
+
+  /// Path (+query) of the page currently in the WebView, for the post-handoff
+  /// landing page. Auth pages resolve to their ?next= target, not themselves.
+  Future<String?> _currentWebPath() async {
+    final current = await _controller.currentUrl();
+    if (current == null) {
+      return null;
+    }
+    final uri = Uri.parse(current);
+    if (uri.path.startsWith('/accounts/')) {
+      return uri.queryParameters['next'];
+    }
+    return _pathOf(uri);
+  }
+
+  String? _pathOf(Uri uri) {
+    final pathQuery = uri.path + (uri.hasQuery ? '?${uri.query}' : '');
+    return pathQuery.isEmpty ? null : pathQuery;
+  }
+
+  /// Sign out everywhere: drop the native JWT (drives the menu, releases
+  /// Square) and POST the web logout so Django clears its session cookie.
+  /// allauth requires POST + CSRF, so submit a form carrying the csrftoken
+  /// cookie rather than navigating by GET.
+  Future<void> _signOut() async {
+    await ref.read(authProvider.notifier).logout();
+    await _controller.runJavaScript(_logoutFormJs);
+  }
+
+  // Submits a real POST to the allauth logout view, carrying the CSRF token
+  // from the cookie (logout is POST-only; a GET just renders a confirm page).
+  static const String _logoutFormJs = '''
+(function(){
+  var m = document.cookie.match(/(?:^|; )csrftoken=([^;]+)/);
+  var f = document.createElement('form');
+  f.method = 'POST';
+  f.action = '/accounts/logout/';
+  if (m) {
+    var i = document.createElement('input');
+    i.type = 'hidden';
+    i.name = 'csrfmiddlewaretoken';
+    i.value = decodeURIComponent(m[1]);
+    f.appendChild(i);
+  }
+  document.body.appendChild(f);
+  f.submit();
+})();
+''';
 
   void _loadPath(String path) {
     _controller.loadRequest(Uri.parse('${EnvironmentConfig.webBaseUrl}$path'));
@@ -257,14 +373,18 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       return NavigationDecision.prevent;
     }
 
-    // When the user logs out via the website, also clear the native JWT
-    // session and drop the WebView's own cookies so no stale session lingers.
+    // A logout anywhere — our menu or the in-page web sign-out — must also drop
+    // the native JWT so the two sessions stay in lockstep. The server clears
+    // the session cookie on its own logout response, so we don't touch WebView
+    // cookies here (clearing them would strip the CSRF cookie the POST needs).
     // Scope this to our own host so an external page (e.g. a social-login
-    // redirect) that happens to use the same path can't log the user out.
+    // redirect) that happens to use the same path can't log the user out. Skip
+    // if already signed out, so our menu's own logout doesn't double-fire.
     final webHost = Uri.parse(EnvironmentConfig.webBaseUrl).host;
-    if (uri.path == '/accounts/logout/' && uri.host == webHost) {
+    if (uri.path == '/accounts/logout/' &&
+        uri.host == webHost &&
+        ref.read(authProvider).valueOrNull != null) {
       ref.read(authProvider.notifier).logout();
-      WebViewCookieManager().clearCookies();
     }
 
     return NavigationDecision.navigate;
@@ -289,104 +409,151 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     }
   }
 
-  Widget _buildDrawer(BuildContext ctx) => Drawer(
-    child: SafeArea(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 20, 16, 12),
-            child: Text(
-              AppConstants.appName,
-              style: Theme.of(
-                ctx,
-              ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
-            ),
-          ),
-          const Divider(height: 1),
-          Expanded(
-            child: ListView(
-              padding: EdgeInsets.zero,
-              children: [
-                _navTile(ctx, Icons.gavel, 'Auctions', '/auctions/'),
-                _navTile(ctx, Icons.grid_view, 'Lots', '/lots/all/'),
-                _navTile(ctx, Icons.sell, 'Selling', '/selling/'),
-                _navTile(
+  Widget _buildDrawer(BuildContext ctx) {
+    // The native JWT is the single source of truth for "signed in": a sign-in
+    // (here or via Google) bridges into the web session, so this one flag
+    // drives both the account links and the sign-in/out controls. No more
+    // drift, and no sign-out button while signed out.
+    final signedIn = ref.watch(authProvider).valueOrNull != null;
+    return Drawer(
+      child: SafeArea(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 20, 16, 12),
+              child: Text(
+                AppConstants.appName,
+                style: Theme.of(
                   ctx,
-                  Icons.favorite_border,
-                  'Watched lots',
-                  '/lots/watched/',
-                ),
-                _navTile(ctx, Icons.groups, 'Clubs', '/clubs/'),
-                ExpansionTile(
-                  leading: const Icon(Icons.info_outline),
-                  title: const Text('About'),
-                  children: [
-                    _navTile(ctx, null, 'FAQ', '/faq/', indent: true),
+                ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
+              ),
+            ),
+            const Divider(height: 1),
+            Expanded(
+              child: ListView(
+                padding: EdgeInsets.zero,
+                children: [
+                  // Browsing is open to everyone — always shown.
+                  _navTile(ctx, Icons.gavel, 'Auctions', '/auctions/'),
+                  _navTile(ctx, Icons.grid_view, 'Lots', '/lots/all/'),
+                  _navTile(ctx, Icons.groups, 'Clubs', '/clubs/'),
+                  // The full account menu, mirroring the website navbar.
+                  if (signedIn) ...[
+                    const Divider(),
+                    _sectionHeader(ctx, 'My lots'),
+                    _navTile(ctx, Icons.sell, 'Selling', '/selling/'),
                     _navTile(
                       ctx,
-                      null,
-                      'Terms & Conditions',
-                      '/tos/',
-                      indent: true,
+                      Icons.favorite_border,
+                      'Watched lots',
+                      '/lots/watched/',
+                    ),
+                    _navTile(ctx, Icons.monetization_on, 'Bids', '/bids/'),
+                    _navTile(ctx, Icons.emoji_events, 'Won lots', '/lots/won/'),
+                    const Divider(),
+                    _sectionHeader(ctx, 'Account'),
+                    _navTile(
+                      ctx,
+                      Icons.account_circle,
+                      'Account information',
+                      '/account/',
+                    ),
+                    _navTile(ctx, Icons.receipt_long, 'Invoices', '/invoices/'),
+                    _navTile(
+                      ctx,
+                      Icons.chat_bubble_outline,
+                      'Messages',
+                      '/messages/',
+                    ),
+                    _navTile(
+                      ctx,
+                      Icons.contact_phone,
+                      'Contact info',
+                      '/contact_info/',
+                    ),
+                    _navTile(ctx, Icons.tune, 'Preferences', '/preferences/'),
+                    _navTile(
+                      ctx,
+                      Icons.label_outline,
+                      'Label printing',
+                      '/printing/',
+                    ),
+                    _navTile(ctx, Icons.block, 'Ignore categories', '/ignore/'),
+                    _navTile(
+                      ctx,
+                      Icons.feedback_outlined,
+                      'Feedback',
+                      '/feedback/',
                     ),
                   ],
-                ),
-                const Divider(),
-                if (_webLoggedIn)
-                  _navTile(ctx, Icons.logout, 'Sign out', '/accounts/logout/')
-                else ...[
-                  _navTile(ctx, Icons.login, 'Sign in', '/accounts/login/'),
-                  _navTile(
-                    ctx,
-                    Icons.person_add,
-                    'Create account',
-                    '/accounts/signup/',
+                  const Divider(),
+                  ExpansionTile(
+                    leading: const Icon(Icons.info_outline),
+                    title: const Text('About'),
+                    children: [
+                      _navTile(ctx, null, 'FAQ', '/faq/', indent: true),
+                      _navTile(
+                        ctx,
+                        null,
+                        'Terms & Conditions',
+                        '/tos/',
+                        indent: true,
+                      ),
+                    ],
                   ),
+                  // Native hardware setup — not a web page.
+                  ListTile(
+                    leading: const Icon(Icons.print),
+                    title: const Text('Printer setup'),
+                    onTap: () {
+                      Navigator.of(ctx).pop();
+                      context.push('/settings/printer');
+                    },
+                  ),
+                  const Divider(),
+                  if (signedIn)
+                    ListTile(
+                      leading: const Icon(Icons.logout),
+                      title: const Text('Sign out'),
+                      onTap: () {
+                        Navigator.of(ctx).pop();
+                        unawaited(_signOut());
+                      },
+                    )
+                  else ...[
+                    ListTile(
+                      leading: const Icon(Icons.login),
+                      title: const Text('Sign in'),
+                      onTap: () {
+                        Navigator.of(ctx).pop();
+                        context.push('/login');
+                      },
+                    ),
+                    _navTile(
+                      ctx,
+                      Icons.person_add,
+                      'Create account',
+                      '/accounts/signup/',
+                    ),
+                  ],
                 ],
-                const Divider(),
-                const Padding(
-                  padding: EdgeInsets.fromLTRB(16, 4, 16, 8),
-                  child: Text(
-                    'Browsing and app features (payments, printing) sign in '
-                    'separately.',
-                    style: TextStyle(fontSize: 12, color: Colors.grey),
-                  ),
-                ),
-                if (ref.watch(authProvider).valueOrNull == null)
-                  ListTile(
-                    leading: const Icon(Icons.lock_open),
-                    title: const Text('Sign in for app features'),
-                    subtitle: const Text('Payments, printing & search'),
-                    onTap: () {
-                      Navigator.of(ctx).pop();
-                      context.push('/login');
-                    },
-                  )
-                // Web logout already clears the native session too, so only
-                // surface a separate app sign-out when the two have drifted:
-                // signed in for app features but logged out on the website.
-                else if (!_webLoggedIn)
-                  ListTile(
-                    leading: const Icon(Icons.logout),
-                    title: const Text('Sign out of app features'),
-                    onTap: () {
-                      Navigator.of(ctx).pop();
-                      ref.read(authProvider.notifier).logout();
-                    },
-                  ),
-                ListTile(
-                  leading: const Icon(Icons.print),
-                  title: const Text('Printer setup'),
-                  onTap: () {
-                    Navigator.of(ctx).pop();
-                    context.push('/settings/printer');
-                  },
-                ),
-              ],
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _sectionHeader(BuildContext ctx, String text) => Padding(
+    padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
+    child: Text(
+      text.toUpperCase(),
+      style: Theme.of(ctx).textTheme.labelSmall?.copyWith(
+        color: Theme.of(ctx).colorScheme.primary,
+        fontWeight: FontWeight.bold,
+        letterSpacing: 0.8,
       ),
     ),
   );
@@ -407,29 +574,34 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   );
 
   @override
-  Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(
-      automaticallyImplyLeading: false,
-      title: GestureDetector(
-        onTap: _onTitleTap,
-        child: const Text(AppConstants.appName),
-      ),
-      actions: [
-        Builder(
-          builder: (ctx) => IconButton(
-            icon: const Icon(Icons.menu),
-            tooltip: 'Menu',
-            onPressed: Scaffold.of(ctx).openEndDrawer,
-          ),
+  Widget build(BuildContext context) {
+    // When the native session signs in, bridge it into the WebView's Django
+    // session (and reset bridging state on sign-out). See _onAuthChanged.
+    ref.listen<AsyncValue<AppUser?>>(authProvider, _onAuthChanged);
+    return Scaffold(
+      appBar: AppBar(
+        automaticallyImplyLeading: false,
+        title: GestureDetector(
+          onTap: _onTitleTap,
+          child: const Text(AppConstants.appName),
         ),
-      ],
-    ),
-    endDrawer: Builder(builder: _buildDrawer),
-    body: Stack(
-      children: [
-        WebViewWidget(controller: _controller),
-        if (_loading) const LinearProgressIndicator(minHeight: 3),
-      ],
-    ),
-  );
+        actions: [
+          Builder(
+            builder: (ctx) => IconButton(
+              icon: const Icon(Icons.menu),
+              tooltip: 'Menu',
+              onPressed: Scaffold.of(ctx).openEndDrawer,
+            ),
+          ),
+        ],
+      ),
+      endDrawer: Builder(builder: _buildDrawer),
+      body: Stack(
+        children: [
+          WebViewWidget(controller: _controller),
+          if (_loading) const LinearProgressIndicator(minHeight: 3),
+        ],
+      ),
+    );
+  }
 }

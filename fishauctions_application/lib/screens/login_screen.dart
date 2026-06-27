@@ -3,15 +3,18 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../constants/app_constants.dart';
 import '../providers/auth_provider.dart';
 import '../services/auth_service.dart';
+import '../services/social_auth_service.dart';
 
-/// Native sign-in for the JWT-backed mobile API (payments, label printing,
-/// command palette). The WebView keeps its own cookie session for browsing;
-/// this screen is what makes the *native* features authenticate.
+/// The app's single sign-in. Email/username + password and "Continue with
+/// Google" both produce the JWT the native features (payments, label printing,
+/// command palette) use; the WebView shell then bridges that same session into
+/// its Django cookie session, so one sign-in authenticates browsing too.
 ///
-/// Shown automatically by the router when an unauthenticated user opens a
-/// feature that needs the API; [from] is the location to return to afterwards.
+/// Shown by the router when an unauthenticated user opens a feature that needs
+/// the API, or from the menu; [from] is the location to return to afterwards.
 class LoginScreen extends ConsumerStatefulWidget {
   const LoginScreen({this.from, super.key});
 
@@ -60,8 +63,54 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       });
       return;
     }
+    await _afterAuthSuccess();
+  }
 
-    // Signed in — register this device (best-effort) and return to the caller.
+  Future<void> _signInWithGoogle() async {
+    setState(() {
+      _submitting = true;
+      _error = null;
+    });
+
+    final String? idToken;
+    try {
+      idToken = await SocialAuthService.instance.signInForIdToken();
+    } on GoogleSignInUnavailable catch (e) {
+      setState(() {
+        _submitting = false;
+        _error = e.message;
+      });
+      return;
+    } on Object catch (_) {
+      setState(() {
+        _submitting = false;
+        _error = 'Could not start Google sign-in. Please try again.';
+      });
+      return;
+    }
+    if (idToken == null) {
+      // The user dismissed the Google account picker — not an error.
+      setState(() => _submitting = false);
+      return;
+    }
+
+    await ref.read(authProvider.notifier).loginWithGoogle(idToken);
+    if (!mounted) {
+      return;
+    }
+    final state = ref.read(authProvider);
+    if (state.hasError) {
+      setState(() {
+        _submitting = false;
+        _error = _googleMessageFor(state.error);
+      });
+      return;
+    }
+    await _afterAuthSuccess();
+  }
+
+  // Signed in — register this device (best-effort) and return to the caller.
+  Future<void> _afterAuthSuccess() async {
     await AuthService.instance.registerThisDevice();
     if (!mounted) {
       return;
@@ -87,6 +136,14 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     return 'Could not sign in. Check your connection and try again.';
   }
 
+  String _googleMessageFor(Object? error) {
+    if (error is DioException && error.response?.statusCode == 404) {
+      return "Google sign-in isn't available yet. Please use your email and "
+          'password for now.';
+    }
+    return 'Could not sign in with Google. Please try again.';
+  }
+
   @override
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(title: const Text('Sign in')),
@@ -100,7 +157,8 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
             children: [
               const SizedBox(height: 8),
               Text(
-                'Sign in to use payments and label printing.',
+                'Sign in to your ${AppConstants.appName} account. One sign-in '
+                'covers browsing, payments and label printing.',
                 style: Theme.of(context).textTheme.bodyMedium,
               ),
               const SizedBox(height: 24),
@@ -151,6 +209,35 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                         child: CircularProgressIndicator(strokeWidth: 2),
                       )
                     : const Text('Sign in'),
+              ),
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  const Expanded(child: Divider()),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    child: Text(
+                      'or',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ),
+                  const Expanded(child: Divider()),
+                ],
+              ),
+              const SizedBox(height: 16),
+              // No Google wordmark asset is bundled yet; the Material "G" glyph
+              // is a placeholder — swap for the brand asset before release.
+              OutlinedButton.icon(
+                onPressed: _submitting ? null : _signInWithGoogle,
+                icon: const Icon(Icons.g_mobiledata, size: 28),
+                label: const Text('Continue with Google'),
+              ),
+              const SizedBox(height: 8),
+              // Browsing never requires an account, so always offer a way back
+              // to the WebView home (the gated target would just bounce here).
+              TextButton(
+                onPressed: _submitting ? null : () => context.go('/'),
+                child: const Text('Not now — keep browsing'),
               ),
             ],
           ),

@@ -28,6 +28,11 @@ dependencies:
   geolocator: ^14.0.2
   # Navigation
   go_router: ^14.6.2
+  # Native Google Sign-In. Google blocks OAuth/One-Tap inside embedded WebViews,
+  # so Google login happens natively: the SDK returns an ID token which the
+  # backend (/api/mobile/auth/google/) verifies and exchanges for a JWT. Needs a
+  # Web OAuth client id in EnvironmentConfig.googleServerClientId.
+  google_sign_in: ^7.2.0
   # PNG decode → 1-bit packing for label rasters (pure Dart, test-friendly).
   image: ^4.3.0
   json_annotation: ^4.9.0
