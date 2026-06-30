@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../models/command_palette_models.dart';
+import '../services/command_palette_logger.dart';
 import '../services/command_palette_service.dart';
 
 /// Opens the command palette as a full-screen dialog.
@@ -30,14 +31,11 @@ class _CommandPaletteDialog extends StatefulWidget {
 class _CommandPaletteDialogState extends State<_CommandPaletteDialog> {
   final _textController = TextEditingController();
   final _focusNode = FocusNode();
+  final _logger = CommandPaletteLogger();
   Timer? _debounce;
 
   List<PaletteGroup> _groups = [];
   bool _loading = false;
-  int? _sessionId;
-  int _lastResultCount = 0;
-  bool _hasSearched = false;
-  String _currentQuery = '';
 
   @override
   void initState() {
@@ -47,6 +45,10 @@ class _CommandPaletteDialogState extends State<_CommandPaletteDialog> {
 
   @override
   void dispose() {
+    // The dispose-time page-hide analog: finalizes the search however the
+    // palette was dismissed (back gesture, programmatic pop, …), not just via
+    // the close button. The once-guard in the logger keeps it to one write.
+    _logger.finalize();
     _debounce?.cancel();
     _textController.dispose();
     _focusNode.dispose();
@@ -54,31 +56,27 @@ class _CommandPaletteDialogState extends State<_CommandPaletteDialog> {
   }
 
   Future<void> _fetchResults(String q) async {
+    // Record the query before results load, so it survives the user navigating
+    // away mid-request (the whole point of a command palette is to leave).
+    if (q.isNotEmpty) {
+      _logger.recordPending(q);
+    }
     setState(() => _loading = true);
     try {
       final groups = await CommandPaletteService.instance.search(q);
       final count = groups.fold(0, (sum, g) => sum + g.items.length);
+      // Refine before the mounted check — the log must land even if the widget
+      // is gone (e.g. the user already tapped a result).
+      if (q.isNotEmpty) {
+        _logger.recordResults(q, count);
+      }
       if (!mounted) {
         return;
       }
       setState(() {
         _groups = groups;
-        _lastResultCount = count;
         _loading = false;
       });
-      if (q.isNotEmpty) {
-        _hasSearched = true;
-        _currentQuery = q;
-        final result = count > 0 ? 'pending' : 'bounce';
-        final id = await CommandPaletteService.instance.log(
-          id: _sessionId,
-          search: q,
-          result: result,
-        );
-        if (mounted) {
-          _sessionId = id;
-        }
-      }
     } on Exception catch (_) {
       if (mounted) {
         setState(() => _loading = false);
@@ -108,28 +106,17 @@ class _CommandPaletteDialogState extends State<_CommandPaletteDialog> {
       return;
     }
 
-    // Fire-and-forget: don't block navigation on the log round-trip.
-    CommandPaletteService.instance.log(
-      id: _sessionId,
-      search: _currentQuery,
-      result: 'clicked',
-      resultType: item.type,
-      resultUrl: item.url,
-      resultObjectId: item.id,
-    );
+    // The click is the search's terminal outcome; the logger marks the session
+    // finalized so the dispose-time finalizer won't also record an abandon.
+    // The write survives the navigation we're about to trigger.
+    _logger.recordClick(type: item.type, url: item.url, objectId: item.id);
 
     Navigator.of(context).pop();
     widget.navigateToPath(item.url);
   }
 
   void _handleClose() {
-    if (_hasSearched && _lastResultCount > 0) {
-      CommandPaletteService.instance.log(
-        id: _sessionId,
-        search: _currentQuery,
-        result: 'abandoned',
-      );
-    }
+    _logger.finalize();
     Navigator.of(context).pop();
   }
 
@@ -237,6 +224,9 @@ class _CommandPaletteDialogState extends State<_CommandPaletteDialog> {
                           icon: const Icon(Icons.clear),
                           tooltip: 'Clear',
                           onPressed: () {
+                            // Clearing abandons the current search and starts
+                            // over — finalize it, then begin a fresh session.
+                            _logger.reset();
                             _textController.clear();
                             _fetchResults('');
                           },
