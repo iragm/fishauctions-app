@@ -49,6 +49,9 @@ dependencies:
   square_mobile_payments_sdk: ^2026.5.1
   # WebView
   webview_flutter: ^4.10.0
+  # Android implementation, imported directly to bridge the WebView's camera
+  # permission request to a native runtime prompt (web check-in barcode scanner).
+  webview_flutter_android: ^4.3.0
 
 dev_dependencies:
   build_runner: ^2.4.8

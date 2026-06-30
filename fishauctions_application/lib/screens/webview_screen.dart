@@ -5,7 +5,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:go_router/go_router.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:webview_flutter/webview_flutter.dart';
+import 'package:webview_flutter_android/webview_flutter_android.dart';
 
 import '../config/environment.dart';
 import '../constants/app_constants.dart';
@@ -62,7 +64,42 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       ..setUserAgent(
         'FishAuctionsApp/1.0 (Flutter; ${defaultTargetPlatform.name})',
       );
+    _enableWebViewCamera();
     _initWebView();
+  }
+
+  /// The web check-in screen scans barcodes through the browser camera
+  /// (`getUserMedia`). The system WebView denies that by default, so bridge its
+  /// permission request to a native runtime prompt: when the page asks for the
+  /// camera we request Android's CAMERA permission and grant the WebView only
+  /// if the user allows it. Requests we can't satisfy (e.g. the microphone,
+  /// which the app declares no permission for) are denied so the page fails
+  /// fast rather than hanging on a request that could never succeed.
+  ///
+  /// Android-only: iOS WKWebView drives its own prompt from the Info.plist
+  /// camera usage string, and the iOS flavor isn't wired up yet.
+  void _enableWebViewCamera() {
+    final platform = _controller.platform;
+    if (platform is! AndroidWebViewController) {
+      return;
+    }
+    platform.setOnPlatformPermissionRequest((request) async {
+      // Only the camera is something we can satisfy, so handle the lone-camera
+      // request and deny anything else (including camera+microphone bundles).
+      final wantsOnlyCamera =
+          request.types.length == 1 &&
+          request.types.contains(WebViewPermissionResourceType.camera);
+      if (!wantsOnlyCamera) {
+        await request.deny();
+        return;
+      }
+      final status = await Permission.camera.request();
+      if (status.isGranted) {
+        await request.grant();
+      } else {
+        await request.deny();
+      }
+    });
   }
 
   @override
