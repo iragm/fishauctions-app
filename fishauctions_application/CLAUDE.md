@@ -116,10 +116,13 @@ Credentials are resolved **per invoice** on the backend (the invoice's
 POST /api/mobile/payments/create/
   Body:    { "invoice_pk": 123 }
   Returns: { "invoice_pk", "amount" ("15.00"), "currency",
-             "location_id", "access_token",
+             "location_id", "access_token", "square_application_id",
              "square_environment", "idempotency_key",
              "reference_id" }   ← reference_id: app MUST tap with this exact value
   (Requires the authenticated operator to be an auction/club admin.)
+  ← square_application_id: the deployment's PUBLIC Square app id; the app
+    initializes the SDK with it (see flow step 2). Required — without it the
+    SDK can't initialize and Tap to Pay fails. NOT the secret access_token.
 
 POST /api/mobile/payments/confirm/
   Body:    { "invoice_pk": 123, "payment_id": "<Square payment id>",
@@ -127,11 +130,18 @@ POST /api/mobile/payments/confirm/
   Returns: { "payment_id", "status", "receipt_number" }
 ```
 
+The screen **auto-starts the tap** as soon as the invoice loads — the cashier
+never presses a "Tap to Pay" button on the happy path (it only reappears as the
+explicit retry after a cancel).
+
 **Payment flow:**
 1. `/payments/create/` → per-invoice amount + seller `access_token` +
-   `location_id` + `reference_id`
-2. App calls the SDK's `authorize(accessToken, locationId)` (re-auth if the
-   device was authorized for a different seller)
+   `location_id` + `reference_id` + `square_application_id`
+2. App initializes the Square SDK with `square_application_id` (once per
+   process, via the `com.fishauctions.app/platform` channel →
+   `MobilePaymentsSdk.initialize`; the Flutter plugin doesn't expose
+   `initialize`), then calls `authorize(accessToken, locationId)` (re-auth if
+   the device was authorized for a different seller)
 3. SDK runs the Tap to Pay prompt **with the backend's `reference_id`** →
    captures the card on-device → completed `Payment` with an id
 4. App posts the Square `payment_id` to `/payments/confirm/`
@@ -139,12 +149,23 @@ POST /api/mobile/payments/confirm/
    matches what it issued, and marks the invoice PAID. A mismatched (or
    client-invented) reference_id is rejected.
 
-**Backend status:** the `create`/`confirm` endpoints above are implemented on
-`iragm/fishauctions`. `create` returns the per-invoice seller `access_token`
-(`square_application_id` from the old nonce flow is gone), and `confirm` verifies
-the on-device `payment_id` via Square's GetPayment — checking status, amount, and
+**Why the app id comes from the backend:** so a single app binary can serve any
+deployment (a fork's own Square account/env) without baking Square config in —
+the same reason the backend URL is moving to runtime config. The
+`square_application_id` is the deployment's *public* integrator app id (it ships
+in every build by design; the web SDK embeds it in page HTML), distinct from the
+secret `access_token`. It is environment-specific (sandbox-sq0idb-… vs
+sq0idp-…), so it must agree with `square_environment`. The SDK has no
+re-initialize, so the app initializes once per process and refuses a *different*
+app id mid-session (switch deployments → restart).
+
+**Backend status:** the `create`/`confirm` endpoints are implemented on
+`iragm/fishauctions`. `create` must include `square_application_id` in its
+response (this is what the app initializes the SDK with — if it's missing the
+app rejects the response and Tap to Pay can't start). `confirm` verifies the
+on-device `payment_id` via Square's GetPayment — checking status, amount, and
 the issued `reference_id` — then records it idempotently and marks the invoice
-PAID. Nothing server-side is pending for Tap to Pay.
+PAID.
 
 Runtime Tap to Pay still needs: a real NFC device on API 31+, Square production
 approval for Tap to Pay, and the iOS Tap to Pay entitlement (iOS not wired yet).

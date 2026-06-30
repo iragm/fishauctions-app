@@ -64,3 +64,14 @@ kotlin {
 flutter {
     source = "../.."
 }
+
+dependencies {
+    // MainActivity initializes the Square SDK just-in-time (from the app id the
+    // backend returns per invoice), so the app module needs the SDK on its
+    // compile classpath. The square_mobile_payments_sdk plugin pulls the same
+    // artifact as `implementation`, which doesn't expose it here. Keep this
+    // version in sync with squareSdkVersion in the plugin's android/build.gradle
+    // (currently 2.5.0); the Square maven repo is declared in the root
+    // android/build.gradle.kts.
+    implementation("com.squareup.sdk:mobile-payments-sdk:2.5.0")
+}

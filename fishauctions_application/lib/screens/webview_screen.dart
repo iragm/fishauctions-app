@@ -10,6 +10,7 @@ import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
 
 import '../config/environment.dart';
+import '../config/theme.dart';
 import '../constants/app_constants.dart';
 import '../models/auth_models.dart';
 import '../providers/auth_provider.dart';
@@ -54,6 +55,9 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     WidgetsBinding.instance.addObserver(this);
     _controller = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      // Match the loaded page's dark background so the pre-paint window doesn't
+      // flash white over the otherwise-dark UI.
+      ..setBackgroundColor(AppTheme.scaffoldBackground)
       ..setNavigationDelegate(
         NavigationDelegate(
           onPageStarted: _onPageStarted,

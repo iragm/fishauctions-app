@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'config/router.dart';
+import 'config/theme.dart';
 import 'constants/app_constants.dart';
 
 void main() {
@@ -18,10 +19,12 @@ class FishAuctionsApp extends ConsumerWidget {
     return MaterialApp.router(
       title: AppConstants.appName,
       routerConfig: router,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
-        useMaterial3: true,
-      ),
+      // The WebView content is forced-dark, so the native chrome is dark too,
+      // always — never follow the system light/dark setting (that would put a
+      // light shell around a dark page).
+      theme: AppTheme.dark,
+      darkTheme: AppTheme.dark,
+      themeMode: ThemeMode.dark,
     );
   }
 }

@@ -1,6 +1,8 @@
 import 'package:logger/logger.dart';
 import 'package:square_mobile_payments_sdk/square_mobile_payments_sdk.dart';
 
+import '../utils/android_platform.dart';
+
 final _log = Logger();
 
 /// Outcome of a completed Tap to Pay charge. [paymentId] is the Square payment
@@ -34,13 +36,20 @@ class SquarePaymentService {
 
   /// Authorizes the SDK for [locationId] using the per-invoice [accessToken].
   ///
+  /// [applicationId] is the deployment's Square Application ID (from the
+  /// backend); the SDK is initialized with it first, since authorize() can't
+  /// run on an uninitialized SDK. Initialization is once-per-process and
+  /// idempotent (see [AndroidPlatform.initializeSquare]).
+  ///
   /// Different invoices can belong to different sellers, so if the device is
   /// already authorized for a *different* location we deauthorize and switch.
   /// No-op when already authorized for [locationId].
   Future<void> ensureAuthorized({
+    required String applicationId,
     required String accessToken,
     required String locationId,
   }) async {
+    await AndroidPlatform.initializeSquare(applicationId);
     if (await isAuthorized) {
       final current = await _sdk.authManager.getAuthorizedLocation();
       if (current?.id == locationId) {

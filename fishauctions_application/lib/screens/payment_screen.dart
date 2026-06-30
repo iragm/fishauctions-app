@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -9,6 +11,10 @@ import '../services/square_payment_service.dart';
 
 /// Square Tap to Pay checkout screen. Mirrors the web "quick checkout" page,
 /// but takes a contactless tap instead of showing a QR code.
+///
+/// The tap starts automatically once the invoice loads (step 3 below fires off
+/// the back of step 1) — the cashier never presses a "Tap to Pay" button on the
+/// happy path. That button only reappears as the explicit retry after a cancel.
 ///
 /// Flow:
 ///   1. POST /payments/create/ → amount, currency, idempotency key,
@@ -74,6 +80,12 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
         _ctx = ctx;
         _phase = _Phase.ready;
       });
+      // Auto-start the tap so the cashier doesn't have to press an extra
+      // button — the Square prompt comes up on its own as soon as the invoice
+      // loads. A user cancel drops back to _ReadyView, whose manual "Tap to
+      // Pay" button is then the explicit retry. _startTapToPay re-guards _ctx
+      // and the capture state, so this is safe to fire-and-forget here.
+      unawaited(_startTapToPay());
     } on DioException catch (e) {
       _fail(_detail(e) ?? 'Could not load invoice. Please try again.');
     } on FormatException catch (e) {
@@ -94,6 +106,7 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
     final square = SquarePaymentService.instance;
     try {
       await square.ensureAuthorized(
+        applicationId: ctx.applicationId,
         accessToken: ctx.accessToken,
         locationId: ctx.locationId,
       );
@@ -257,12 +270,14 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
 enum _Phase { loading, ready, processing, success, error }
 
 /// Parsed `/payments/create/` response (fields resolved per invoice on the
-/// backend). [accessToken] + [locationId] authorize the Square SDK for the
-/// invoice's seller; [amountCents] is the amount in integer minor units;
-/// [referenceId] must be passed to Square verbatim so the backend can match
-/// the charge at confirm time.
+/// backend). [applicationId] initializes the Square SDK for the deployment;
+/// [accessToken] + [locationId] then authorize it for the invoice's seller;
+/// [amountCents] is the amount in integer minor units; [referenceId] must be
+/// passed to Square verbatim so the backend can match the charge at confirm
+/// time.
 class _PaymentContext {
   const _PaymentContext({
+    required this.applicationId,
     required this.amountCents,
     required this.amountDisplay,
     required this.currency,
@@ -282,6 +297,13 @@ class _PaymentContext {
     if (accessToken == null || locationId == null) {
       throw const FormatException('missing access_token/location_id');
     }
+    // The deployment's Square Application ID — used to initialize the SDK
+    // before authorize(). Returned by the backend so nothing Square-specific is
+    // baked into the app binary.
+    final applicationId = json['square_application_id'] as String?;
+    if (applicationId == null || applicationId.isEmpty) {
+      throw const FormatException('missing square_application_id');
+    }
     final key = json['idempotency_key'] as String?;
     if (key == null) {
       throw const FormatException('missing idempotency_key');
@@ -294,6 +316,7 @@ class _PaymentContext {
     }
     final currency = json['currency'] as String? ?? 'USD';
     return _PaymentContext(
+      applicationId: applicationId,
       amountCents: _toMinorUnits(amount, currency),
       amountDisplay: amount,
       currency: currency,
@@ -304,6 +327,7 @@ class _PaymentContext {
     );
   }
 
+  final String applicationId;
   final int amountCents;
   final String amountDisplay;
   final String currency;
