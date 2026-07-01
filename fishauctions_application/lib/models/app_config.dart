@@ -9,12 +9,14 @@ class AppConfig {
   const AppConfig({
     required this.squareApplicationId,
     required this.squareEnvironment,
+    required this.googleServerClientId,
     required this.brandName,
   });
 
   factory AppConfig.fromJson(Map<String, dynamic> json) => AppConfig(
     squareApplicationId: _str(json['square_application_id']),
     squareEnvironment: _str(json['square_environment']),
+    googleServerClientId: _str(json['google_server_client_id']),
     brandName: _str(json['brand_name']),
   );
 
@@ -29,6 +31,13 @@ class AppConfig {
   /// prefix); used for a sanity check against that prefix — see
   /// [squareConfigConsistent] — and for logging.
   final String squareEnvironment;
+
+  /// Google (Web) OAuth client id for native sign-in, read at launch from
+  /// `/api/mobile/config/`. Native Google login asks the SDK for an ID token
+  /// whose audience is this id; the backend verifies it against the same id.
+  /// Not a secret (it ships in every web page's GSI button). Empty → the
+  /// "Continue with Google" button reports sign-in isn't configured here.
+  final String googleServerClientId;
 
   /// The deployment's brand, shown as the app-bar title and drawer header
   /// (see `WebViewScreen`). Empty → the UI falls back to the compile-time

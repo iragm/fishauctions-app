@@ -1,6 +1,6 @@
 import 'package:google_sign_in/google_sign_in.dart';
 
-import '../config/environment.dart';
+import 'config_service.dart';
 
 /// Thrown when Google sign-in can't proceed for a configuration/platform
 /// reason (as opposed to the user simply cancelling, which returns null).
@@ -26,17 +26,27 @@ class SocialAuthService {
     if (_initialized) {
       return;
     }
-    if (EnvironmentConfig.googleServerClientId.isEmpty) {
+    // The Web OAuth client id is deployment config, read from
+    // /api/mobile/config/ at launch (cached by ConfigService, warmed at
+    // startup) — so one binary serves any deployment without a baked-in id.
+    final String clientId;
+    try {
+      clientId = (await ConfigService.instance.load()).googleServerClientId;
+    } on Object {
       throw GoogleSignInUnavailable(
-        'Google sign-in is not configured for this build.',
+        'Couldn\'t load sign-in configuration. Check your connection and try '
+        'again.',
+      );
+    }
+    if (clientId.isEmpty) {
+      throw GoogleSignInUnavailable(
+        'Google sign-in is not configured for this deployment.',
       );
     }
     // serverClientId is the Web OAuth client id; it makes the SDK mint an ID
     // token whose audience the backend can verify. initialize() is required
     // before authenticate() in google_sign_in v7 and is safe to call once.
-    await _google.initialize(
-      serverClientId: EnvironmentConfig.googleServerClientId,
-    );
+    await _google.initialize(serverClientId: clientId);
     _initialized = true;
   }
 

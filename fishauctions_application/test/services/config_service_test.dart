@@ -7,14 +7,13 @@ void main() {
       final config = AppConfig.fromJson({
         'square_application_id': 'sandbox-sq0idb-abc123',
         'square_environment': 'sandbox',
-        // Unknown keys (e.g. google_server_client_id, dropped from the model)
-        // are tolerated and ignored.
-        'google_server_client_id': 'ignored',
+        'google_server_client_id': 'gcid-123',
         'brand_name': 'staging',
       });
 
       expect(config.squareApplicationId, 'sandbox-sq0idb-abc123');
       expect(config.squareEnvironment, 'sandbox');
+      expect(config.googleServerClientId, 'gcid-123');
       expect(config.brandName, 'staging');
       expect(config.hasSquare, isTrue);
       expect(config.squareConfigConsistent, isTrue);
