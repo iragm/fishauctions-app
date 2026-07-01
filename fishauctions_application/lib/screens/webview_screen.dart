@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:go_router/go_router.dart';
@@ -34,6 +35,11 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     with WidgetsBindingObserver {
   late final WebViewController _controller;
   bool _loading = true;
+  // Whether the WebView has back-history. Drives the leading back arrow's
+  // visibility and is kept in sync after each page settles (see
+  // _refreshCanGoBack). The system back button consults canGoBack() live, so it
+  // doesn't depend on this.
+  bool _canGoBack = false;
   // The soft location banner is offered at most once per app session, the first
   // time the user reaches a location-aware screen. See _maybeOfferLocation.
   bool _locationOffered = false;
@@ -282,11 +288,34 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     if (mounted) {
       setState(() => _loading = false);
     }
+    unawaited(_refreshCanGoBack());
     final uri = Uri.parse(url);
     // On the auctions/lots screens, offer location in context (once per
     // session). The home page and everything else never triggers this.
     unawaited(_maybeOfferLocation(uri.path));
     await _reconcileWebSession(uri);
+  }
+
+  /// Keeps [_canGoBack] in sync with the WebView's history so the leading back
+  /// arrow shows only when there's somewhere to go back to. Called after each
+  /// page settles — including after a goBack, which re-fires onPageFinished.
+  Future<void> _refreshCanGoBack() async {
+    final canGoBack = await _controller.canGoBack();
+    if (mounted && canGoBack != _canGoBack) {
+      setState(() => _canGoBack = canGoBack);
+    }
+  }
+
+  /// Back navigation shared by the Android system back button/gesture (via the
+  /// PopScope in build) and the on-screen arrow: step back through WebView
+  /// history if there's any, otherwise this is a real "leave the app" back at
+  /// the site root, so exit the task rather than sitting on a dead root page.
+  Future<void> _handleBack() async {
+    if (await _controller.canGoBack()) {
+      await _controller.goBack();
+    } else {
+      await SystemNavigator.pop();
+    }
   }
 
   /// Launches Tap to Pay for [invoicePk] when the cashier taps the checkout
@@ -723,26 +752,48 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     // session (and reset bridging state on sign-out). See _onAuthChanged.
     ref.listen<AsyncValue<AppUser?>>(authProvider, _onAuthChanged);
     final brand = _brandName;
-    return Scaffold(
-      appBar: AppBar(
-        automaticallyImplyLeading: false,
-        title: GestureDetector(onTap: _onTitleTap, child: Text(brand)),
-        actions: [
-          Builder(
-            builder: (ctx) => IconButton(
-              icon: const Icon(Icons.menu),
-              tooltip: 'Menu',
-              onPressed: Scaffold.of(ctx).openEndDrawer,
+    // Back navigation lives on the system back button/gesture (below) for
+    // Android; canPop stays false so we route it through WebView history first
+    // and only leave the app when there's none left.
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) {
+          unawaited(_handleBack());
+        }
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          automaticallyImplyLeading: false,
+          // On-screen back arrow, shown only when there's WebView history to
+          // pop. Covers iOS (no hardware back) and discoverability; the brand
+          // stays as the title. Falls back to null so the brand sits at the
+          // leading edge on the home page, as before.
+          leading: _canGoBack
+              ? IconButton(
+                  icon: const Icon(Icons.arrow_back),
+                  tooltip: 'Back',
+                  onPressed: () => unawaited(_handleBack()),
+                )
+              : null,
+          title: GestureDetector(onTap: _onTitleTap, child: Text(brand)),
+          actions: [
+            Builder(
+              builder: (ctx) => IconButton(
+                icon: const Icon(Icons.menu),
+                tooltip: 'Menu',
+                onPressed: Scaffold.of(ctx).openEndDrawer,
+              ),
             ),
-          ),
-        ],
-      ),
-      endDrawer: Builder(builder: (ctx) => _buildDrawer(ctx, brand)),
-      body: Stack(
-        children: [
-          WebViewWidget(controller: _controller),
-          if (_loading) const LinearProgressIndicator(minHeight: 3),
-        ],
+          ],
+        ),
+        endDrawer: Builder(builder: (ctx) => _buildDrawer(ctx, brand)),
+        body: Stack(
+          children: [
+            WebViewWidget(controller: _controller),
+            if (_loading) const LinearProgressIndicator(minHeight: 3),
+          ],
+        ),
       ),
     );
   }
