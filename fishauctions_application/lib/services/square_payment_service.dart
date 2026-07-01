@@ -1,3 +1,5 @@
+import 'dart:io' show Platform;
+
 import 'package:logger/logger.dart';
 import 'package:square_mobile_payments_sdk/square_mobile_payments_sdk.dart';
 
@@ -32,7 +34,17 @@ class SquarePaymentService {
 
   /// Whether this physical device can take a Tap to Pay payment at all
   /// (Android: NFC + API 31+); otherwise a charge fails as unsupported.
-  Future<bool> isDeviceCapable() => _sdk.tapToPaySettings.isDeviceCapable();
+  ///
+  /// On Android the answer comes from the platform, not the SDK: the Square
+  /// Flutter plugin's `tapToPaySettings.isDeviceCapable()` is iOS-only and
+  /// throws `MissingPluginException` on Android. iOS (not wired yet) uses the
+  /// SDK call.
+  Future<bool> isDeviceCapable() {
+    if (Platform.isAndroid) {
+      return AndroidPlatform.isTapToPayCapable();
+    }
+    return _sdk.tapToPaySettings.isDeviceCapable();
+  }
 
   /// Authorizes the SDK for [locationId] using the per-invoice [accessToken].
   ///

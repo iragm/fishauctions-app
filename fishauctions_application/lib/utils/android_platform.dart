@@ -27,6 +27,25 @@ class AndroidPlatform {
     }
   }
 
+  /// Whether this device can take a Square Tap to Pay charge — NFC hardware +
+  /// API 31+. Answered natively because the Square Flutter plugin's own
+  /// `isDeviceCapable()` is iOS-only (on Android it hits `notImplemented()` and
+  /// throws `MissingPluginException`). Returns false on non-Android platforms
+  /// and on any channel error, so a missing gate never blocks the app — it just
+  /// reports "not capable".
+  static Future<bool> isTapToPayCapable() async {
+    if (!Platform.isAndroid) {
+      return false;
+    }
+    try {
+      return await _channel.invokeMethod<bool>('isTapToPayCapable') ?? false;
+    } on PlatformException {
+      return false;
+    } on MissingPluginException {
+      return false;
+    }
+  }
+
   /// Initializes the Square Mobile Payments SDK with [applicationId] (the
   /// deployment's Square Application ID, from `/api/mobile/config/`). Must run
   /// once before any authorize()/charge() call — the Square Flutter plugin

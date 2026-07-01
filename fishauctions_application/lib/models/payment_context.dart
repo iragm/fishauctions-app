@@ -71,6 +71,24 @@ class PaymentContext {
   final String referenceId;
   final String? applicationId;
 
+  /// Human label for the charge (e.g. `$15.00`), shown in the tap sheet so the
+  /// cashier can confirm the amount before the card touches the device. Uses a
+  /// symbol for common currencies, else the ISO code (e.g. `MXN 15.00`).
+  String get amountLabel {
+    const symbols = {
+      'USD': r'$',
+      'CAD': r'$',
+      'AUD': r'$',
+      'EUR': '€',
+      'GBP': '£',
+      'JPY': '¥',
+    };
+    final symbol = symbols[currency.toUpperCase()];
+    return symbol != null
+        ? '$symbol$amountDisplay'
+        : '$currency $amountDisplay';
+  }
+
   // Most currencies use 2 minor-unit decimals; a few (JPY) use 0. Anything not
   // listed defaults to 2.
   static const _zeroDecimalCurrencies = {'JPY'};

@@ -1,5 +1,6 @@
 package com.fishauctions.app
 
+import android.content.pm.PackageManager
 import android.os.Build
 import com.squareup.sdk.mobilepayments.MobilePaymentsSdk
 import io.flutter.embedding.android.FlutterActivity
@@ -15,10 +16,20 @@ class MainActivity : FlutterActivity() {
             .setMethodCallHandler { call, result ->
                 when (call.method) {
                     "getSdkInt" -> result.success(Build.VERSION.SDK_INT)
+                    "isTapToPayCapable" -> result.success(isTapToPayCapable())
                     "initializeSquare" -> initializeSquare(call.argument("applicationId"), result)
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    // Whether this device can take a Square Tap to Pay charge: NFC hardware plus
+    // Android 12 (API 31+). The Square Flutter plugin's own isDeviceCapable() is
+    // iOS-only (it routes to notImplemented() on Android and throws), so the
+    // Android capability gate has to be answered here from the platform.
+    private fun isTapToPayCapable(): Boolean {
+        val hasNfc = packageManager.hasSystemFeature(PackageManager.FEATURE_NFC)
+        return hasNfc && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
     }
 
     // Initializes the Square Mobile Payments SDK with the deployment's Square

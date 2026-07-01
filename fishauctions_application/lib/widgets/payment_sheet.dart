@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:square_mobile_payments_sdk/square_mobile_payments_sdk.dart';
 
+import '../models/app_config.dart';
 import '../models/payment_context.dart';
 import '../providers/config_provider.dart';
 import '../services/api_service.dart';
@@ -71,6 +72,15 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
   String? _capturedPaymentId;
   bool _captureOutstanding = false;
 
+  /// Terminal, unrecoverable capture: the card was charged but the app can
+  /// never finish confirming it from here (no payment id came back, or confirm
+  /// has failed too many times). The only action left is to dismiss with a
+  /// reconcile message — never a re-charge. Distinct from
+  /// [_captureOutstanding], which still has a viable "Finish Payment" retry.
+  bool _stranded = false;
+  int _confirmAttempts = 0;
+  static const _maxConfirmAttempts = 3;
+
   @override
   void initState() {
     super.initState();
@@ -88,6 +98,8 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
     // de-dupes and the card is never charged twice for one invoice.
     _capturedPaymentId = null;
     _captureOutstanding = false;
+    _stranded = false;
+    _confirmAttempts = 0;
     setState(() {
       _phase = _Phase.loading;
       _error = null;
@@ -128,7 +140,20 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
       // The Square SDK is initialized from /api/mobile/config/ (warmed at
       // startup). Prefer that app id; fall back to the create response only if
       // config didn't load. No app id at all → Tap to Pay isn't set up.
-      final appId = await _resolveApplicationId(ctx);
+      final cfg = await _loadConfig();
+      // Catch a deployment misconfiguration (e.g. a production app id declared
+      // `sandbox`) here, loudly, rather than letting it surface as an opaque
+      // authorize/charge failure at the reader.
+      if (cfg != null && cfg.hasSquare && !cfg.squareConfigConsistent) {
+        _fail(
+          'Tap to Pay is misconfigured for this auction (Square environment '
+          'mismatch). Please contact the organizer.',
+        );
+        return;
+      }
+      final appId = (cfg != null && cfg.hasSquare)
+          ? cfg.squareApplicationId
+          : ctx.applicationId;
       if (appId == null) {
         _fail('Tap to Pay isn\'t set up for this auction.');
         return;
@@ -162,9 +187,15 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
       _capturedPaymentId = result.paymentId;
       _captureOutstanding = true;
       if (_capturedPaymentId == null) {
+        // Charged, but with no id there is nothing to confirm — this can never
+        // be finished from the app. Mark it terminal so the sheet offers a
+        // dismiss (with a reconcile message) instead of a dead "Finish Payment"
+        // that would re-post a null id forever.
+        _stranded = true;
         _fail(
-          'The card was charged, but the reader did not return a payment id. '
-          'Please check the invoice before charging again.',
+          'The card was charged, but the reader did not return a payment id, '
+          'so we can\'t record it automatically. Check the invoice — reconcile '
+          'it in Square if it stays unpaid. You will not be charged again.',
         );
         return;
       }
@@ -186,20 +217,20 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
     }
   }
 
-  /// The Square Application ID to initialize/authorize with. Config is the
-  /// source of truth (warmed at startup, cached); the create response's app id
-  /// is only a fallback for when config failed to load.
-  Future<String?> _resolveApplicationId(PaymentContext ctx) async {
+  /// The deployment config (Square app id + environment), or null if it hasn't
+  /// loaded and can't be fetched. Config is the source of truth (warmed at
+  /// startup, cached); the caller falls back to the create response's app id
+  /// when this is null.
+  Future<AppConfig?> _loadConfig() async {
     final cached = ConfigService.instance.cached;
     if (cached != null) {
-      return cached.hasSquare ? cached.squareApplicationId : ctx.applicationId;
+      return cached;
     }
     try {
-      final cfg = await ref.read(configProvider.future);
-      return cfg.hasSquare ? cfg.squareApplicationId : ctx.applicationId;
+      return await ref.read(configProvider.future);
     } on Exception {
-      // Config fetch failed — fall back to whatever create provided.
-      return ctx.applicationId;
+      // Config fetch failed — caller falls back to the create response.
+      return null;
     }
   }
 
@@ -246,6 +277,20 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
         Navigator.of(context).pop(PaymentResult.paid);
       }
     } on DioException catch (e) {
+      _confirmAttempts++;
+      if (_confirmAttempts >= _maxConfirmAttempts) {
+        // Repeated confirm failures (offline, or the backend rejecting) would
+        // otherwise trap the cashier behind a "Finish Payment" button that
+        // never succeeds. After a few tries, make it dismissible with a
+        // reconcile message — the charge is safe on Square either way.
+        _stranded = true;
+        _fail(
+          'The card was charged, but we could not record it after several '
+          'tries. Check the invoice — it may update shortly; otherwise '
+          'reconcile it in Square. You will not be charged again.',
+        );
+        return;
+      }
       _fail(
         _detail(e) ??
             'The card was charged, but we could not confirm it. Tap to finish '
@@ -279,7 +324,9 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
   // dismissed before the payment is confirmed (the card has been charged).
   @override
   Widget build(BuildContext context) => PopScope(
-    canPop: !_captureOutstanding,
+    // Block back-dismissal only while a charge is outstanding AND still
+    // recoverable. Once stranded (terminal), the sheet must be dismissible.
+    canPop: !_captureOutstanding || _stranded,
     child: SafeArea(
       child: Padding(
         padding: EdgeInsets.only(
@@ -290,15 +337,20 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
         ),
         child: switch (_phase) {
           _Phase.loading => _LoadingView(onCancel: _popCancelled),
-          _Phase.processing => const _ProcessingView(),
+          _Phase.processing => _ProcessingView(amountLabel: _ctx?.amountLabel),
           _Phase.success => _SuccessView(receipt: _error),
           _Phase.error => _ErrorView(
             message: _error ?? 'Something went wrong.',
-            // While a capture is outstanding, retry must re-confirm the same
-            // payment, not start a new charge — and there's no "close" out.
-            onRetry: _captureOutstanding ? _confirmCaptured : _createPayment,
-            retryLabel: _captureOutstanding ? 'Finish Payment' : 'Try Again',
-            onClose: _captureOutstanding ? null : _popCancelled,
+            // Stranded (terminal): no retry, dismiss only. Otherwise, while a
+            // capture is outstanding, retry must re-confirm the same payment,
+            // not start a new charge — and there's no "close" out.
+            onRetry: _stranded
+                ? null
+                : (_captureOutstanding ? _confirmCaptured : _createPayment),
+            retryLabel: _stranded
+                ? null
+                : (_captureOutstanding ? 'Finish Payment' : 'Try Again'),
+            onClose: (_stranded || !_captureOutstanding) ? _popCancelled : null,
           ),
         },
       ),
@@ -327,20 +379,28 @@ class _LoadingView extends StatelessWidget {
 }
 
 class _ProcessingView extends StatelessWidget {
-  const _ProcessingView();
+  const _ProcessingView({this.amountLabel});
+
+  /// The amount being charged (e.g. `$15.00`), shown so the cashier can confirm
+  /// it before the card touches the device. Null until the invoice has loaded.
+  final String? amountLabel;
 
   @override
-  Widget build(BuildContext context) => const Column(
+  Widget build(BuildContext context) => Column(
     mainAxisSize: MainAxisSize.min,
     children: [
-      Icon(Icons.contactless, size: 64),
-      SizedBox(height: 16),
-      Text(
+      const Icon(Icons.contactless, size: 64),
+      if (amountLabel != null) ...[
+        const SizedBox(height: 12),
+        Text(amountLabel!, style: Theme.of(context).textTheme.headlineSmall),
+      ],
+      const SizedBox(height: 16),
+      const Text(
         'Hold the card near the top of this device…',
         textAlign: TextAlign.center,
       ),
-      SizedBox(height: 16),
-      CircularProgressIndicator(),
+      const SizedBox(height: 16),
+      const CircularProgressIndicator(),
     ],
   );
 }
@@ -372,14 +432,14 @@ class _SuccessView extends StatelessWidget {
 class _ErrorView extends StatelessWidget {
   const _ErrorView({
     required this.message,
-    required this.onRetry,
-    required this.retryLabel,
+    this.onRetry,
+    this.retryLabel,
     this.onClose,
   });
 
   final String message;
-  final VoidCallback onRetry;
-  final String retryLabel;
+  final VoidCallback? onRetry;
+  final String? retryLabel;
   final VoidCallback? onClose;
 
   @override
@@ -395,7 +455,9 @@ class _ErrorView extends StatelessWidget {
       const SizedBox(height: 16),
       Text(message, textAlign: TextAlign.center),
       const SizedBox(height: 24),
-      FilledButton(onPressed: onRetry, child: Text(retryLabel)),
+      // Stranded errors have no retry — dismiss only.
+      if (onRetry != null && retryLabel != null)
+        FilledButton(onPressed: onRetry, child: Text(retryLabel!)),
       if (onClose != null) ...[
         const SizedBox(height: 8),
         TextButton(onPressed: onClose, child: const Text('Close')),

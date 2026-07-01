@@ -115,7 +115,10 @@ class ApiService {
   /// Dev-only request logger that never prints secrets. Bodies of auth and
   /// payment calls (passwords, JWTs, Square access tokens) are redacted, and
   /// the Authorization header is masked on every request.
-  static const _sensitivePaths = ['auth/login', 'auth/refresh', 'payments/'];
+  // Redact everything under auth/ (login/refresh credentials, the Google
+  // id_token on auth/google, and the single-use session-handoff token that
+  // auth/web-session returns) and all payments/ (Square access tokens, amounts).
+  static const _sensitivePaths = ['auth/', 'payments/'];
 
   static bool _isSensitive(String path) => _sensitivePaths.any(path.contains);
 

@@ -69,6 +69,24 @@ void main() {
     });
   });
 
+  group('amountLabel', () {
+    String label(String amount, String currency) => PaymentContext.fromJson(
+      _base(amount: amount, currency: currency),
+    ).amountLabel;
+
+    test('uses a symbol for common currencies', () {
+      expect(label('15.00', 'USD'), r'$15.00');
+      expect(label('15.00', 'CAD'), r'$15.00');
+      expect(label('9.50', 'EUR'), '€9.50');
+      expect(label('9.50', 'GBP'), '£9.50');
+      expect(label('1500', 'JPY'), '¥1500');
+    });
+
+    test('falls back to the ISO code for other currencies', () {
+      expect(label('15.00', 'MXN'), 'MXN 15.00');
+    });
+  });
+
   group('minor-unit money math (via amountCents)', () {
     int cents(String amount, {String currency = 'USD'}) =>
         PaymentContext.fromJson(

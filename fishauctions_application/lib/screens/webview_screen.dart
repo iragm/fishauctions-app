@@ -366,7 +366,16 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
         }
         return;
       }
-      if (!await SquarePaymentService.instance.isDeviceCapable()) {
+      // Never let a capability-probe failure escape as an unhandled async
+      // error (this runs from a nav-delegate callback / deep link); treat any
+      // throw as "not capable" and tell the cashier.
+      bool capable;
+      try {
+        capable = await SquarePaymentService.instance.isDeviceCapable();
+      } on Object {
+        capable = false;
+      }
+      if (!capable) {
         _showSnack(
           'This device can\'t take Tap to Pay — it needs NFC and Android 12 '
           'or newer.',
@@ -523,6 +532,15 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     _loadPath(path);
   }
 
+  /// Brand for the app-bar title and drawer header. Server-driven via
+  /// `GET /api/mobile/config/` (`brand_name`); until that resolves — and for
+  /// forks whose config omits it — falls back to the compile-time
+  /// [AppConstants.appName]. Watched, so the title updates once config loads.
+  String get _brandName {
+    final b = ref.watch(configProvider).valueOrNull?.brandName;
+    return (b == null || b.isEmpty) ? AppConstants.appName : b;
+  }
+
   void _onTitleTap() {
     // The command palette is backed by the JWT API, so it needs a native
     // sign-in. Prompt for one if missing; otherwise open search.
@@ -587,7 +605,7 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     }
   }
 
-  Widget _buildDrawer(BuildContext ctx) {
+  Widget _buildDrawer(BuildContext ctx, String brand) {
     // The native JWT is the single source of truth for "signed in": a sign-in
     // (here or via Google) bridges into the web session, so this one flag
     // drives both the account links and the sign-in/out controls. No more
@@ -601,7 +619,7 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 20, 16, 12),
               child: Text(
-                AppConstants.appName,
+                brand,
                 style: Theme.of(
                   ctx,
                 ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
@@ -756,13 +774,11 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     // When the native session signs in, bridge it into the WebView's Django
     // session (and reset bridging state on sign-out). See _onAuthChanged.
     ref.listen<AsyncValue<AppUser?>>(authProvider, _onAuthChanged);
+    final brand = _brandName;
     return Scaffold(
       appBar: AppBar(
         automaticallyImplyLeading: false,
-        title: GestureDetector(
-          onTap: _onTitleTap,
-          child: const Text(AppConstants.appName),
-        ),
+        title: GestureDetector(onTap: _onTitleTap, child: Text(brand)),
         actions: [
           Builder(
             builder: (ctx) => IconButton(
@@ -773,7 +789,7 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
           ),
         ],
       ),
-      endDrawer: Builder(builder: _buildDrawer),
+      endDrawer: Builder(builder: (ctx) => _buildDrawer(ctx, brand)),
       body: Stack(
         children: [
           WebViewWidget(controller: _controller),

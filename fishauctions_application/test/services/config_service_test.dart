@@ -7,15 +7,64 @@ void main() {
       final config = AppConfig.fromJson({
         'square_application_id': 'sandbox-sq0idb-abc123',
         'square_environment': 'sandbox',
-        'google_server_client_id': '',
+        // Unknown keys (e.g. google_server_client_id, dropped from the model)
+        // are tolerated and ignored.
+        'google_server_client_id': 'ignored',
         'brand_name': 'staging',
       });
 
       expect(config.squareApplicationId, 'sandbox-sq0idb-abc123');
       expect(config.squareEnvironment, 'sandbox');
-      expect(config.googleServerClientId, '');
       expect(config.brandName, 'staging');
       expect(config.hasSquare, isTrue);
+      expect(config.squareConfigConsistent, isTrue);
+    });
+
+    group('squareConfigConsistent', () {
+      test('sandbox id + sandbox env is consistent', () {
+        final config = AppConfig.fromJson({
+          'square_application_id': 'sandbox-sq0idb-abc',
+          'square_environment': 'sandbox',
+        });
+        expect(config.squareConfigConsistent, isTrue);
+      });
+
+      test('production id + production env is consistent', () {
+        final config = AppConfig.fromJson({
+          'square_application_id': 'sq0idp-abc',
+          'square_environment': 'production',
+        });
+        expect(config.squareConfigConsistent, isTrue);
+      });
+
+      test('production id declared sandbox is a mismatch', () {
+        final config = AppConfig.fromJson({
+          'square_application_id': 'sq0idp-abc',
+          'square_environment': 'sandbox',
+        });
+        expect(config.squareConfigConsistent, isFalse);
+      });
+
+      test('sandbox id declared production is a mismatch', () {
+        final config = AppConfig.fromJson({
+          'square_application_id': 'sandbox-sq0idb-abc',
+          'square_environment': 'production',
+        });
+        expect(config.squareConfigConsistent, isFalse);
+      });
+
+      test('no app id is trivially consistent', () {
+        final config = AppConfig.fromJson({'square_environment': 'production'});
+        expect(config.squareConfigConsistent, isTrue);
+      });
+
+      test('unrecognized environment is not flagged', () {
+        final config = AppConfig.fromJson({
+          'square_application_id': 'sq0idp-abc',
+          'square_environment': '',
+        });
+        expect(config.squareConfigConsistent, isTrue);
+      });
     });
 
     test('hasSquare is false when the app id is empty', () {
