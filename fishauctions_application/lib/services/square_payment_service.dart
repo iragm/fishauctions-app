@@ -1,6 +1,7 @@
 import 'dart:io' show Platform;
 
 import 'package:logger/logger.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:square_mobile_payments_sdk/square_mobile_payments_sdk.dart';
 
 import '../utils/android_platform.dart';
@@ -45,6 +46,39 @@ class SquarePaymentService {
     }
     return _sdk.tapToPaySettings.isDeviceCapable();
   }
+
+  /// Ensures the runtime fine-location permission that Square Tap to Pay
+  /// requires on Android. Without it, [charge] fails with
+  /// [PaymentErrorCode.locationPermissionNeeded] (the native
+  /// `payment_no_permission_location`) — location is a card-present fraud
+  /// signal for the reader, unrelated to our distance-cookie use of location.
+  ///
+  /// The permission is declared in the manifest but must be granted at runtime.
+  /// The only other place that prompts for it (`LocationService`) fires solely
+  /// on the auctions/lots web pages, so a cashier who goes straight to checkout
+  /// would never have granted it — hence we request it here before the tap.
+  ///
+  /// Returns whether it's granted. Prompts once if the user hasn't decided; a
+  /// permanent denial returns false without a prompt (see
+  /// [isLocationPermanentlyDenied]). No-op → true off Android (iOS Tap to Pay
+  /// isn't wired yet).
+  Future<bool> ensureLocationPermission() async {
+    if (!Platform.isAndroid) {
+      return true;
+    }
+    final status = await Permission.locationWhenInUse.request();
+    return status.isGranted;
+  }
+
+  /// True once location permission is permanently denied ("Don't ask again"):
+  /// [ensureLocationPermission] can no longer prompt, so the only fix is the OS
+  /// settings screen ([openSettings]).
+  Future<bool> isLocationPermanentlyDenied() =>
+      Permission.locationWhenInUse.isPermanentlyDenied;
+
+  /// Opens this app's OS settings so the cashier can grant a permission they
+  /// previously denied permanently.
+  Future<void> openSettings() => openAppSettings();
 
   /// Authorizes the SDK for [locationId] using the per-invoice [accessToken].
   ///

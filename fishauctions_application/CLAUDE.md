@@ -130,9 +130,14 @@ POST /api/mobile/payments/confirm/
   Returns: { "payment_id", "status", "receipt_number" }
 ```
 
-The screen **auto-starts the tap** as soon as the invoice loads — the cashier
-never presses a "Tap to Pay" button on the happy path (it only reappears as the
-explicit retry after a cancel).
+The cashier launches the charge by tapping the checkout page's **"Tap to Pay"
+button** (the `fishauctions://pay/<pk>` deep link the WebView intercepts). We
+deliberately do **not** auto-start on invoice load: a Square charge takes over
+the whole screen (its own full-screen Android Activity — mandatory, per Square's
+docs), so the cashier opts in with an explicit tap rather than being dropped
+into a full-screen prompt the instant the invoice renders. Once the sheet is
+open the tap proceeds automatically (create → authorize → charge); the button is
+also the retry after a cancel.
 
 **Payment flow:**
 1. `/payments/create/` → per-invoice amount + seller `access_token` +

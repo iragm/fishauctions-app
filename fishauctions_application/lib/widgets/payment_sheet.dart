@@ -81,6 +81,17 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
   int _confirmAttempts = 0;
   static const _maxConfirmAttempts = 3;
 
+  /// Location permission is permanently denied, so the error view offers "Open
+  /// Settings" (a re-request can no longer prompt) instead of a "Try Again"
+  /// that would silently no-op.
+  bool _needsSettings = false;
+
+  /// What the processing spinner says. The same [_Phase.processing] covers two
+  /// different network waits — starting the reader (pre-tap) and confirming the
+  /// captured payment (post-tap) — so each sets an honest label. Never claims
+  /// "hold the card": Square's own full-screen Activity owns the tap UI.
+  String _processingMessage = '';
+
   @override
   void initState() {
     super.initState();
@@ -99,6 +110,7 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
     _capturedPaymentId = null;
     _captureOutstanding = false;
     _stranded = false;
+    _needsSettings = false;
     _confirmAttempts = 0;
     setState(() {
       _phase = _Phase.loading;
@@ -132,6 +144,7 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
     }
     setState(() {
       _phase = _Phase.processing;
+      _processingMessage = 'Starting the card reader…';
       _error = null;
     });
 
@@ -172,6 +185,14 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
         return;
       }
 
+      // Square won't start a Tap to Pay charge without runtime location
+      // permission — request it before the tap so a denial surfaces here with a
+      // clear message instead of an opaque reader failure mid-charge.
+      if (!await square.ensureLocationPermission()) {
+        _failNeedsLocation(await square.isLocationPermanentlyDenied());
+        return;
+      }
+
       final result = await square.charge(
         amountCents: ctx.amountCents,
         currencyCode: ctx.currency,
@@ -206,6 +227,19 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
         // User backed out of the Square prompt — dismiss the sheet so the
         // page's own "Tap to Pay" button can relaunch. Nothing was charged.
         _popCancelled();
+        return;
+      }
+      if (e.code == PaymentErrorCode.locationPermissionNeeded) {
+        // Permission was revoked between our check and the tap (or the OS
+        // denied it anyway) — treat it like the pre-charge gate.
+        _failNeedsLocation(await square.isLocationPermanentlyDenied());
+        return;
+      }
+      if (e.code == PaymentErrorCode.locationServicesDisabled) {
+        _fail(
+          'Turn on Location (GPS) in your device settings, then try again — '
+          'Square Tap to Pay requires it.',
+        );
         return;
       }
       _fail('Payment failed: ${e.message}');
@@ -244,6 +278,7 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
     }
     setState(() {
       _phase = _Phase.processing;
+      _processingMessage = 'Confirming payment…';
       _error = null;
     });
     try {
@@ -271,8 +306,9 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
         _phase = _Phase.success;
         _error = receipt == null ? null : 'Receipt $receipt';
       });
-      // Brief confirmation, then dismiss so the WebView reloads to PAID.
-      await Future<void>.delayed(const Duration(milliseconds: 1200));
+      // Hold the confirmation long enough for the cashier to read it (and the
+      // receipt number) before we dismiss and reload the WebView to PAID.
+      await Future<void>.delayed(const Duration(seconds: 4));
       if (mounted) {
         Navigator.of(context).pop(PaymentResult.paid);
       }
@@ -309,6 +345,23 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
     });
   }
 
+  /// Location permission is missing. When [permanent] (the user chose "Don't
+  /// ask again"), a re-request can't prompt, so the error view surfaces "Open
+  /// Settings"; otherwise a plain "Try Again" re-prompts.
+  void _failNeedsLocation(bool permanent) {
+    _needsSettings = permanent;
+    _fail(
+      permanent
+          ? 'Tap to Pay needs location permission, which is turned off for '
+                'auction.fish. Open Settings to allow it, then try again.'
+          : 'Tap to Pay needs location permission to accept a card. Please '
+                'allow it and try again.',
+    );
+  }
+
+  Future<void> _openLocationSettings() =>
+      SquarePaymentService.instance.openSettings();
+
   void _popCancelled() {
     if (mounted) {
       Navigator.of(context).pop(PaymentResult.cancelled);
@@ -337,19 +390,25 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
         ),
         child: switch (_phase) {
           _Phase.loading => _LoadingView(onCancel: _popCancelled),
-          _Phase.processing => _ProcessingView(amountLabel: _ctx?.amountLabel),
+          _Phase.processing => _ProcessingView(
+            message: _processingMessage,
+            amountLabel: _ctx?.amountLabel,
+          ),
           _Phase.success => _SuccessView(receipt: _error),
           _Phase.error => _ErrorView(
             message: _error ?? 'Something went wrong.',
-            // Stranded (terminal): no retry, dismiss only. Otherwise, while a
-            // capture is outstanding, retry must re-confirm the same payment,
-            // not start a new charge — and there's no "close" out.
-            onRetry: _stranded
+            // Stranded (terminal) or permanently-denied location: no retry.
+            // Otherwise, while a capture is outstanding, retry must re-confirm
+            // the same payment, not start a new charge — and there's no "close"
+            // out.
+            onRetry: (_stranded || _needsSettings)
                 ? null
                 : (_captureOutstanding ? _confirmCaptured : _createPayment),
-            retryLabel: _stranded
+            retryLabel: (_stranded || _needsSettings)
                 ? null
                 : (_captureOutstanding ? 'Finish Payment' : 'Try Again'),
+            // Permanent location denial can only be fixed in OS settings.
+            onOpenSettings: _needsSettings ? _openLocationSettings : null,
             onClose: (_stranded || !_captureOutstanding) ? _popCancelled : null,
           ),
         },
@@ -379,28 +438,28 @@ class _LoadingView extends StatelessWidget {
 }
 
 class _ProcessingView extends StatelessWidget {
-  const _ProcessingView({this.amountLabel});
+  const _ProcessingView({required this.message, this.amountLabel});
+
+  /// What we're waiting on — set honestly per phase (e.g. "Starting the card
+  /// reader…", "Confirming payment…"). Deliberately never instructs the cashier
+  /// to tap: Square's full-screen Activity handles the actual card read.
+  final String message;
 
   /// The amount being charged (e.g. `$15.00`), shown so the cashier can confirm
-  /// it before the card touches the device. Null until the invoice has loaded.
+  /// it. Null until the invoice has loaded.
   final String? amountLabel;
 
   @override
   Widget build(BuildContext context) => Column(
     mainAxisSize: MainAxisSize.min,
     children: [
-      const Icon(Icons.contactless, size: 64),
       if (amountLabel != null) ...[
-        const SizedBox(height: 12),
         Text(amountLabel!, style: Theme.of(context).textTheme.headlineSmall),
+        const SizedBox(height: 16),
       ],
-      const SizedBox(height: 16),
-      const Text(
-        'Hold the card near the top of this device…',
-        textAlign: TextAlign.center,
-      ),
-      const SizedBox(height: 16),
       const CircularProgressIndicator(),
+      const SizedBox(height: 16),
+      Text(message, textAlign: TextAlign.center),
     ],
   );
 }
@@ -434,12 +493,17 @@ class _ErrorView extends StatelessWidget {
     required this.message,
     this.onRetry,
     this.retryLabel,
+    this.onOpenSettings,
     this.onClose,
   });
 
   final String message;
   final VoidCallback? onRetry;
   final String? retryLabel;
+
+  /// When set, the primary action opens OS settings (a permission the app can
+  /// no longer prompt for). Shown instead of a "Try Again" that would no-op.
+  final VoidCallback? onOpenSettings;
   final VoidCallback? onClose;
 
   @override
@@ -455,9 +519,16 @@ class _ErrorView extends StatelessWidget {
       const SizedBox(height: 16),
       Text(message, textAlign: TextAlign.center),
       const SizedBox(height: 24),
-      // Stranded errors have no retry — dismiss only.
-      if (onRetry != null && retryLabel != null)
+      if (onOpenSettings != null)
+        FilledButton(
+          onPressed: onOpenSettings,
+          child: const Text('Open Settings'),
+        ),
+      // Stranded errors (and permanent denials) have no retry — dismiss only.
+      if (onRetry != null && retryLabel != null) ...[
+        if (onOpenSettings != null) const SizedBox(height: 8),
         FilledButton(onPressed: onRetry, child: Text(retryLabel!)),
+      ],
       if (onClose != null) ...[
         const SizedBox(height: 8),
         TextButton(onPressed: onClose, child: const Text('Close')),
