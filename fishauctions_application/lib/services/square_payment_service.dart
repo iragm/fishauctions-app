@@ -36,10 +36,11 @@ class SquarePaymentService {
 
   /// Authorizes the SDK for [locationId] using the per-invoice [accessToken].
   ///
-  /// [applicationId] is the deployment's Square Application ID (from the
-  /// backend); the SDK is initialized with it first, since authorize() can't
-  /// run on an uninitialized SDK. Initialization is once-per-process and
-  /// idempotent (see [AndroidPlatform.initializeSquare]).
+  /// [applicationId] is the deployment's Square Application ID (from
+  /// `/api/mobile/config/`, warmed at startup); the SDK is initialized with it
+  /// first, since authorize() can't run on an uninitialized SDK. Init is
+  /// once-per-process and idempotent (see [AndroidPlatform.initializeSquare]),
+  /// so re-calling it here after the startup warm-up is a no-op.
   ///
   /// Different invoices can belong to different sellers, so if the device is
   /// already authorized for a *different* location we deauthorize and switch.

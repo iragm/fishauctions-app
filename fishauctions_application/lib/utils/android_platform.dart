@@ -28,9 +28,9 @@ class AndroidPlatform {
   }
 
   /// Initializes the Square Mobile Payments SDK with [applicationId] (the
-  /// deployment's Square Application ID, returned by the backend per invoice).
-  /// Must run once before any authorize()/charge() call — the Square Flutter
-  /// plugin doesn't expose initialize(), so it goes through our channel.
+  /// deployment's Square Application ID, from `/api/mobile/config/`). Must run
+  /// once before any authorize()/charge() call — the Square Flutter plugin
+  /// doesn't expose initialize(), so it goes through our channel.
   ///
   /// Idempotent for the same id; throws [PlatformException] if the device was
   /// already initialized for a *different* id (switch deployments → restart) or

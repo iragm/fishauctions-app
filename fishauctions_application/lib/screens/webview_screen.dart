@@ -14,8 +14,13 @@ import '../config/theme.dart';
 import '../constants/app_constants.dart';
 import '../models/auth_models.dart';
 import '../providers/auth_provider.dart';
+import '../providers/config_provider.dart';
+import '../services/api_service.dart';
 import '../services/auth_service.dart';
 import '../services/location_service.dart';
+import '../services/square_payment_service.dart';
+import '../utils/android_platform.dart';
+import '../widgets/payment_sheet.dart';
 import 'command_palette_screen.dart';
 
 class WebViewScreen extends ConsumerStatefulWidget {
@@ -49,6 +54,11 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   bool _lastSignedIn = false;
   int _handoffAttempts = 0;
 
+  // Invoice pk of the payment sheet currently being launched/shown, or null.
+  // Guards against the auto-start firing twice (onPageFinished can run more
+  // than once per navigation) and against overlapping sheets.
+  int? _activePaymentPk;
+
   @override
   void initState() {
     super.initState();
@@ -70,6 +80,25 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       );
     _enableWebViewCamera();
     _initWebView();
+    // Warm the deployment config and pre-initialize the Square SDK off the
+    // startup critical path — never blocks first paint (the WebView loads
+    // concurrently), so the eventual Tap to Pay is instant.
+    unawaited(_warmSquare());
+  }
+
+  /// Loads `/api/mobile/config/` and initializes the Square SDK with the
+  /// deployment's app id, if this deployment has Square. Best-effort: any
+  /// failure is swallowed (init is idempotent and the payment flow re-fetches
+  /// config and initializes lazily if this didn't run).
+  Future<void> _warmSquare() async {
+    try {
+      final cfg = await ref.read(configProvider.future);
+      if (cfg.hasSquare) {
+        await AndroidPlatform.initializeSquare(cfg.squareApplicationId);
+      }
+    } on Object catch (e) {
+      debugPrint('Square SDK warm-up skipped: $e');
+    }
   }
 
   /// The web check-in screen scans barcodes through the browser camera
@@ -258,6 +287,112 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     // session). The home page and everything else never triggers this.
     unawaited(_maybeOfferLocation(uri.path));
     await _reconcileWebSession(uri);
+    await _maybeAutoStartPayment(uri);
+  }
+
+  /// On our own pages, detect the quick-checkout "Tap to Pay" affordance and
+  /// auto-start the tap — so the cashier just taps a card, mirroring how the
+  /// web page loads a QR via HTMX. The Django side only renders the affordance
+  /// when the seller has Square + Tap to Pay, so its mere presence is the
+  /// availability signal; when it's absent we do nothing and the web checkout
+  /// (QR) stands. A settled charge reloads to the PAID page (no affordance), so
+  /// this won't re-fire.
+  Future<void> _maybeAutoStartPayment(Uri uri) async {
+    final webHost = Uri.parse(EnvironmentConfig.webBaseUrl).host;
+    if (uri.host != webHost || _activePaymentPk != null) {
+      return;
+    }
+    final pk = await _detectPayInvoicePk();
+    if (pk != null) {
+      await _launchPayment(pk);
+    }
+  }
+
+  /// Reads the invoice pk from a `fishauctions://pay/<pk>` anchor on the
+  /// current page, or null if there isn't one. The JS returns the href string;
+  /// [_unwrapJsString] handles the platform quoting differences.
+  Future<int?> _detectPayInvoicePk() async {
+    const js =
+        '(function(){var a=document.querySelector('
+        '\'a[href^="fishauctions://pay/"]\');'
+        'return a?a.getAttribute("href"):"";})()';
+    try {
+      final raw = await _controller.runJavaScriptReturningResult(js);
+      final href = _unwrapJsString(raw);
+      if (href == null || href.isEmpty) {
+        return null;
+      }
+      final uri = Uri.tryParse(href);
+      if (uri == null || uri.host != 'pay') {
+        return null;
+      }
+      return int.tryParse(uri.pathSegments.firstOrNull ?? '');
+    } on Object {
+      return null;
+    }
+  }
+
+  // runJavaScriptReturningResult returns the native JS type on iOS but a
+  // (JSON-encoded) String on Android, where a string result comes back wrapped
+  // in double quotes. Strip one layer of surrounding quotes so both platforms
+  // yield the bare href.
+  String? _unwrapJsString(Object? raw) {
+    if (raw == null) {
+      return null;
+    }
+    var s = raw.toString();
+    if (s.length >= 2 && s.startsWith('"') && s.endsWith('"')) {
+      s = s.substring(1, s.length - 1);
+    }
+    return s;
+  }
+
+  /// Launches Tap to Pay for [invoicePk] as a modal over the WebView (the
+  /// cashier never leaves the checkout page). Requires a native sign-in (the
+  /// payment API is JWT-backed) and a Tap-to-Pay-capable device; otherwise it
+  /// falls back to sign-in or leaves the web checkout in place. On a settled
+  /// charge it reloads the page so it re-renders PAID.
+  Future<void> _launchPayment(int invoicePk) async {
+    if (_activePaymentPk != null) {
+      return;
+    }
+    _activePaymentPk = invoicePk; // claim synchronously to block re-entrancy
+    try {
+      // Presence of tokens is enough to enter; the API client refreshes or
+      // surfaces a 401 from there. No tokens → sign in first.
+      if (!await ApiService.instance.hasTokens) {
+        if (mounted) {
+          unawaited(context.push('/login'));
+        }
+        return;
+      }
+      if (!await SquarePaymentService.instance.isDeviceCapable()) {
+        _showSnack(
+          'This device can\'t take Tap to Pay — it needs NFC and Android 12 '
+          'or newer.',
+        );
+        return;
+      }
+      if (!mounted) {
+        return;
+      }
+      final result = await PaymentSheet.show(context, invoicePk);
+      if (result == PaymentResult.paid && mounted) {
+        // Refresh so the checkout page re-renders PAID (HTMX-style).
+        await _controller.reload();
+      }
+    } finally {
+      _activePaymentPk = null;
+    }
+  }
+
+  void _showSnack(String message) {
+    if (!mounted) {
+      return;
+    }
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
   }
 
   // ── WebView ↔ native session bridging ─────────────────────────────────────
@@ -434,9 +569,11 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   void _handleDeepLink(Uri uri) {
     switch (uri.host) {
       case 'pay':
+        // Manual trigger (the page's "Tap to Pay with card" button). Runs the
+        // same inline flow as auto-start — e.g. the retry after a cancel.
         final invoicePk = int.tryParse(uri.pathSegments.firstOrNull ?? '');
         if (invoicePk != null) {
-          context.push('/pay/$invoicePk');
+          unawaited(_launchPayment(invoicePk));
         }
       case 'print':
         // fishauctions://print/<lot_pk> — print a label. Without a valid pk

@@ -2,16 +2,15 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../screens/login_screen.dart';
-import '../screens/payment_screen.dart';
 import '../screens/print_label_screen.dart';
 import '../screens/printer_screen.dart';
 import '../screens/webview_screen.dart';
 import '../services/api_service.dart';
 
 /// Routes that hit the JWT-backed mobile API and therefore require a native
-/// sign-in first.
-bool _requiresAuth(String location) =>
-    location.startsWith('/pay/') || location.startsWith('/print/');
+/// sign-in first. (Payment is launched as a modal over the WebView, not a
+/// route — its sign-in gate lives in WebViewScreen._launchPayment.)
+bool _requiresAuth(String location) => location.startsWith('/print/');
 
 final routerProvider = Provider<GoRouter>(
   (ref) => GoRouter(
@@ -44,12 +43,6 @@ final routerProvider = Provider<GoRouter>(
         path: '/login',
         builder: (context, state) =>
             LoginScreen(from: state.uri.queryParameters['from']),
-      ),
-      GoRoute(
-        path: '/pay/:invoicePk',
-        builder: (context, state) => PaymentScreen(
-          invoicePk: int.parse(state.pathParameters['invoicePk']!),
-        ),
       ),
       GoRoute(
         path: '/print/:lotPk',
