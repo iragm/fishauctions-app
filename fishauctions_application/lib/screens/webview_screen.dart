@@ -1,23 +1,27 @@
 import 'dart:async';
 
+import 'package:add_2_calendar/add_2_calendar.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:go_router/go_router.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:webview_flutter/webview_flutter.dart';
-import 'package:webview_flutter_android/webview_flutter_android.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../config/environment.dart';
 import '../config/theme.dart';
 import '../constants/app_constants.dart';
 import '../models/auth_models.dart';
+import '../models/club_menu_item.dart';
 import '../providers/auth_provider.dart';
+import '../providers/clubs_provider.dart';
 import '../providers/config_provider.dart';
 import '../services/api_service.dart';
 import '../services/auth_service.dart';
+import '../services/download_service.dart';
 import '../services/location_service.dart';
 import '../services/square_payment_service.dart';
 import '../utils/android_platform.dart';
@@ -33,7 +37,35 @@ class WebViewScreen extends ConsumerStatefulWidget {
 
 class _WebViewScreenState extends ConsumerState<WebViewScreen>
     with WidgetsBindingObserver {
-  late final WebViewController _controller;
+  // User-Agent carrying the FishAuctionsApp token the backend's is_mobile_app
+  // middleware keys on to drop web chrome (navbar/footer) and switch to the
+  // native bridges. Reused verbatim for authenticated download refetches.
+  static final String _userAgent =
+      'FishAuctionsApp/1.0 (Flutter; ${defaultTargetPlatform.name})';
+
+  static final InAppWebViewSettings _webViewSettings = InAppWebViewSettings(
+    userAgent: _userAgent,
+    // Route deep links + external navigations through shouldOverrideUrlLoading.
+    useShouldOverrideUrlLoading: true,
+    // Intercept file downloads (CSV/PDF/.ics/.pkpass) — the WebView can't fetch
+    // them itself; see _onDownloadStart / DownloadService.
+    useOnDownloadStart: true,
+    // target="_blank" / window.open → onCreateWindow, which opens the system
+    // browser instead of a nested WebView window.
+    supportMultipleWindows: true,
+    javaScriptCanOpenWindowsAutomatically: true,
+    // The barcode check-in scanner (getUserMedia) plays inline without a tap.
+    mediaPlaybackRequiresUserGesture: false,
+    allowsInlineMediaPlayback: true,
+    // Let the dark ColoredBox backstop show through until the page paints, so
+    // there's no white flash over the otherwise-dark UI.
+    transparentBackground: true,
+  );
+
+  // Set once the InAppWebView is created (onWebViewCreated). Null before then;
+  // callers that run after the first page load can assume it's present, but
+  // guard anyway.
+  InAppWebViewController? _controller;
   bool _loading = true;
   // Whether the WebView has back-history. Drives the leading back arrow's
   // visibility and is kept in sync after each page settles (see
@@ -69,23 +101,6 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _controller = WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      // Match the loaded page's dark background so the pre-paint window doesn't
-      // flash white over the otherwise-dark UI.
-      ..setBackgroundColor(AppTheme.scaffoldBackground)
-      ..setNavigationDelegate(
-        NavigationDelegate(
-          onPageStarted: _onPageStarted,
-          onPageFinished: _onPageFinished,
-          onNavigationRequest: _handleNavigation,
-        ),
-      )
-      ..setUserAgent(
-        'FishAuctionsApp/1.0 (Flutter; ${defaultTargetPlatform.name})',
-      );
-    _enableWebViewCamera();
-    _initWebView();
     // Warm the deployment config and pre-initialize the Square SDK off the
     // startup critical path — never blocks first paint (the WebView loads
     // concurrently), so the eventual Tap to Pay is instant.
@@ -107,38 +122,28 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     }
   }
 
-  /// The web check-in screen scans barcodes through the browser camera
-  /// (`getUserMedia`). The system WebView denies that by default, so bridge its
-  /// permission request to a native runtime prompt: when the page asks for the
-  /// camera we request Android's CAMERA permission and grant the WebView only
-  /// if the user allows it. Requests we can't satisfy (e.g. the microphone,
-  /// which the app declares no permission for) are denied so the page fails
-  /// fast rather than hanging on a request that could never succeed.
+  /// Called once the InAppWebView exists. Registers the JS bridges, seeds the
+  /// location cookies from an instant cached fix (if already granted) so
+  /// distances render on the first page without delaying it, then kicks off the
+  /// first load. We never prompt for location at app open — that happens
+  /// contextually on a location-aware screen (see _maybeOfferLocation).
   ///
-  /// Android-only: iOS WKWebView drives its own prompt from the Info.plist
-  /// camera usage string, and the iOS flavor isn't wired up yet.
-  void _enableWebViewCamera() {
-    final platform = _controller.platform;
-    if (platform is! AndroidWebViewController) {
-      return;
-    }
-    platform.setOnPlatformPermissionRequest((request) async {
-      // Only the camera is something we can satisfy, so handle the lone-camera
-      // request and deny anything else (including camera+microphone bundles).
-      final wantsOnlyCamera =
-          request.types.length == 1 &&
-          request.types.contains(WebViewPermissionResourceType.camera);
-      if (!wantsOnlyCamera) {
-        await request.deny();
-        return;
-      }
-      final status = await Permission.camera.request();
-      if (status.isGranted) {
-        await request.grant();
-      } else {
-        await request.deny();
-      }
-    });
+  /// The system WebView persists its cookies, so a returning signed-in user is
+  /// usually still logged in here without any work. We don't block first paint
+  /// on auth: if the native JWT is present but the web cookie has lapsed,
+  /// _reconcileWebSession (on load-stop) silently re-establishes it.
+  Future<void> _onWebViewCreated(InAppWebViewController controller) async {
+    _controller = controller;
+    // Register the calendar bridge before the first load so the page's inline
+    // script finds it (location_fragment_short.html calls callHandler).
+    controller.addJavaScriptHandler(
+      handlerName: 'addToCalendar',
+      callback: _onAddToCalendar,
+    );
+    await _applyLocation(prompt: false, fresh: false);
+    await controller.loadUrl(
+      urlRequest: URLRequest(url: WebUri(EnvironmentConfig.webBaseUrl)),
+    );
   }
 
   @override
@@ -156,20 +161,6 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     if (state == AppLifecycleState.resumed) {
       _applyLocation(prompt: false);
     }
-  }
-
-  Future<void> _initWebView() async {
-    // The system WebView persists its cookies, so a returning signed-in user is
-    // usually still logged in here without any work. We don't block first paint
-    // on auth: if the native JWT is present but the web cookie has lapsed,
-    // _reconcileWebSession (on page-finished) silently re-establishes it.
-    //
-    // If location is already granted, seed the cookies from the instant cached
-    // fix so distances render on the first page without delaying it. We never
-    // prompt at app open — that happens contextually on a location-aware screen
-    // (see _maybeOfferLocation).
-    await _applyLocation(prompt: false, fresh: false);
-    await _controller.loadRequest(Uri.parse(EnvironmentConfig.webBaseUrl));
   }
 
   /// Reads the device position and, if available, writes the
@@ -193,24 +184,22 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   }
 
   Future<void> _setLocationCookies(Position position) async {
-    final host = Uri.parse(EnvironmentConfig.webBaseUrl).host;
-    final manager = WebViewCookieManager();
+    final base = WebUri(EnvironmentConfig.webBaseUrl);
     // Non-HttpOnly, non-sensitive cookies the web UI also sets from JS; path '/'
     // and the site host match what document.cookie writes, so the server reads
     // them the same way whether they came from the browser or from here.
+    final manager = CookieManager.instance();
     await manager.setCookie(
-      WebViewCookie(
-        name: 'latitude',
-        value: LocationService.formatCoordinate(position.latitude),
-        domain: host,
-      ),
+      url: base,
+      name: 'latitude',
+      value: LocationService.formatCoordinate(position.latitude),
+      domain: base.host,
     );
     await manager.setCookie(
-      WebViewCookie(
-        name: 'longitude',
-        value: LocationService.formatCoordinate(position.longitude),
-        domain: host,
-      ),
+      url: base,
+      name: 'longitude',
+      value: LocationService.formatCoordinate(position.longitude),
+      domain: base.host,
     );
   }
 
@@ -271,36 +260,45 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     // distances immediately. A decline is a no-op — same as a web visitor who
     // declines the browser prompt.
     if (await _applyLocation(prompt: true)) {
-      await _controller.reload();
+      await _controller?.reload();
     }
   }
 
-  void _onPageStarted(String url) {
+  void _onLoadStart(InAppWebViewController controller, WebUri? url) {
     // A new page load supersedes any location banner the user hasn't acted on,
     // so it doesn't float over an unrelated screen.
     if (mounted) {
       ScaffoldMessenger.of(context).hideCurrentMaterialBanner();
+      setState(() => _loading = true);
     }
-    setState(() => _loading = true);
   }
 
-  Future<void> _onPageFinished(String url) async {
+  Future<void> _onLoadStop(
+    InAppWebViewController controller,
+    WebUri? url,
+  ) async {
     if (mounted) {
       setState(() => _loading = false);
     }
     unawaited(_refreshCanGoBack());
-    final uri = Uri.parse(url);
+    if (url == null) {
+      return;
+    }
     // On the auctions/lots screens, offer location in context (once per
     // session). The home page and everything else never triggers this.
-    unawaited(_maybeOfferLocation(uri.path));
-    await _reconcileWebSession(uri);
+    unawaited(_maybeOfferLocation(url.path));
+    await _reconcileWebSession(url);
   }
 
   /// Keeps [_canGoBack] in sync with the WebView's history so the leading back
   /// arrow shows only when there's somewhere to go back to. Called after each
-  /// page settles — including after a goBack, which re-fires onPageFinished.
+  /// page settles — including after a goBack, which re-fires onLoadStop.
   Future<void> _refreshCanGoBack() async {
-    final canGoBack = await _controller.canGoBack();
+    final controller = _controller;
+    if (controller == null) {
+      return;
+    }
+    final canGoBack = await controller.canGoBack();
     if (mounted && canGoBack != _canGoBack) {
       setState(() => _canGoBack = canGoBack);
     }
@@ -311,8 +309,9 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   /// history if there's any, otherwise this is a real "leave the app" back at
   /// the site root, so exit the task rather than sitting on a dead root page.
   Future<void> _handleBack() async {
-    if (await _controller.canGoBack()) {
-      await _controller.goBack();
+    final controller = _controller;
+    if (controller != null && await controller.canGoBack()) {
+      await controller.goBack();
     } else {
       await SystemNavigator.pop();
     }
@@ -362,7 +361,7 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       final result = await PaymentSheet.show(context, invoicePk);
       if (result == PaymentResult.paid && mounted) {
         // Refresh so the checkout page re-renders PAID (HTMX-style).
-        await _controller.reload();
+        await _controller?.reload();
       }
     } finally {
       _activePaymentPk = null;
@@ -445,22 +444,21 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       next: target,
     );
     if (url != null) {
-      await _controller.loadRequest(Uri.parse(url));
+      await _controller?.loadUrl(urlRequest: URLRequest(url: WebUri(url)));
     }
   }
 
   /// Path (+query) of the page currently in the WebView, for the post-handoff
   /// landing page. Auth pages resolve to their ?next= target, not themselves.
   Future<String?> _currentWebPath() async {
-    final current = await _controller.currentUrl();
+    final current = await _controller?.getUrl();
     if (current == null) {
       return null;
     }
-    final uri = Uri.parse(current);
-    if (uri.path.startsWith('/accounts/')) {
-      return uri.queryParameters['next'];
+    if (current.path.startsWith('/accounts/')) {
+      return current.queryParameters['next'];
     }
-    return _pathOf(uri);
+    return _pathOf(current);
   }
 
   String? _pathOf(Uri uri) {
@@ -474,7 +472,7 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   /// cookie rather than navigating by GET.
   Future<void> _signOut() async {
     await ref.read(authProvider.notifier).logout();
-    await _controller.runJavaScript(_logoutFormJs);
+    await _controller?.evaluateJavascript(source: _logoutFormJs);
   }
 
   // Submits a real POST to the allauth logout view, carrying the CSRF token
@@ -498,7 +496,11 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
 ''';
 
   void _loadPath(String path) {
-    _controller.loadRequest(Uri.parse('${EnvironmentConfig.webBaseUrl}$path'));
+    _controller?.loadUrl(
+      urlRequest: URLRequest(
+        url: WebUri('${EnvironmentConfig.webBaseUrl}$path'),
+      ),
+    );
   }
 
   void _navigate(BuildContext drawerContext, String path) {
@@ -526,36 +528,158 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     showCommandPalette(context, _loadPath);
   }
 
-  NavigationDecision _handleNavigation(NavigationRequest request) {
-    final uri = Uri.parse(request.url);
+  // ── Navigation, downloads, permissions, bridges ───────────────────────────
 
+  /// Gatekeeps every main-frame navigation. Custom-scheme deep links run the
+  /// native flow; links to other sites open in the system browser; everything
+  /// on our host loads in place.
+  Future<NavigationActionPolicy> _shouldOverrideUrlLoading(
+    InAppWebViewController controller,
+    NavigationAction action,
+  ) async {
+    final uri = action.request.url;
+    if (uri == null) {
+      return NavigationActionPolicy.ALLOW;
+    }
+
+    // fishauctions://pay|print/… — handle natively, don't navigate.
     if (uri.scheme == EnvironmentConfig.urlScheme) {
       _handleDeepLink(uri);
-      return NavigationDecision.prevent;
+      return NavigationActionPolicy.CANCEL;
     }
 
-    // Only allow standard web navigation. Block javascript:, intent:, file:,
-    // and other schemes that injected or remote content could abuse. http(s)
-    // stays open so allauth social-login redirects (Google, Discord) work.
+    // Only http(s) navigates. Block javascript:, intent:, file:, and other
+    // schemes injected or remote content could abuse.
     if (uri.scheme != 'http' && uri.scheme != 'https') {
-      return NavigationDecision.prevent;
+      return NavigationActionPolicy.CANCEL;
     }
 
-    // A logout anywhere — our menu or the in-page web sign-out — must also drop
-    // the native JWT so the two sessions stay in lockstep. The server clears
-    // the session cookie on its own logout response, so we don't touch WebView
-    // cookies here (clearing them would strip the CSRF cookie the POST needs).
-    // Scope this to our own host so an external page (e.g. a social-login
-    // redirect) that happens to use the same path can't log the user out. Skip
-    // if already signed out, so our menu's own logout doesn't double-fire.
     final webHost = Uri.parse(EnvironmentConfig.webBaseUrl).host;
-    if (uri.path == '/accounts/logout/' &&
-        uri.host == webHost &&
-        ref.read(authProvider).valueOrNull != null) {
-      ref.read(authProvider.notifier).logout();
+
+    // Off-site links open in the system browser, not inside the shell: "Get
+    // directions" map links, the Google Wallet save URL, and arbitrary URLs in
+    // user-authored lot descriptions / reference links (which won't carry
+    // target="_blank"). Scope to top-level navigations so embedded third-party
+    // iframes still load in place. Nothing we need inline lives off our host —
+    // social login is hidden for the app UA, so no OAuth redirect to preserve.
+    if (uri.host != webHost && action.isForMainFrame) {
+      await _openExternally(uri);
+      return NavigationActionPolicy.CANCEL;
     }
 
-    return NavigationDecision.navigate;
+    // A logout on our host — the in-page web sign-out — must also drop the
+    // native JWT so the two sessions stay in lockstep. Skip if already signed
+    // out so our own menu logout doesn't double-fire. Fire-and-forget: the
+    // navigation continues while the JWT is cleared.
+    if (uri.path == '/accounts/logout/' &&
+        ref.read(authProvider).valueOrNull != null) {
+      unawaited(ref.read(authProvider.notifier).logout());
+    }
+
+    return NavigationActionPolicy.ALLOW;
+  }
+
+  /// `target="_blank"` / `window.open` — always route to the system browser
+  /// rather than open a nested WebView window. Covers the seller-connect
+  /// banners (which link to our own host with target="_blank" precisely to
+  /// escape the WebView for the Square/PayPal OAuth the app can't run) and the
+  /// Google Wallet save URL. Returning false tells the engine not to create the
+  /// window.
+  Future<bool> _onCreateWindow(
+    InAppWebViewController controller,
+    CreateWindowAction action,
+  ) async {
+    final uri = action.request.url;
+    if (uri != null) {
+      await _openExternally(uri);
+    }
+    return false;
+  }
+
+  Future<void> _openExternally(Uri uri) async {
+    try {
+      final launched = await launchUrl(
+        uri,
+        mode: LaunchMode.externalApplication,
+      );
+      if (!launched) {
+        _showSnack('Couldn\'t open the link.');
+      }
+    } on Object {
+      _showSnack('Couldn\'t open the link.');
+    }
+  }
+
+  /// The WebView can't download files itself, and these Django endpoints are
+  /// session-authenticated — DownloadService refetches with the WebView's
+  /// cookies and hands the file to the OS (calendar/Wallet importer or the
+  /// share sheet). See its doc comment for the MIME routing.
+  Future<DownloadStartResponse?> _onDownloadStart(
+    InAppWebViewController controller,
+    DownloadStartRequest request,
+  ) async {
+    final error = await DownloadService.instance.handle(
+      request,
+      userAgent: _userAgent,
+    );
+    if (error != null) {
+      _showSnack(error);
+    }
+    // We fetched and dispatched the file ourselves — tell the engine it's
+    // handled so it doesn't attempt its own (cookie-less) download.
+    return DownloadStartResponse(handled: true);
+  }
+
+  /// The web check-in screen scans barcodes through the browser camera
+  /// (`getUserMedia`). Bridge the WebView's permission request to a native
+  /// runtime prompt: grant the lone-camera request iff Android's CAMERA
+  /// permission is granted, and deny anything else (e.g. the microphone, which
+  /// the app declares no permission for) so the page fails fast rather than
+  /// hanging on a request that could never succeed.
+  Future<PermissionResponse?> _onPermissionRequest(
+    InAppWebViewController controller,
+    PermissionRequest request,
+  ) async {
+    final wantsOnlyCamera =
+        request.resources.length == 1 &&
+        request.resources.contains(PermissionResourceType.CAMERA);
+    if (!wantsOnlyCamera) {
+      // DENY is PermissionResponse's default action.
+      return PermissionResponse(resources: request.resources);
+    }
+    final status = await Permission.camera.request();
+    return PermissionResponse(
+      resources: request.resources,
+      action: status.isGranted
+          ? PermissionResponseAction.GRANT
+          : PermissionResponseAction.DENY,
+    );
+  }
+
+  /// Native "add to device calendar" bridge. The web
+  /// (`location_fragment_short.html`) fetches the pickup event as JSON and
+  /// calls `callHandler("addToCalendar", {title, details, start, end,
+  /// location})`; we hand it to the OS calendar. If this handler isn't present
+  /// the web falls back to the `.ics` download, which DownloadService opens.
+  Future<void> _onAddToCalendar(List<dynamic> args) async {
+    if (args.isEmpty || args.first is! Map) {
+      return;
+    }
+    final data = args.first as Map;
+    final start = DateTime.tryParse('${data['start']}');
+    final end = DateTime.tryParse('${data['end']}');
+    if (start == null || end == null) {
+      return;
+    }
+    await Add2Calendar.addEvent2Cal(
+      Event(
+        title: '${data['title'] ?? ''}',
+        description: '${data['details'] ?? ''}',
+        location: '${data['location'] ?? ''}',
+        startDate: start,
+        endDate: end,
+      ),
+    );
   }
 
   void _handleDeepLink(Uri uri) {
@@ -610,7 +734,7 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
                   // Browsing is open to everyone — always shown.
                   _navTile(ctx, Icons.gavel, 'Auctions', '/auctions/'),
                   _navTile(ctx, Icons.grid_view, 'Lots', '/lots/all/'),
-                  _navTile(ctx, Icons.groups, 'Clubs', '/clubs/'),
+                  _clubsTile(ctx),
                   // The full account menu, mirroring the website navbar.
                   if (signedIn) ...[
                     const Divider(),
@@ -719,6 +843,34 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     );
   }
 
+  /// The drawer's "Clubs" entry. Signed in with memberships → an expandable
+  /// menu ("Find a club" + each club, admin ones badged), rebuilding the web
+  /// navbar's Clubs dropdown. Otherwise (signed out, no clubs, still loading,
+  /// or the fetch failed) → the plain browse link, matching the web navbar's
+  /// bare "Clubs" link for users with no clubs.
+  Widget _clubsTile(BuildContext ctx) {
+    final clubs =
+        ref.watch(myClubsProvider).valueOrNull ?? const <ClubMenuItem>[];
+    if (clubs.isEmpty) {
+      return _navTile(ctx, Icons.groups, 'Clubs', '/clubs/');
+    }
+    return ExpansionTile(
+      leading: const Icon(Icons.groups),
+      title: const Text('Clubs'),
+      childrenPadding: EdgeInsets.zero,
+      children: [
+        _navTile(ctx, null, 'Find a club', '/clubs/', indent: true),
+        for (final club in clubs)
+          ListTile(
+            contentPadding: const EdgeInsets.only(left: 56, right: 16),
+            title: Text(club.name),
+            subtitle: club.isAdmin ? const Text('Admin') : null,
+            onTap: () => _navigate(ctx, club.url),
+          ),
+      ],
+    );
+  }
+
   Widget _sectionHeader(BuildContext ctx, String text) => Padding(
     padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
     child: Text(
@@ -790,7 +942,22 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
         endDrawer: Builder(builder: (ctx) => _buildDrawer(ctx, brand)),
         body: Stack(
           children: [
-            WebViewWidget(controller: _controller),
+            // Dark backstop so the pre-paint window doesn't flash white over
+            // the otherwise-dark UI (the WebView is transparent until paint).
+            const ColoredBox(
+              color: AppTheme.scaffoldBackground,
+              child: SizedBox.expand(),
+            ),
+            InAppWebView(
+              initialSettings: _webViewSettings,
+              onWebViewCreated: (c) => unawaited(_onWebViewCreated(c)),
+              onLoadStart: _onLoadStart,
+              onLoadStop: (c, url) => unawaited(_onLoadStop(c, url)),
+              shouldOverrideUrlLoading: _shouldOverrideUrlLoading,
+              onCreateWindow: _onCreateWindow,
+              onDownloadStarting: _onDownloadStart,
+              onPermissionRequest: _onPermissionRequest,
+            ),
             if (_loading) const LinearProgressIndicator(minHeight: 3),
           ],
         ),

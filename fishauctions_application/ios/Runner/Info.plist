@@ -10,6 +10,16 @@
 	<string>Connect to your label printer to print lot labels.</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
 	<string>Connect to your label printer to print lot labels.</string>
+	<!-- WebView camera: the barcode check-in scanner (getUserMedia) and photo
+	     capture for the web's image uploads. -->
+	<key>NSCameraUsageDescription</key>
+	<string>Scan check-in barcodes and take photos of your lots.</string>
+	<!-- WebView photo-library uploads: add-image-to-lot and club icon. -->
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Attach photos from your library to your lots.</string>
+	<!-- Native "add to calendar" bridge for auction pickup times. -->
+	<key>NSCalendarsUsageDescription</key>
+	<string>Add auction pickup times to your calendar.</string>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>

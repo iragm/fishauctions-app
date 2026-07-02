@@ -37,6 +37,15 @@
     <uses-feature android:name="android.hardware.camera.autofocus" android:required="false"/>
     <uses-permission android:name="android.permission.CAMERA"/>
 
+    <!-- Photo library — the web's image uploads (add-image-to-lot, club icon)
+         are plain <input type="file" accept="image/*">. The file chooser the
+         WebView opens reads images from the gallery; CAMERA (above) covers
+         capture. Split by API level: scoped photo access on 33+, legacy read on
+         32 and below. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32"/>
+
     <!-- android:label is the launcher/brand name. Keep it in sync with
          AppConstants.appName (native code can't read the Dart constant). -->
     <application

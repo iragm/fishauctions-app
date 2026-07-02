@@ -8,6 +8,9 @@ environment:
   sdk: ^3.12.1
 
 dependencies:
+  # Native "add to device calendar" — the web's addToCalendar bridge (see
+  # webview_screen) hands pickup events to this instead of downloading an .ics.
+  add_2_calendar: ^3.1.1
   cupertino_icons: ^1.0.8
   # HTTP & Networking
   dio: ^5.4.1
@@ -17,6 +20,17 @@ dependencies:
   # classic SPP) so iOS works without MFi. Actively maintained; the transport
   # only — label bytes are produced in LabelRenderer/LabelRaster.
   flutter_blue_plus: ^2.3.9
+  # WebView engine. Chosen over webview_flutter for the capabilities the web UI
+  # relies on in-app: JS callHandler (calendar bridge), onDownloadStartRequest
+  # (authenticated CSV/PDF/.ics/.pkpass downloads), onCreateWindow (target=_blank
+  # → system browser), automatic <input type=file> handling, and a cross-platform
+  # onPermissionRequest (barcode-scanner camera).
+  #
+  # Pinned to the 6.2.0-beta line: the 6.1.5 stable Android module's
+  # build.gradle uses getDefaultProguardFile('proguard-android.txt'), which
+  # AGP 9 (this project's toolchain) rejects with a hard error; 6.2.0-beta.3
+  # switches to 'proguard-android-optimize.txt'. Move to 6.2.0 stable once out.
+  flutter_inappwebview: 6.2.0-beta.3
   # State management
   flutter_riverpod: ^2.5.1
   # Secure token storage
@@ -38,21 +52,25 @@ dependencies:
   json_annotation: ^4.9.0
   # Logging
   logger: ^2.1.0
-  # Runtime permissions (Bluetooth, NFC)
+  # Open a downloaded file with the OS default handler — .ics into the calendar
+  # importer, .pkpass into Wallet (iOS). See DownloadService.
+  open_filex: ^4.7.0
+  # Temp directory to stage downloaded bytes before share/open.
+  path_provider: ^2.1.6
+  # Runtime permissions (Bluetooth, NFC, camera)
   permission_handler: ^11.3.1
   riverpod: ^2.5.1
   riverpod_annotation: ^2.3.5
+  # Share sheet for downloaded CSV/PDF exports (save / open / share).
+  share_plus: ^12.0.2
   # Square Mobile Payments SDK — in-person / Tap to Pay.
   # Requires Android minSdk 28 (set in android/app/build.gradle.kts) and the
   # public Square Maven repo (no token). iOS needs the Tap to Pay entitlement
   # and is not wired up yet. See lib/services/square_payment_service.dart.
   square_mobile_payments_sdk: ^2026.5.1
-  # WebView
-  webview_flutter: ^4.10.0
-  # Android implementation, imported directly to bridge the WebView's camera
-  # permission request to a native runtime prompt (web check-in barcode scanner).
-  webview_flutter_android: ^4.3.0
-
+  # Open external / target=_blank links (connect banners, map directions, Google
+  # Wallet) in the system browser instead of the in-app WebView.
+  url_launcher: ^6.3.2
 dev_dependencies:
   build_runner: ^2.4.8
   flutter_lints: ^6.0.0
