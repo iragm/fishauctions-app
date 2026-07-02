@@ -1,0 +1,14 @@
+# Release signing config. Copy to android/key.properties (gitignored) to sign
+# a local release build. CI writes this file from secrets instead — see
+# .github/workflows/android-release.yml.
+#
+# Generate an upload keystore once (keep the .jks OUT of git — it's gitignored):
+#   keytool -genkey -v -keystore android/app/release.jks \
+#     -keyalg RSA -keysize 2048 -validity 10000 -alias upload
+#
+# storeFile is resolved relative to android/app/, so `release.jks` points at
+# android/app/release.jks.
+storeFile=release.jks
+storePassword=CHANGE_ME
+keyAlias=upload
+keyPassword=CHANGE_ME

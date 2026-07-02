@@ -1,18 +1,24 @@
 name: Android Release
 
-# Build a production Android APK on every push to the default branch and keep
-# it as a downloadable build artifact.
-#
-# NOT YET ENABLED (intentionally, see TODOs below):
-#   - Play Store upload (needs a service-account key + release signing)
-#   - iOS / macOS builds (no Apple signing set up yet)
+# Manually-triggered production release. You click "Run workflow" in the Actions
+# tab (optionally choosing a track); it runs the full CI suite as a gate, then
+# builds a SIGNED prod .aab. Once the two Play Store prerequisites exist (see the
+# upload step below) it also uploads to Google Play. Until then it just publishes
+# the .aab as a downloadable artifact — which is what you hand-upload for the
+# very first Play Console release.
 on:
-  push:
-    branches: [master, main]
+  workflow_dispatch:
+    inputs:
+      track:
+        description: "Google Play track to release to"
+        type: choice
+        default: internal
+        options: [internal, alpha, beta, production]
 
 concurrency:
   group: android-release-${{ github.ref }}
-  cancel-in-progress: true
+  # Don't cancel an in-progress release — it may be mid-upload to Google Play.
+  cancel-in-progress: false
 
 defaults:
   run:
@@ -22,8 +28,15 @@ env:
   FLUTTER_VERSION: 3.44.1
 
 jobs:
-  build-apk:
-    name: Build prod APK
+  # Gate: reuse the exact CI checks (codegen freshness, format, analyze, test) so
+  # a release can never ship code that wouldn't pass CI. `release` needs this.
+  verify:
+    name: CI checks
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    name: Build & release prod .aab
+    needs: verify
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -43,40 +56,68 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
-      # NOTE: release builds currently use the debug signing config (see
-      # android/app/build.gradle.kts). That's fine for internal distribution but
-      # MUST be replaced with a real keystore before any Play Store upload.
-      # TODO(signing): restore a keystore from secrets, e.g.
-      #   echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > android/app/release.jks
-      #   then write android/key.properties from secrets.
-      #
-      # The --dart-define=FLAVOR=prod is REQUIRED: the Gradle --flavor only sets
-      # the applicationId, not the Dart-side environment. Without it the prod APK
-      # would point at the staging backend.
-      - name: Build prod release APK
-        run: flutter build apk --release --flavor prod --dart-define=FLAVOR=prod
+      # Restore the upload keystore + key.properties from secrets so the build is
+      # signed with the real key. If ANDROID_KEYSTORE_BASE64 is unset the build
+      # would fall back to debug signing (see build.gradle.kts) — which the Play
+      # Store rejects — so here we fail fast instead: a release MUST be signed.
+      - name: Restore release signing config
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -z "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "::error::ANDROID_KEYSTORE_BASE64 secret is missing; a release build must be signed."
+            exit 1
+          fi
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > android/app/release.jks
+          {
+            echo "storeFile=release.jks"
+            echo "storePassword=$ANDROID_KEYSTORE_PASSWORD"
+            echo "keyAlias=$ANDROID_KEY_ALIAS"
+            echo "keyPassword=$ANDROID_KEY_PASSWORD"
+          } > android/key.properties
+          echo "Wrote android/key.properties and android/app/release.jks"
 
-      - name: Upload APK artifact
+      # --dart-define=FLAVOR=prod is REQUIRED: Gradle --flavor only sets the
+      # applicationId, not the Dart-side environment. Without it the prod build
+      # would point at the staging backend.
+      #
+      # --build-number derives the Android versionCode from the run number.
+      # Google Play rejects an upload whose versionCode isn't strictly greater
+      # than the last, so this auto-increments it without editing pubspec. (If
+      # you also upload by hand, keep hand-picked codes below this run number.)
+      - name: Build signed prod app bundle
+        run: >
+          flutter build appbundle --release --flavor prod
+          --dart-define=FLAVOR=prod
+          --build-number=${{ github.run_number }}
+
+      - name: Upload .aab artifact
         uses: actions/upload-artifact@v4
         with:
           name: app-prod-release-${{ github.sha }}
-          path: fishauctions_application/build/app/outputs/flutter-apk/app-prod-release.apk
+          path: fishauctions_application/build/app/outputs/bundle/prodRelease/app-prod-release.aab
           if-no-files-found: error
           retention-days: 30
 
-      # TODO(play-store): once signing + a Google Play service account exist,
-      # build an app bundle and upload it. The fat APK above is ~178MB because
-      # the Square SDK ships large native libs; an .aab (or --split-per-abi)
-      # is much smaller per install.
-      #   - run: flutter build appbundle --release --flavor prod \
-      #       --dart-define=FLAVOR=prod
-      #   - uses: r0adkll/upload-google-play@v1
-      #     with:
-      #       serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
-      #       packageName: com.fishauctions.app
-      #       releaseFiles: fishauctions_application/build/app/outputs/bundle/prodRelease/app-prod-release.aab
-      #       track: internal
+      # Uncomment once BOTH Play Console prerequisites exist:
+      #   1. The first .aab has been uploaded MANUALLY in the Play Console
+      #      (Google requires this before the API will accept uploads), and
+      #   2. A Google Play service-account JSON is stored as the
+      #      PLAY_SERVICE_ACCOUNT_JSON secret.
+      # `status: completed` publishes to the chosen track's testers immediately;
+      # use `draft` if you'd rather review in the console before releasing.
+      # - name: Upload to Google Play (${{ inputs.track }} track)
+      #   uses: r0adkll/upload-google-play@v1
+      #   with:
+      #     serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+      #     packageName: com.fishauctions.app
+      #     releaseFiles: fishauctions_application/build/app/outputs/bundle/prodRelease/app-prod-release.aab
+      #     track: ${{ inputs.track }}
+      #     status: completed
 
-  # TODO(apple): add a macos-latest job to build iOS/macOS once Apple signing
+  # TODO(apple): add a macos-latest job to build iOS once Apple signing
   # (certificates, provisioning profiles, and the Tap to Pay entitlement) is
   # configured. iOS flavor schemes are not set up yet either.

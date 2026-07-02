@@ -1,10 +1,13 @@
 name: CI
 
 # Lint + test on every PR, and on pushes to the default branch as a safety net.
+# Also callable from other workflows (workflow_call) so the release workflow can
+# reuse these exact checks as a gate instead of a copy that could drift.
 on:
   pull_request:
   push:
     branches: [master, main]
+  workflow_call:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}

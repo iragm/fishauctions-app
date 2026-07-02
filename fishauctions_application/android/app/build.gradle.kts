@@ -1,7 +1,23 @@
+import java.io.FileInputStream
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
+}
+
+// Release signing is driven by android/key.properties, which is gitignored and
+// supplied out of band (locally by the developer; in CI written from secrets
+// before the release build). When it's absent — most local/dev builds and PR
+// CI — the release build falls back to debug signing so it still compiles; that
+// APK just isn't Play-Store-uploadable.
+val keystorePropertiesFile = rootProject.file("key.properties")
+val hasReleaseSigning = keystorePropertiesFile.exists()
+val keystoreProperties = Properties().apply {
+    if (hasReleaseSigning) {
+        FileInputStream(keystorePropertiesFile).use { load(it) }
+    }
 }
 
 android {
@@ -41,6 +57,20 @@ android {
         }
     }
 
+    signingConfigs {
+        // Only defined when key.properties is present; otherwise the release
+        // build type below falls back to the debug signing config. storeFile is
+        // resolved relative to this module (android/app/).
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = (keystoreProperties["storeFile"] as String?)?.let { file(it) }
+                storePassword = keystoreProperties["storePassword"] as String?
+                keyAlias = keystoreProperties["keyAlias"] as String?
+                keyPassword = keystoreProperties["keyPassword"] as String?
+            }
+        }
+    }
+
     buildTypes {
         debug {
             isDebuggable = true
@@ -49,8 +79,13 @@ android {
         release {
             isMinifyEnabled = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            // TODO: Add your own signing config for the release build.
-            signingConfig = signingConfigs.getByName("debug")
+            // Real keystore when key.properties is present (Play Store builds),
+            // otherwise debug signing so local/PR-CI release builds still work.
+            signingConfig = if (hasReleaseSigning) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
 }
