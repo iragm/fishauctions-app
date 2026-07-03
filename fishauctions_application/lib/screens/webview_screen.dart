@@ -1,7 +1,7 @@
 import 'dart:async';
 
 import 'package:add_2_calendar/add_2_calendar.dart';
-import 'package:flutter/foundation.dart';
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
@@ -14,7 +14,6 @@ import 'package:url_launcher/url_launcher.dart';
 import '../config/environment.dart';
 import '../config/theme.dart';
 import '../constants/app_constants.dart';
-import '../models/auth_models.dart';
 import '../models/club_menu_item.dart';
 import '../providers/auth_provider.dart';
 import '../providers/clubs_provider.dart';
@@ -37,14 +36,8 @@ class WebViewScreen extends ConsumerStatefulWidget {
 
 class _WebViewScreenState extends ConsumerState<WebViewScreen>
     with WidgetsBindingObserver {
-  // User-Agent carrying the FishAuctionsApp token the backend's is_mobile_app
-  // middleware keys on to drop web chrome (navbar/footer) and switch to the
-  // native bridges. Reused verbatim for authenticated download refetches.
-  static final String _userAgent =
-      'FishAuctionsApp/1.0 (Flutter; ${defaultTargetPlatform.name})';
-
   static final InAppWebViewSettings _webViewSettings = InAppWebViewSettings(
-    userAgent: _userAgent,
+    userAgent: AppConstants.userAgent,
     // Route deep links + external navigations through shouldOverrideUrlLoading.
     useShouldOverrideUrlLoading: true,
     // Intercept file downloads (CSV/PDF/.ics/.pkpass) — the WebView can't fetch
@@ -77,19 +70,14 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   bool _locationOffered = false;
 
   // ── Single sign-on bridging ───────────────────────────────────────────────
-  // The native JWT (authProvider) is the source of truth for "signed in". When
-  // it flips to signed-in we log the WebView's Django session in too, via the
-  // backend handoff, so one sign-in covers both. These guard that bridging:
-  //
-  // _sawInitialAuth  – skip the first authProvider resolution (session restore
-  //                    on launch); the WebView's own persisted cookie usually
-  //                    already covers it, and _reconcileWebSession repairs the
-  //                    rare case where it doesn't.
-  // _lastSignedIn    – the last signed-in state we acted on (edge detection).
-  // _handoffAttempts – at most one handoff per signed-in state, reset on every
-  //                    auth transition, so a failed/looping handoff can't spin.
-  bool _sawInitialAuth = false;
-  bool _lastSignedIn = false;
+  // The router only mounts this screen for a signed-in native session, and a
+  // fresh sign-in always mounts a fresh instance — so bridging that session
+  // into the WebView's Django cookie session happens in exactly two places:
+  // the first load boots through the backend handoff when the WebView has no
+  // session cookie yet (see _initialUrl), and _reconcileWebSession repairs a
+  // lapsed session when the server bounces a page to /accounts/login/. The
+  // repair is bounded to one attempt per screen lifetime so a failed/looping
+  // handoff can't spin.
   int _handoffAttempts = 0;
 
   // Invoice pk of the payment sheet currently being launched/shown, or null.
@@ -127,11 +115,6 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   /// distances render on the first page without delaying it, then kicks off the
   /// first load. We never prompt for location at app open — that happens
   /// contextually on a location-aware screen (see _maybeOfferLocation).
-  ///
-  /// The system WebView persists its cookies, so a returning signed-in user is
-  /// usually still logged in here without any work. We don't block first paint
-  /// on auth: if the native JWT is present but the web cookie has lapsed,
-  /// _reconcileWebSession (on load-stop) silently re-establishes it.
   Future<void> _onWebViewCreated(InAppWebViewController controller) async {
     _controller = controller;
     // Register the calendar bridge before the first load so the page's inline
@@ -141,9 +124,33 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       callback: _onAddToCalendar,
     );
     await _applyLocation(prompt: false, fresh: false);
-    await controller.loadUrl(
-      urlRequest: URLRequest(url: WebUri(EnvironmentConfig.webBaseUrl)),
-    );
+    final initialUrl = await _initialUrl();
+    await controller.loadUrl(urlRequest: URLRequest(url: WebUri(initialUrl)));
+  }
+
+  /// The first URL to load. The user is always natively signed in when this
+  /// screen mounts (the router requires an account), but the WebView's Django
+  /// session cookie may not exist yet — right after a fresh sign-in, or after
+  /// sign-out cleared the cookies. In that case boot through the backend
+  /// session handoff so the very first page renders signed in. When the
+  /// persisted cookie is present we load the site directly — no extra round
+  /// trip — and _reconcileWebSession repairs it if the server says it lapsed.
+  Future<String> _initialUrl() async {
+    try {
+      final cookies = await CookieManager.instance().getCookies(
+        url: WebUri(EnvironmentConfig.webBaseUrl),
+      );
+      final hasWebSession = cookies.any((c) => c.name == 'sessionid');
+      if (!hasWebSession) {
+        final handoff = await AuthService.instance.createWebSessionHandoffUrl();
+        if (handoff != null) {
+          return handoff;
+        }
+      }
+    } on Object catch (e) {
+      debugPrint('Web session bootstrap skipped: $e');
+    }
+    return EnvironmentConfig.webBaseUrl;
   }
 
   @override
@@ -322,21 +329,19 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   /// explicit tap, since Square's charge takes over the screen with its own
   /// full-screen Activity (there's no in-place card read). Shows the sheet as a
   /// modal over the WebView so the cashier never leaves the page. Requires a
-  /// native sign-in (the payment API is JWT-backed) and a Tap-to-Pay-capable
-  /// device; otherwise it falls back to sign-in or leaves the web checkout in
-  /// place. On a settled charge it reloads the page so it re-renders PAID.
+  /// Tap-to-Pay-capable device; otherwise it leaves the web checkout in place.
+  /// On a settled charge it reloads the page so it re-renders PAID.
   Future<void> _launchPayment(int invoicePk) async {
     if (_activePaymentPk != null) {
       return;
     }
     _activePaymentPk = invoicePk; // claim synchronously to block re-entrancy
     try {
-      // Presence of tokens is enough to enter; the API client refreshes or
-      // surfaces a 401 from there. No tokens → sign in first.
+      // The router only mounts this screen signed in, so tokens are normally
+      // present; they vanish only when the session just died, in which case
+      // the router is about to trap to the login screen — don't start a
+      // charge on top of that.
       if (!await ApiService.instance.hasTokens) {
-        if (mounted) {
-          unawaited(context.push('/login'));
-        }
         return;
       }
       // Never let a capability-probe failure escape as an unhandled async
@@ -379,46 +384,14 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
 
   // ── WebView ↔ native session bridging ─────────────────────────────────────
 
-  /// Reacts to the native auth state changing. When the user signs in, log the
-  /// WebView's Django session in too (handoff) so one sign-in covers both. The
-  /// first resolution (session restore on launch) is skipped — the WebView
-  /// usually already holds a valid cookie, and _reconcileWebSession covers the
-  /// case it doesn't.
-  void _onAuthChanged(
-    AsyncValue<AppUser?>? previous,
-    AsyncValue<AppUser?> next,
-  ) {
-    if (next.isLoading) {
-      return;
-    }
-    final signedIn = next.valueOrNull != null;
-    if (!_sawInitialAuth) {
-      _sawInitialAuth = true;
-      _lastSignedIn = signedIn;
-      return;
-    }
-    if (signedIn == _lastSignedIn) {
-      return;
-    }
-    _lastSignedIn = signedIn;
-    _handoffAttempts = 0; // a new auth state gets a fresh handoff budget
-    if (signedIn) {
-      // Land back on the page the user was on, now authenticated.
-      _ensureWebSession();
-    }
-    // Sign-out needs no action here: the logout navigation clears the web
-    // session, and the menu follows authProvider.
-  }
-
   /// Repairs session drift on each page load. The web navbar is hidden in-app
   /// (the server detects the app from its User-Agent), so the reliable signal
   /// that the WebView's session has lapsed is the server bouncing an
-  /// auth-required page to /accounts/login/:
-  ///  • signed in natively → run the handoff to re-establish the web session
-  ///    and resume the intended ?next= destination;
-  ///  • signed out → funnel sign-in through the native screen (the one front
-  ///    door for both sessions) rather than the web login form, which would
-  ///    create a web-only session with no JWT.
+  /// auth-required page to /accounts/login/: run the handoff to re-establish
+  /// the web session and resume the intended ?next= destination. The web login
+  /// form is never shown in the app — the native login screen is the one front
+  /// door for both sessions (a web-form login would create a cookie session
+  /// with no JWT).
   Future<void> _reconcileWebSession(Uri uri) async {
     final webHost = Uri.parse(EnvironmentConfig.webBaseUrl).host;
     if (uri.path != '/accounts/login/' || uri.host != webHost) {
@@ -426,14 +399,14 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     }
     if (ref.read(authProvider).valueOrNull != null) {
       await _ensureWebSession(next: uri.queryParameters['next']);
-    } else if (mounted) {
-      unawaited(context.push('/login'));
     }
+    // Natively signed out only during the brief window before the router
+    // traps back to the login screen — nothing to do here.
   }
 
   /// Logs the WebView into the Django session matching the native JWT, via the
-  /// backend handoff. Bounded to one attempt per signed-in state (reset on each
-  /// auth transition) so a failed handoff can't loop.
+  /// backend handoff. Bounded to one attempt per screen lifetime so a failed
+  /// handoff can't loop.
   Future<void> _ensureWebSession({String? next}) async {
     if (_handoffAttempts > 0) {
       return;
@@ -466,34 +439,62 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     return pathQuery.isEmpty ? null : pathQuery;
   }
 
-  /// Sign out everywhere: drop the native JWT (drives the menu, releases
-  /// Square) and POST the web logout so Django clears its session cookie.
-  /// allauth requires POST + CSRF, so submit a form carrying the csrftoken
-  /// cookie rather than navigating by GET.
+  /// Sign out everywhere. Order matters: the web logout POST runs first (it
+  /// needs the WebView's cookies), then the cookies are dropped so the WebView
+  /// is signed out no matter what, and the native session goes last — flipping
+  /// authProvider makes the router swap this screen for the login trap, so
+  /// nothing here can run after it.
+  ///
+  /// Deleting all cookies (not just sessionid) is deliberate: sign-out is the
+  /// device-changes-hands moment, and it guarantees the account screens'
+  /// WebView can't carry a stale session into the next user's signup. The
+  /// location cookies are re-seeded on the next mount.
   Future<void> _signOut() async {
+    await _postWebLogout();
+    await CookieManager.instance().deleteAllCookies();
     await ref.read(authProvider.notifier).logout();
-    await _controller?.evaluateJavascript(source: _logoutFormJs);
   }
 
-  // Submits a real POST to the allauth logout view, carrying the CSRF token
-  // from the cookie (logout is POST-only; a GET just renders a confirm page).
-  static const String _logoutFormJs = '''
-(function(){
-  var m = document.cookie.match(/(?:^|; )csrftoken=([^;]+)/);
-  var f = document.createElement('form');
-  f.method = 'POST';
-  f.action = '/accounts/logout/';
-  if (m) {
-    var i = document.createElement('input');
-    i.type = 'hidden';
-    i.name = 'csrfmiddlewaretoken';
-    i.value = decodeURIComponent(m[1]);
-    f.appendChild(i);
+  /// POSTs the allauth logout (POST + CSRF required) directly with the
+  /// WebView's cookies, so the server-side session is invalidated even though
+  /// the WebView itself is about to be torn down (an in-page form submit would
+  /// race the unmount). Best-effort: the cookie wipe that follows signs the
+  /// WebView out regardless.
+  Future<void> _postWebLogout() async {
+    try {
+      final base = WebUri(EnvironmentConfig.webBaseUrl);
+      final cookies = await CookieManager.instance().getCookies(url: base);
+      final csrf = cookies
+          .where((c) => c.name == 'csrftoken')
+          .map((c) => '${c.value}')
+          .firstOrNull;
+      if (csrf == null || !cookies.any((c) => c.name == 'sessionid')) {
+        return; // no web session to log out
+      }
+      final cookieHeader = cookies
+          .map((c) => '${c.name}=${c.value}')
+          .join('; ');
+      await Dio().post<void>(
+        '${EnvironmentConfig.webBaseUrl}/accounts/logout/',
+        data: 'csrfmiddlewaretoken=${Uri.encodeQueryComponent(csrf)}',
+        options: Options(
+          contentType: Headers.formUrlEncodedContentType,
+          headers: {
+            'Cookie': cookieHeader,
+            // Django's CSRF check on HTTPS requires a same-origin Referer.
+            'Referer': '${EnvironmentConfig.webBaseUrl}/',
+            'User-Agent': AppConstants.userAgent,
+          },
+          followRedirects: false,
+          validateStatus: (_) => true,
+          sendTimeout: const Duration(seconds: 10),
+          receiveTimeout: const Duration(seconds: 10),
+        ),
+      );
+    } on Object catch (e) {
+      debugPrint('Web logout POST failed (cookies wiped anyway): $e');
+    }
   }
-  document.body.appendChild(f);
-  f.submit();
-})();
-''';
 
   void _loadPath(String path) {
     _controller?.loadUrl(
@@ -517,16 +518,7 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     return (b == null || b.isEmpty) ? AppConstants.appName : b;
   }
 
-  void _onTitleTap() {
-    // The command palette is backed by the JWT API, so it needs a native
-    // sign-in. Prompt for one if missing; otherwise open search.
-    final user = ref.read(authProvider).valueOrNull;
-    if (user == null) {
-      context.push('/login');
-      return;
-    }
-    showCommandPalette(context, _loadPath);
-  }
+  void _onTitleTap() => showCommandPalette(context, _loadPath);
 
   // ── Navigation, downloads, permissions, bridges ───────────────────────────
 
@@ -567,13 +559,15 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       return NavigationActionPolicy.CANCEL;
     }
 
-    // A logout on our host — the in-page web sign-out — must also drop the
-    // native JWT so the two sessions stay in lockstep. Skip if already signed
-    // out so our own menu logout doesn't double-fire. Fire-and-forget: the
-    // navigation continues while the JWT is cleared.
+    // A logout link on our host — an in-page web sign-out — means sign out
+    // everywhere: the two sessions stay in lockstep, so run the full native
+    // sign-out (which also POSTs the web logout and wipes cookies) instead of
+    // letting the page navigate. Skip if already signed out so our own menu
+    // logout doesn't double-fire.
     if (uri.path == '/accounts/logout/' &&
         ref.read(authProvider).valueOrNull != null) {
-      unawaited(ref.read(authProvider.notifier).logout());
+      unawaited(_signOut());
+      return NavigationActionPolicy.CANCEL;
     }
 
     return NavigationActionPolicy.ALLOW;
@@ -620,7 +614,7 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   ) async {
     final error = await DownloadService.instance.handle(
       request,
-      userAgent: _userAgent,
+      userAgent: AppConstants.userAgent,
     );
     if (error != null) {
       _showSnack(error);
@@ -706,142 +700,118 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     }
   }
 
-  Widget _buildDrawer(BuildContext ctx, String brand) {
-    // The native JWT is the single source of truth for "signed in": a sign-in
-    // (here or via Google) bridges into the web session, so this one flag
-    // drives both the account links and the sign-in/out controls. No more
-    // drift, and no sign-out button while signed out.
-    final signedIn = ref.watch(authProvider).valueOrNull != null;
-    return Drawer(
-      child: SafeArea(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 20, 16, 12),
-              child: Text(
-                brand,
-                style: Theme.of(
+  // The router only mounts this screen for a signed-in session, so the drawer
+  // always shows the full account menu — there is no signed-out variant
+  // (signed-out users live on the login/signup screens).
+  Widget _buildDrawer(BuildContext ctx, String brand) => Drawer(
+    child: SafeArea(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 20, 16, 12),
+            child: Text(
+              brand,
+              style: Theme.of(
+                ctx,
+              ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
+            ),
+          ),
+          const Divider(height: 1),
+          Expanded(
+            child: ListView(
+              padding: EdgeInsets.zero,
+              children: [
+                _navTile(ctx, Icons.gavel, 'Auctions', '/auctions/'),
+                _navTile(ctx, Icons.grid_view, 'Lots', '/lots/all/'),
+                _clubsTile(ctx),
+                // The full account menu, mirroring the website navbar.
+                const Divider(),
+                _sectionHeader(ctx, 'My lots'),
+                _navTile(ctx, Icons.sell, 'Selling', '/selling/'),
+                _navTile(
                   ctx,
-                ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
-              ),
-            ),
-            const Divider(height: 1),
-            Expanded(
-              child: ListView(
-                padding: EdgeInsets.zero,
-                children: [
-                  // Browsing is open to everyone — always shown.
-                  _navTile(ctx, Icons.gavel, 'Auctions', '/auctions/'),
-                  _navTile(ctx, Icons.grid_view, 'Lots', '/lots/all/'),
-                  _clubsTile(ctx),
-                  // The full account menu, mirroring the website navbar.
-                  if (signedIn) ...[
-                    const Divider(),
-                    _sectionHeader(ctx, 'My lots'),
-                    _navTile(ctx, Icons.sell, 'Selling', '/selling/'),
+                  Icons.favorite_border,
+                  'Watched lots',
+                  '/lots/watched/',
+                ),
+                _navTile(ctx, Icons.monetization_on, 'Bids', '/bids/'),
+                _navTile(ctx, Icons.emoji_events, 'Won lots', '/lots/won/'),
+                const Divider(),
+                _sectionHeader(ctx, 'Account'),
+                _navTile(
+                  ctx,
+                  Icons.account_circle,
+                  'Account information',
+                  '/account/',
+                ),
+                _navTile(ctx, Icons.receipt_long, 'Invoices', '/invoices/'),
+                _navTile(
+                  ctx,
+                  Icons.chat_bubble_outline,
+                  'Messages',
+                  '/messages/',
+                ),
+                _navTile(
+                  ctx,
+                  Icons.contact_phone,
+                  'Contact info',
+                  '/contact_info/',
+                ),
+                _navTile(ctx, Icons.tune, 'Preferences', '/preferences/'),
+                _navTile(
+                  ctx,
+                  Icons.label_outline,
+                  'Label printing',
+                  '/printing/',
+                ),
+                _navTile(ctx, Icons.block, 'Ignore categories', '/ignore/'),
+                _navTile(
+                  ctx,
+                  Icons.feedback_outlined,
+                  'Feedback',
+                  '/feedback/',
+                ),
+                const Divider(),
+                ExpansionTile(
+                  leading: const Icon(Icons.info_outline),
+                  title: const Text('About'),
+                  children: [
+                    _navTile(ctx, null, 'FAQ', '/faq/', indent: true),
                     _navTile(
                       ctx,
-                      Icons.favorite_border,
-                      'Watched lots',
-                      '/lots/watched/',
-                    ),
-                    _navTile(ctx, Icons.monetization_on, 'Bids', '/bids/'),
-                    _navTile(ctx, Icons.emoji_events, 'Won lots', '/lots/won/'),
-                    const Divider(),
-                    _sectionHeader(ctx, 'Account'),
-                    _navTile(
-                      ctx,
-                      Icons.account_circle,
-                      'Account information',
-                      '/account/',
-                    ),
-                    _navTile(ctx, Icons.receipt_long, 'Invoices', '/invoices/'),
-                    _navTile(
-                      ctx,
-                      Icons.chat_bubble_outline,
-                      'Messages',
-                      '/messages/',
-                    ),
-                    _navTile(
-                      ctx,
-                      Icons.contact_phone,
-                      'Contact info',
-                      '/contact_info/',
-                    ),
-                    _navTile(ctx, Icons.tune, 'Preferences', '/preferences/'),
-                    _navTile(
-                      ctx,
-                      Icons.label_outline,
-                      'Label printing',
-                      '/printing/',
-                    ),
-                    _navTile(ctx, Icons.block, 'Ignore categories', '/ignore/'),
-                    _navTile(
-                      ctx,
-                      Icons.feedback_outlined,
-                      'Feedback',
-                      '/feedback/',
+                      null,
+                      'Terms & Conditions',
+                      '/tos/',
+                      indent: true,
                     ),
                   ],
-                  const Divider(),
-                  ExpansionTile(
-                    leading: const Icon(Icons.info_outline),
-                    title: const Text('About'),
-                    children: [
-                      _navTile(ctx, null, 'FAQ', '/faq/', indent: true),
-                      _navTile(
-                        ctx,
-                        null,
-                        'Terms & Conditions',
-                        '/tos/',
-                        indent: true,
-                      ),
-                    ],
-                  ),
-                  // Native hardware setup — not a web page.
-                  ListTile(
-                    leading: const Icon(Icons.print),
-                    title: const Text('Printer setup'),
-                    onTap: () {
-                      Navigator.of(ctx).pop();
-                      context.push('/settings/printer');
-                    },
-                  ),
-                  const Divider(),
-                  if (signedIn)
-                    ListTile(
-                      leading: const Icon(Icons.logout),
-                      title: const Text('Sign out'),
-                      onTap: () {
-                        Navigator.of(ctx).pop();
-                        unawaited(_signOut());
-                      },
-                    )
-                  else ...[
-                    ListTile(
-                      leading: const Icon(Icons.login),
-                      title: const Text('Sign in'),
-                      onTap: () {
-                        Navigator.of(ctx).pop();
-                        context.push('/login');
-                      },
-                    ),
-                    _navTile(
-                      ctx,
-                      Icons.person_add,
-                      'Create account',
-                      '/accounts/signup/',
-                    ),
-                  ],
-                ],
-              ),
+                ),
+                // Native hardware setup — not a web page.
+                ListTile(
+                  leading: const Icon(Icons.print),
+                  title: const Text('Printer setup'),
+                  onTap: () {
+                    Navigator.of(ctx).pop();
+                    context.push('/settings/printer');
+                  },
+                ),
+                const Divider(),
+                ListTile(
+                  leading: const Icon(Icons.logout),
+                  title: const Text('Sign out'),
+                  onTap: () {
+                    Navigator.of(ctx).pop();
+                    unawaited(_signOut());
+                  },
+                ),
+              ],
             ),
-          ],
-        ),
+          ),
+        ],
       ),
-    );
-  }
+    ),
+  );
 
   /// The drawer's "Clubs" entry. Signed in with memberships → an expandable
   /// menu ("Find a club" + each club, admin ones badged), rebuilding the web
@@ -900,9 +870,6 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
 
   @override
   Widget build(BuildContext context) {
-    // When the native session signs in, bridge it into the WebView's Django
-    // session (and reset bridging state on sign-out). See _onAuthChanged.
-    ref.listen<AsyncValue<AppUser?>>(authProvider, _onAuthChanged);
     final brand = _brandName;
     // Back navigation lives on the system back button/gesture (below) for
     // Android; canPop stays false so we route it through WebView history first

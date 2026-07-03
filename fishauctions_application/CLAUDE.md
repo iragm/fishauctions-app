@@ -201,17 +201,47 @@ GitHub Actions live in `.github/workflows/` (repo root, above `fishauctions_appl
 
 Builds require **JDK 17** (AGP 9). `minSdk` is **28** (Square SDK floor).
 
+## Auth Model — Account Required
+
+The app has **no anonymous browsing**. The router (`lib/config/router.dart`)
+traps signed-out users on three gate screens until a sign-in succeeds:
+
+- `/login` — native login (password + "Continue with Google"). The Google
+  button renders only when the deployment's `/api/mobile/config/` returns a
+  non-empty `google_server_client_id`; unconfigured deployments simply don't
+  offer it (no "not configured" error).
+- `/signup`, `/password-reset` — the django-allauth web flows
+  (`/accounts/signup/`, `/accounts/password/reset/`) hosted in a restricted
+  WebView (`AllauthWebScreen`): navigation is confined to `/accounts/…`, a link
+  to the web login form returns to the native login screen, and anything else
+  opens in the system browser. This keeps reCAPTCHA, email verification, and
+  throttling server-side with no native re-implementation.
+
+The native JWT (`authProvider`) is the single source of truth for "signed in".
+Session restore falls back to a cached profile when the network is down (tokens
+present ⇒ signed in); a definitive refresh-token rejection signs the app out
+globally via `ApiService.onSessionInvalidated` → router → `/login`. Sign-out
+clears everything: web logout POST, all WebView cookies, JWT pair, cached
+profile, Google account picker state, Square authorization.
+
 ## WebView Integration Notes
 
-The WebView loads the Django web UI. JWT auth must be bridged into the WebView session:
+The WebView loads the Django web UI and only mounts for a signed-in session.
+JWT auth is bridged into the WebView's Django cookie session:
 
-- After login, exchange the JWT for a session cookie via the `/api/mobile/auth/web-session/` handoff endpoint (implemented), OR
-- Inject the JWT as a header on every WebView request via a navigation delegate
-- The WebView intercepts specific URL patterns to trigger native flows (e.g. `/print/<lot_pk>/` → native Bluetooth print dialog, `/pay/<invoice_pk>/` → native Square payment flow)
+- On first load, if the WebView has no `sessionid` cookie (fresh sign-in, or
+  cookies wiped by sign-out) the shell boots through the
+  `/api/mobile/auth/web-session/` handoff so the very first page renders signed
+  in; otherwise it loads directly and repairs a lapsed session when the server
+  bounces to `/accounts/login/` (`_reconcileWebSession`).
+- The web login form is never shown in-app — a web-form login would create a
+  cookie session with no JWT.
+- The WebView intercepts specific URL patterns to trigger native flows (e.g. `fishauctions://print/<lot_pk>` → native Bluetooth print dialog, `fishauctions://pay/<invoice_pk>` → native Square payment flow); a web `/accounts/logout/` navigation triggers the full native sign-out instead of navigating.
 
 ## Key Decisions
 
 - **WebView-first:** The web UI is the source of truth for all business logic and display. Flutter native code only handles hardware.
+- **Account required:** No signed-out mode. Signup/password-reset ride the allauth web flows in a restricted WebView rather than native forms.
 - **JWT only for API calls:** The WebView session uses cookies like normal web. JWT is only used for the REST API calls from Dart code.
 - **Flavor = environment:** Never hardcode URLs. Always read from `EnvironmentConfig`.
 - **Secure storage for tokens:** `flutter_secure_storage` everywhere. No exceptions.

@@ -5,20 +5,22 @@ import 'package:go_router/go_router.dart';
 
 import '../constants/app_constants.dart';
 import '../providers/auth_provider.dart';
-import '../services/auth_service.dart';
+import '../providers/config_provider.dart';
 import '../services/social_auth_service.dart';
 
-/// The app's single sign-in. Email/username + password and "Continue with
-/// Google" both produce the JWT the native features (payments, label printing,
-/// command palette) use; the WebView shell then bridges that same session into
-/// its Django cookie session, so one sign-in authenticates browsing too.
+/// The app's front door. An account is required to use the app at all — the
+/// router traps signed-out users here (plus the signup and password-reset
+/// screens) until a sign-in succeeds, at which point the router redirect
+/// moves them on; this screen never navigates on success itself.
 ///
-/// Shown by the router when an unauthenticated user opens a feature that needs
-/// the API, or from the menu; [from] is the location to return to afterwards.
+/// Email/username + password and "Continue with Google" both produce the JWT
+/// the native features use; the WebView shell then bridges that session into
+/// its Django cookie session. The Google button only renders when the
+/// deployment has a Google OAuth client id configured
+/// (`google_server_client_id` in `/api/mobile/config/`) — an unconfigured
+/// deployment simply doesn't offer it.
 class LoginScreen extends ConsumerStatefulWidget {
-  const LoginScreen({this.from, super.key});
-
-  final String? from;
+  const LoginScreen({super.key});
 
   @override
   ConsumerState<LoginScreen> createState() => _LoginScreenState();
@@ -61,9 +63,9 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
         _submitting = false;
         _error = _messageFor(state.error);
       });
-      return;
     }
-    await _afterAuthSuccess();
+    // On success the router redirect takes over; leave _submitting on so the
+    // button doesn't blink back to life for the frame before it does.
   }
 
   Future<void> _signInWithGoogle() async {
@@ -104,26 +106,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
         _submitting = false;
         _error = _googleMessageFor(state.error);
       });
-      return;
     }
-    await _afterAuthSuccess();
-  }
-
-  // Signed in — register this device (best-effort) and return to the caller.
-  Future<void> _afterAuthSuccess() async {
-    await AuthService.instance.registerThisDevice();
-    if (!mounted) {
-      return;
-    }
-    context.go(_safeTarget(widget.from));
-  }
-
-  // Only allow returning to in-app paths, never an attacker-supplied scheme.
-  String _safeTarget(String? from) {
-    if (from != null && from.startsWith('/') && !from.startsWith('//')) {
-      return from;
-    }
-    return '/';
   }
 
   String _messageFor(Object? error) {
@@ -145,104 +128,131 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   }
 
   @override
-  Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: const Text('Sign in')),
-    body: SafeArea(
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.all(24),
-        child: Form(
-          key: _formKey,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              const SizedBox(height: 8),
-              Text(
-                'Sign in to your ${AppConstants.appName} account. One sign-in '
-                'covers browsing, payments and label printing.',
-                style: Theme.of(context).textTheme.bodyMedium,
-              ),
-              const SizedBox(height: 24),
-              TextFormField(
-                controller: _credController,
-                autocorrect: false,
-                enableSuggestions: false,
-                textInputAction: TextInputAction.next,
-                decoration: const InputDecoration(
-                  labelText: 'Username or email',
-                  border: OutlineInputBorder(),
-                ),
-                validator: (v) =>
-                    (v == null || v.trim().isEmpty) ? 'Required' : null,
-              ),
-              const SizedBox(height: 16),
-              TextFormField(
-                controller: _passController,
-                obscureText: _obscure,
-                textInputAction: TextInputAction.done,
-                onFieldSubmitted: (_) => _submitting ? null : _submit(),
-                decoration: InputDecoration(
-                  labelText: 'Password',
-                  border: const OutlineInputBorder(),
-                  suffixIcon: IconButton(
-                    icon: Icon(
-                      _obscure ? Icons.visibility : Icons.visibility_off,
-                    ),
-                    onPressed: () => setState(() => _obscure = !_obscure),
-                  ),
-                ),
-                validator: (v) => (v == null || v.isEmpty) ? 'Required' : null,
-              ),
-              if (_error != null) ...[
-                const SizedBox(height: 16),
+  Widget build(BuildContext context) {
+    final config = ref.watch(configProvider).valueOrNull;
+    final brand = (config?.brandName.isNotEmpty ?? false)
+        ? config!.brandName
+        : AppConstants.appName;
+    final googleConfigured = config?.googleServerClientId.isNotEmpty ?? false;
+    return Scaffold(
+      appBar: AppBar(title: const Text('Sign in')),
+      body: SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(24),
+          child: Form(
+            key: _formKey,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const SizedBox(height: 8),
                 Text(
-                  _error!,
-                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+                  'Sign in to your $brand account.',
+                  style: Theme.of(context).textTheme.bodyMedium,
+                ),
+                const SizedBox(height: 24),
+                TextFormField(
+                  controller: _credController,
+                  autocorrect: false,
+                  enableSuggestions: false,
+                  textInputAction: TextInputAction.next,
+                  decoration: const InputDecoration(
+                    labelText: 'Username or email',
+                    border: OutlineInputBorder(),
+                  ),
+                  validator: (v) =>
+                      (v == null || v.trim().isEmpty) ? 'Required' : null,
+                ),
+                const SizedBox(height: 16),
+                TextFormField(
+                  controller: _passController,
+                  obscureText: _obscure,
+                  textInputAction: TextInputAction.done,
+                  onFieldSubmitted: (_) => _submitting ? null : _submit(),
+                  decoration: InputDecoration(
+                    labelText: 'Password',
+                    border: const OutlineInputBorder(),
+                    suffixIcon: IconButton(
+                      icon: Icon(
+                        _obscure ? Icons.visibility : Icons.visibility_off,
+                      ),
+                      onPressed: () => setState(() => _obscure = !_obscure),
+                    ),
+                  ),
+                  validator: (v) =>
+                      (v == null || v.isEmpty) ? 'Required' : null,
+                ),
+                if (_error != null) ...[
+                  const SizedBox(height: 16),
+                  Text(
+                    _error!,
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.error,
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 24),
+                FilledButton(
+                  onPressed: _submitting ? null : _submit,
+                  child: _submitting
+                      ? const SizedBox(
+                          height: 20,
+                          width: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Text('Sign in'),
+                ),
+                TextButton(
+                  onPressed: _submitting
+                      ? null
+                      : () => context.push('/password-reset'),
+                  child: const Text('Forgot password?'),
+                ),
+                if (googleConfigured) ...[
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      const Expanded(child: Divider()),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        child: Text(
+                          'or',
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                      ),
+                      const Expanded(child: Divider()),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  // No Google wordmark asset is bundled yet; the Material "G"
+                  // glyph is a placeholder — swap for the brand asset before
+                  // release.
+                  OutlinedButton.icon(
+                    onPressed: _submitting ? null : _signInWithGoogle,
+                    icon: const Icon(Icons.g_mobiledata, size: 28),
+                    label: const Text('Continue with Google'),
+                  ),
+                ],
+                const SizedBox(height: 24),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text(
+                      "Don't have an account?",
+                      style: Theme.of(context).textTheme.bodyMedium,
+                    ),
+                    TextButton(
+                      onPressed: _submitting
+                          ? null
+                          : () => context.push('/signup'),
+                      child: const Text('Create account'),
+                    ),
+                  ],
                 ),
               ],
-              const SizedBox(height: 24),
-              FilledButton(
-                onPressed: _submitting ? null : _submit,
-                child: _submitting
-                    ? const SizedBox(
-                        height: 20,
-                        width: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Text('Sign in'),
-              ),
-              const SizedBox(height: 16),
-              Row(
-                children: [
-                  const Expanded(child: Divider()),
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 12),
-                    child: Text(
-                      'or',
-                      style: Theme.of(context).textTheme.bodySmall,
-                    ),
-                  ),
-                  const Expanded(child: Divider()),
-                ],
-              ),
-              const SizedBox(height: 16),
-              // No Google wordmark asset is bundled yet; the Material "G" glyph
-              // is a placeholder — swap for the brand asset before release.
-              OutlinedButton.icon(
-                onPressed: _submitting ? null : _signInWithGoogle,
-                icon: const Icon(Icons.g_mobiledata, size: 28),
-                label: const Text('Continue with Google'),
-              ),
-              const SizedBox(height: 8),
-              // Browsing never requires an account, so always offer a way back
-              // to the WebView home (the gated target would just bounce here).
-              TextButton(
-                onPressed: _submitting ? null : () => context.go('/'),
-                child: const Text('Not now — keep browsing'),
-              ),
-            ],
+            ),
           ),
         ),
       ),
-    ),
-  );
+    );
+  }
 }

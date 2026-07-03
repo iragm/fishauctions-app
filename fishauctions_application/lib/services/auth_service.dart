@@ -1,18 +1,25 @@
+import 'dart:convert';
+
 import 'package:dio/dio.dart';
 import 'package:logger/logger.dart';
 
 import '../models/auth_models.dart';
 import '../utils/device_identity.dart';
+import '../utils/secure_storage.dart';
 import 'api_service.dart';
+import 'social_auth_service.dart';
 import 'square_payment_service.dart';
 
 final _log = Logger();
+
+const _keyCachedUser = 'cached_user_profile';
 
 class AuthService {
   AuthService._();
   static final AuthService instance = AuthService._();
 
   final _api = ApiService.instance;
+  final _storage = secureStorage;
 
   /// Log in with username/email + password. Stores tokens and returns the user.
   Future<AppUser> login(String credential, String password) async {
@@ -38,17 +45,37 @@ class AuthService {
   Future<AppUser> _storeTokensAndFetchUser(Map<String, dynamic> data) async {
     final pair = TokenPair.fromJson(data);
     await _api.saveTokens(pair.access, pair.refresh);
-    return fetchCurrentUser();
+    final user = await fetchCurrentUser();
+    // Every fresh sign-in registers the install; best-effort, never throws.
+    await registerThisDevice();
+    return user;
   }
 
-  /// Fetch the authenticated user's profile from /auth/me/.
+  /// Fetch the authenticated user's profile from /auth/me/. The profile is
+  /// cached in secure storage so [tryRestoreSession] can restore a signed-in
+  /// state when the network is down at launch.
   Future<AppUser> fetchCurrentUser() async {
     final res = await _api.dio.get('auth/me/');
-    return AppUser.fromJson(res.data as Map<String, dynamic>);
+    final data = res.data as Map<String, dynamic>;
+    await _storage.write(key: _keyCachedUser, value: jsonEncode(data));
+    return AppUser.fromJson(data);
   }
 
-  /// Clear stored tokens and release the Square authorization. The WebView
-  /// cookie session is cleared separately by the WebView screen.
+  Future<AppUser?> _cachedUser() async {
+    final raw = await _storage.read(key: _keyCachedUser);
+    if (raw == null) {
+      return null;
+    }
+    try {
+      return AppUser.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+    } on Object {
+      return null; // unreadable cache — treat as absent
+    }
+  }
+
+  /// Clear stored tokens, the cached profile, the Google account picker
+  /// state, and the Square authorization. The WebView cookie session is
+  /// cleared separately by the WebView screen.
   Future<void> logout() async {
     // Best-effort: a device left authorized for a seller after sign-out is a
     // security risk, but a deauthorize failure must not block logout.
@@ -57,24 +84,34 @@ class AuthService {
     } on Object catch (e) {
       _log.w('Square deauthorize on logout failed: $e');
     }
+    // So the next Google sign-in shows the account picker instead of silently
+    // reusing the signed-out account. Never throws.
+    await SocialAuthService.instance.signOut();
     await _api.clearTokens();
+    await _storage.delete(key: _keyCachedUser);
   }
 
-  /// Returns a user if valid tokens exist, null otherwise.
+  /// Returns the signed-in user, or null when there is no usable session.
+  ///
+  /// The API client refreshes-and-retries a 401 internally and wipes the
+  /// stored tokens only when the refresh token is definitively rejected. So
+  /// after a failure here: tokens gone → the session is truly dead; tokens
+  /// still present → the failure was transient (offline, 5xx, mid-flight
+  /// drop) and we restore the cached profile instead of bouncing a signed-in
+  /// user to the login screen. If the session later turns out to be dead, the
+  /// first definitive refresh rejection signs the app out globally via
+  /// [ApiService.onSessionInvalidated].
   Future<AppUser?> tryRestoreSession() async {
     if (!await _api.hasTokens) {
       return null;
     }
     try {
       return await fetchCurrentUser();
-    } on DioException catch (e) {
-      if (e.response?.statusCode == 401) {
-        // Access token expired — try refresh.
-        final refreshed = await _api.refreshTokens();
-        if (refreshed) {
-          return fetchCurrentUser();
-        }
+    } on DioException {
+      if (await _api.hasTokens) {
+        return _cachedUser();
       }
+      await _storage.delete(key: _keyCachedUser);
       return null;
     }
   }

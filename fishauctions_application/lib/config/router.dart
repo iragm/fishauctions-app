@@ -1,34 +1,68 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../providers/auth_provider.dart';
+import '../screens/allauth_web_screen.dart';
 import '../screens/login_screen.dart';
 import '../screens/print_label_screen.dart';
 import '../screens/printer_screen.dart';
+import '../screens/splash_screen.dart';
 import '../screens/webview_screen.dart';
-import '../services/api_service.dart';
 
-/// Routes that hit the JWT-backed mobile API and therefore require a native
-/// sign-in first. (Payment is launched as a modal over the WebView, not a
-/// route — its sign-in gate lives in WebViewScreen._launchPayment.)
-bool _requiresAuth(String location) => location.startsWith('/print/');
+/// The screens an anonymous user is allowed on. Everything else requires an
+/// account — the app has no anonymous browsing, so the redirect below traps
+/// signed-out users on these until they sign in.
+const _gateLocations = {'/login', '/signup', '/password-reset'};
 
-final routerProvider = Provider<GoRouter>(
-  (ref) => GoRouter(
+/// Only allow returning to in-app paths, never an attacker-supplied scheme.
+String _safeFrom(String? from) {
+  if (from != null && from.startsWith('/') && !from.startsWith('//')) {
+    return from;
+  }
+  return '/';
+}
+
+final routerProvider = Provider<GoRouter>((ref) {
+  // Re-run the redirect whenever auth changes: the initial session restore
+  // resolving, sign-in, sign-out, or a mid-session token death.
+  final refresh = ValueNotifier(0);
+  ref
+    ..listen(authProvider, (_, _) => refresh.value++)
+    ..onDispose(refresh.dispose);
+  return GoRouter(
     initialLocation: '/',
-    redirect: (context, state) async {
+    refreshListenable: refresh,
+    redirect: (context, state) {
+      final auth = ref.read(authProvider);
       final location = state.matchedLocation;
-      if (!_requiresAuth(location)) {
-        return null;
+      // Only the launch-time session restore is ever loading (login attempts
+      // keep their previous state); park on the splash screen until it
+      // resolves so the login screen doesn't flash for signed-in users.
+      if (auth.isLoading) {
+        return location == '/splash' ? null : '/splash';
       }
-      // Presence of tokens is enough to enter; the API client refreshes or
-      // surfaces a 401 from there. No tokens at all → sign in first.
-      if (await ApiService.instance.hasTokens) {
-        return null;
+      final signedIn = auth.valueOrNull != null;
+      final onGate = _gateLocations.contains(location);
+      if (!signedIn) {
+        if (onGate) {
+          return null;
+        }
+        // Remember where the user was so sign-in returns them there (matters
+        // for a mid-session sign-out on a native screen, e.g. /print/…).
+        final from = Uri.encodeQueryComponent(state.uri.toString());
+        return location == '/splash' ? '/login' : '/login?from=$from';
       }
-      final from = Uri.encodeQueryComponent(state.uri.toString());
-      return '/login?from=$from';
+      if (onGate || location == '/splash') {
+        return _safeFrom(state.uri.queryParameters['from']);
+      }
+      return null;
     },
     routes: [
+      GoRoute(
+        path: '/splash',
+        builder: (context, state) => const SplashScreen(),
+      ),
       GoRoute(
         path: '/',
         builder: (context, state) => const WebViewScreen(),
@@ -39,10 +73,16 @@ final routerProvider = Provider<GoRouter>(
           ),
         ],
       ),
+      // ?from= is consumed by the redirect above (post-sign-in return), not
+      // by the screen.
+      GoRoute(path: '/login', builder: (context, state) => const LoginScreen()),
       GoRoute(
-        path: '/login',
-        builder: (context, state) =>
-            LoginScreen(from: state.uri.queryParameters['from']),
+        path: '/signup',
+        builder: (context, state) => const AllauthWebScreen.signup(),
+      ),
+      GoRoute(
+        path: '/password-reset',
+        builder: (context, state) => const AllauthWebScreen.passwordReset(),
       ),
       GoRoute(
         path: '/print/:lotPk',
@@ -50,5 +90,5 @@ final routerProvider = Provider<GoRouter>(
             PrintLabelScreen(lotPk: int.parse(state.pathParameters['lotPk']!)),
       ),
     ],
-  ),
-);
+  );
+});

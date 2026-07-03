@@ -22,6 +22,12 @@ class ApiService {
   /// Tracks an in-flight refresh so concurrent 401s share one call.
   Future<bool>? _pendingRefresh;
 
+  /// Invoked when the session dies mid-use: the refresh token was
+  /// definitively rejected and the stored tokens wiped. The auth layer sets
+  /// this to flip the app to signed-out (which routes back to the login
+  /// screen); until then it's null and session death is silent.
+  void Function()? onSessionInvalidated;
+
   // ── Public Dio instance (use for all API calls) ──────────────────────────
 
   Dio get dio => _dio;
@@ -103,6 +109,7 @@ class ApiService {
       if (status == 400 || status == 401 || status == 403) {
         _log.w('Refresh token rejected ($status); clearing session');
         await clearTokens();
+        onSessionInvalidated?.call();
       } else {
         _log.w('Token refresh failed transiently: $e');
       }
