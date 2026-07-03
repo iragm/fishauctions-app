@@ -102,21 +102,22 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      # Uncomment once BOTH Play Console prerequisites exist:
-      #   1. The first .aab has been uploaded MANUALLY in the Play Console
-      #      (Google requires this before the API will accept uploads), and
-      #   2. A Google Play service-account JSON is stored as the
-      #      PLAY_SERVICE_ACCOUNT_JSON secret.
-      # `status: completed` publishes to the chosen track's testers immediately;
-      # use `draft` if you'd rather review in the console before releasing.
-      # - name: Upload to Google Play (${{ inputs.track }} track)
-      #   uses: r0adkll/upload-google-play@v1
-      #   with:
-      #     serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
-      #     packageName: com.fishauctions.app
-      #     releaseFiles: fishauctions_application/build/app/outputs/bundle/prodRelease/app-prod-release.aab
-      #     track: ${{ inputs.track }}
-      #     status: completed
+      # Prerequisites (now satisfied): the first .aab was uploaded MANUALLY in
+      # the Play Console (Google requires this before the API will accept
+      # uploads), and the service-account JSON is stored as the
+      # PLAY_SERVICE_ACCOUNT_JSON secret.
+      #
+      # status: draft uploads the release but does NOT publish it — review and
+      # promote it by hand in the Play Console. Switch to `completed` to publish
+      # to the chosen track's testers automatically once you trust the pipeline.
+      - name: Upload to Google Play (${{ inputs.track }} track)
+        uses: r0adkll/upload-google-play@v1
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: com.fishauctions.app
+          releaseFiles: fishauctions_application/build/app/outputs/bundle/prodRelease/app-prod-release.aab
+          track: ${{ inputs.track }}
+          status: draft
 
   # TODO(apple): add a macos-latest job to build iOS once Apple signing
   # (certificates, provisioning profiles, and the Tap to Pay entitlement) is
