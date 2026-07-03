@@ -88,11 +88,16 @@ jobs:
       # Google Play rejects an upload whose versionCode isn't strictly greater
       # than the last, so this auto-increments it without editing pubspec. (If
       # you also upload by hand, keep hand-picked codes below this run number.)
+      #
+      # --build-name sets the human-facing versionName to 1.<run number> so
+      # every release is uniquely labelled without editing pubspec. The pubspec
+      # version stays at 1.0.0+1 and is only used for local/dev builds.
       - name: Build signed prod app bundle
         run: >
           flutter build appbundle --release --flavor prod
           --dart-define=FLAVOR=prod
           --build-number=${{ github.run_number }}
+          --build-name=1.${{ github.run_number }}
 
       - name: Upload .aab artifact
         uses: actions/upload-artifact@v4
@@ -107,9 +112,9 @@ jobs:
       # uploads), and the service-account JSON is stored as the
       # PLAY_SERVICE_ACCOUNT_JSON secret.
       #
-      # status: draft uploads the release but does NOT publish it — review and
-      # promote it by hand in the Play Console. Switch to `completed` to publish
-      # to the chosen track's testers automatically once you trust the pipeline.
+      # status: completed publishes the release to the chosen track's testers
+      # automatically. Switch back to `draft` if you ever want to review and
+      # promote a build by hand in the Play Console before it goes live.
       - name: Upload to Google Play (${{ inputs.track }} track)
         uses: r0adkll/upload-google-play@v1
         with:
@@ -117,7 +122,7 @@ jobs:
           packageName: com.fishauctions.app
           releaseFiles: fishauctions_application/build/app/outputs/bundle/prodRelease/app-prod-release.aab
           track: ${{ inputs.track }}
-          status: draft
+          status: completed
 
   # TODO(apple): add a macos-latest job to build iOS once Apple signing
   # (certificates, provisioning profiles, and the Tap to Pay entitlement) is
