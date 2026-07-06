@@ -145,9 +145,18 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 const SizedBox(height: 8),
+                Center(
+                  child: Image.asset(
+                    'assets/icon/app_icon.png',
+                    width: 96,
+                    height: 96,
+                  ),
+                ),
+                const SizedBox(height: 16),
                 Text(
                   'Sign in to your $brand account.',
-                  style: Theme.of(context).textTheme.bodyMedium,
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context).textTheme.headlineSmall,
                 ),
                 const SizedBox(height: 24),
                 TextFormField(
