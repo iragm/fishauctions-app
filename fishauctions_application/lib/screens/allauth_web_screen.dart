@@ -13,20 +13,23 @@ import '../constants/app_constants.dart';
 ///
 /// The app requires an account (there is no anonymous browsing), so this
 /// screen is part of the login trap: navigation is confined to the site's
-/// `/accounts/…` pages. In-scope steps (signup → "verify your email",
-/// reset → "email sent") load in place; a link to the web login form returns
-/// to the native login screen instead (the native sign-in is the one front
-/// door — a web-form login would create a cookie session with no JWT); any
-/// other link opens in the system browser so the user can never browse the
-/// site in here.
+/// account pages. In-scope steps (signup → "verify your email", reset →
+/// "email sent") load in place; a link to the web login form returns to the
+/// native login screen instead (the native sign-in is the one front door — a
+/// web-form login would create a cookie session with no JWT); any other link
+/// opens in the system browser so the user can never browse the site in here.
+///
+/// The site mounts allauth at the root (`/login/`, `/signup/`,
+/// `/password/reset/`), not under `/accounts/` — django-allauth's default
+/// prefix, which this used to assume and 404'd on every path.
 class AllauthWebScreen extends StatefulWidget {
   const AllauthWebScreen.signup({super.key})
     : title = 'Create account',
-      initialPath = '/accounts/signup/';
+      initialPath = '/signup/';
 
   const AllauthWebScreen.passwordReset({super.key})
     : title = 'Reset password',
-      initialPath = '/accounts/password/reset/';
+      initialPath = '/password/reset/';
 
   final String title;
   final String initialPath;
@@ -63,15 +66,28 @@ class _AllauthWebScreenState extends State<AllauthWebScreen> {
       return NavigationActionPolicy.ALLOW;
     }
     final webHost = Uri.parse(EnvironmentConfig.webBaseUrl).host;
-    if (uri.host == webHost && uri.path.startsWith('/accounts/')) {
-      if (uri.path == '/accounts/login/') {
-        // "Already have an account? Sign in" — route to the native login.
-        if (mounted) {
-          context.go('/login');
-        }
-        return NavigationActionPolicy.CANCEL;
-      }
+    // Allauth is mounted at the site root here (no shared `/accounts/`
+    // prefix to key off), so the trap allow-lists this screen's own flow —
+    // its start page plus the handful of pages allauth redirects through —
+    // rather than every root-level path, which would let the user wander off
+    // into the rest of the site (nav links share the same templates).
+    const inFlowPaths = {
+      '/signup/',
+      '/password/reset/',
+      '/password/reset/done/',
+      '/confirm-email/',
+      '/email/',
+    };
+    if (uri.host == webHost &&
+        (uri.path == widget.initialPath || inFlowPaths.contains(uri.path))) {
       return NavigationActionPolicy.ALLOW;
+    }
+    if (uri.host == webHost && uri.path == '/login/') {
+      // "Already have an account? Sign in" — route to the native login.
+      if (mounted) {
+        context.go('/login');
+      }
+      return NavigationActionPolicy.CANCEL;
     }
     // Everything else leaves the account flow — open it outside the trap.
     await _openExternally(uri);
