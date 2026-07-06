@@ -22,3 +22,12 @@
 # so silence the missing-class warnings R8 would otherwise fail on.
 -dontwarn com.google.android.play.core.**
 -keep class io.flutter.embedding.engine.deferredcomponents.** { *; }
+
+# WorkManager (pulled in transitively, likely by a plugin) instantiates its
+# Room-generated WorkDatabase_Impl reflectively via getDeclaredConstructor(),
+# which R8 can't trace. Without this keep, release builds crash on startup:
+# "NoSuchMethodException: androidx.work.impl.WorkDatabase_Impl.<init> []"
+-keep class androidx.work.impl.WorkDatabase_Impl { *; }
+-keep class androidx.work.impl.** { *; }
+-keep class * extends androidx.room.RoomDatabase { *; }
+-dontwarn androidx.work.**

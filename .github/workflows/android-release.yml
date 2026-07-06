@@ -107,6 +107,25 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      # Same signing config and version as the .aab above, just packaged as an
+      # installable APK — the .aab can't be sideloaded directly. This is what
+      # you download to test a release build on a device without fighting a
+      # local R8/minify build.
+      - name: Build signed prod APK
+        run: >
+          flutter build apk --release --flavor prod
+          --dart-define=FLAVOR=prod
+          --build-number=${{ github.run_number }}
+          --build-name=1.${{ github.run_number }}
+
+      - name: Upload .apk artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-prod-release-apk-${{ github.sha }}
+          path: fishauctions_application/build/app/outputs/flutter-apk/app-prod-release.apk
+          if-no-files-found: error
+          retention-days: 30
+
       # Prerequisites (now satisfied): the first .aab was uploaded MANUALLY in
       # the Play Console (Google requires this before the API will accept
       # uploads), and the service-account JSON is stored as the
