@@ -6,7 +6,6 @@ import '../providers/auth_provider.dart';
 import '../screens/allauth_web_screen.dart';
 import '../screens/login_screen.dart';
 import '../screens/print_label_screen.dart';
-import '../screens/printer_screen.dart';
 import '../screens/splash_screen.dart';
 import '../screens/webview_screen.dart';
 
@@ -63,16 +62,10 @@ final routerProvider = Provider<GoRouter>((ref) {
         path: '/splash',
         builder: (context, state) => const SplashScreen(),
       ),
-      GoRoute(
-        path: '/',
-        builder: (context, state) => const WebViewScreen(),
-        routes: [
-          GoRoute(
-            path: 'settings/printer',
-            builder: (context, state) => const PrinterScreen(),
-          ),
-        ],
-      ),
+      // Printing is configured on the /printing/ web page (its Bluetooth card
+      // opens the native connect sheet via the JS bridge) — there is no
+      // standalone native printer-settings route.
+      GoRoute(path: '/', builder: (context, state) => const WebViewScreen()),
       // ?from= is consumed by the redirect above (post-sign-in return), not
       // by the screen.
       GoRoute(path: '/login', builder: (context, state) => const LoginScreen()),

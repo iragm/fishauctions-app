@@ -83,24 +83,35 @@ Call this after login. Upserts by `device_uuid` — safe to call repeatedly.
 
 ### Label Printing
 
+Printing is configured on the `/printing/` web page (print-method dropdown:
+PDF default / System printer / Bluetooth) and the app branches on the user's
+`print_method`. Full backend contract in `BACKEND_SPEC.md` Part 1; the app
+side is implemented, the backend endpoints marked *(pending)* are handed off
+there.
+
 ```
-GET /api/mobile/labels/<lot_pk>/
-  Returns:
-    {
-      "label_data": {
-        "lot_number", "title", "quantity", "minimum_bid", "buy_now_price",
-        "seller", "auction", "category", "i_bred_this_fish", "custom_field_1"
-      },
-      "metadata": {
-        "generated_at", "lot_pk",
-        "supported_formats": ["png", "pdf", "raw_commands"]
-      }
-    }
+GET /api/mobile/labels/<lot_pk>/                    # RGB PNG (default fmt)
+GET /api/mobile/labels/<lot_pk>/?fmt=png&resolution=WxH&dpi=N   # exact raster
+GET /api/mobile/labels/<lot_pk>/?fmt=pdf            # (pending) single-lot PDF
+GET /api/mobile/labels/prefs/   + PATCH             # (pending) UserLabelPrefs + warnings
+GET /api/mobile/printers/profiles/                  # (pending) ThermalPrinterProfile rows
 ```
 
-The backend returns data only — no printer commands. The Flutter app is responsible for rendering to the label format and sending via Bluetooth.
-
-Labels are **3×2 inches** (thermal, landscape). Target printers: TBD (TSPL/ZPL/ESC-POS to be determined when hardware is selected).
+- **PDF / System printer** — the same WeasyPrint PDFs the website makes;
+  System routes them into the OS print dialog (`printing` package), both from
+  WebView downloads and the `fishauctions://print/<lot_pk>` screen.
+- **Bluetooth** — server-rendered PNG at the printer's exact raster → 1-bit
+  pack (`LabelRaster`) → `PrinterProfileDriver` interprets the printer's
+  declarative command program (JSON steps: `tx`/`tx_text`/`tx_raster`/
+  `delay_ms`/`await`/`repeat_per_copy`, schema v1). Printers are **Django
+  admin rows** served by `printers/profiles/`; adding one needs no app
+  release. Bundled seed profiles (`bundled_printer_profiles.dart`: D11s
+  AiYin/Lujiang + raw ESC/POS) cover cold-start/offline and must stay in sync
+  with the backend seed rows.
+- The `/printing/` page's Bluetooth card drives the native connect/unpair
+  bottom sheet through JS-bridge handlers `printerGetState` /
+  `printerConnect` / `printerUnpair` (each resolves with
+  `{supported, connected, name, address, profile, labelSize}`).
 
 ### Payments (Square Tap to Pay)
 
@@ -194,7 +205,8 @@ None of that is testable in CI; CI only verifies the app compiles and links.
 - **Tests:** When adding mobile features, push backend tests alongside the endpoints.
 - **PaymentIntent model:** The prompt specified a standalone PaymentIntent model but the backend uses `InvoicePayment` directly. This works — just don't expect a `/payments/<id>/status/` endpoint to exist yet.
 - **iOS flavor config:** Android flavors are fully configured. iOS build configurations are not set up yet (and the Square Tap to Pay entitlement is iOS-only work).
-- **Push notifications:** Not implemented on either side. `MobileDevice` model exists for future use.
+- **Printing backend endpoints:** the app is written against `BACKEND_SPEC.md` Part 1 (`printers/profiles/`, `labels/prefs/`, `labels/<pk>/?fmt=pdf`, `UserLabelPrefs.print_method`, the `/printing/` page's dropdown + BT card). Until those land the app degrades gracefully: bundled printer profiles, print method defaults to PDF, prefs fetch returns null.
+- **Push notifications:** Backend spec in `BACKEND_SPEC.md` Part 2. App plumbing exists (`fcm_token` sent on device registration when present, `devices/unregister/` called on sign-out) but `PushService.currentToken()` is a stub returning null until a Firebase project + per-flavor `google-services.json` + `firebase_messaging` are wired.
 - **Square Tap to Pay (runtime):** Backend endpoints are done; charging still needs a real NFC device on API 31+ and Square production approval (sandbox works for the full flow). Not exercisable in CI.
 - **Release signing:** Release builds are debug-signed. Add a real keystore before any Play Store upload.
 

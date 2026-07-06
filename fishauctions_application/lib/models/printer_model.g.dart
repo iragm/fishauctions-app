@@ -13,6 +13,9 @@ _$BluetoothPrinterImpl _$$BluetoothPrinterImplFromJson(
   name: json['name'] as String,
   serviceUuid: json['serviceUuid'] as String?,
   characteristicUuid: json['characteristicUuid'] as String?,
+  profileSlug: json['profileSlug'] as String?,
+  labelWidthMm: (json['labelWidthMm'] as num?)?.toDouble(),
+  labelHeightMm: (json['labelHeightMm'] as num?)?.toDouble(),
   connected: json['connected'] as bool? ?? false,
 );
 
@@ -23,5 +26,8 @@ Map<String, dynamic> _$$BluetoothPrinterImplToJson(
   'name': instance.name,
   'serviceUuid': instance.serviceUuid,
   'characteristicUuid': instance.characteristicUuid,
+  'profileSlug': instance.profileSlug,
+  'labelWidthMm': instance.labelWidthMm,
+  'labelHeightMm': instance.labelHeightMm,
   'connected': instance.connected,
 };

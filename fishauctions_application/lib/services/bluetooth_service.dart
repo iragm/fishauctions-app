@@ -9,6 +9,7 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart' hide BluetoothService;
 import 'package:permission_handler/permission_handler.dart';
 
 import '../models/printer_model.dart';
+import '../models/printer_profile.dart';
 import '../utils/android_platform.dart';
 import 'printer_exception.dart';
 import 'printer_transport.dart';
@@ -16,13 +17,13 @@ import 'printer_transport.dart';
 export 'printer_exception.dart';
 
 /// Wraps flutter_blue_plus (BLE) for thermal label printing on iOS + Android,
-/// and implements [PrinterTransport] so the protocol drivers (e.g.
-/// `D11sDriver`) stay hardware-agnostic and testable.
+/// and implements [PrinterTransport] so `PrinterProfileDriver` stays
+/// hardware-agnostic and testable.
 ///
 /// BLE — not classic SPP — so iOS works without MFi. This is the transport
-/// only: label bytes come from a `PrinterDriver`. Connecting prefers the known
-/// Fichero/AiYin D11s service/characteristics and falls back to the first
-/// writable characteristic for other (raw-command) printers.
+/// only: which bytes to send comes from the printer's [PrinterProfile], which
+/// also names the GATT service/characteristics to use (falling back to the
+/// first writable characteristic when it doesn't) and sets the write pacing.
 class BluetoothService implements PrinterTransport {
   BluetoothService._();
   static final BluetoothService instance = BluetoothService._();
@@ -38,17 +39,15 @@ class BluetoothService implements PrinterTransport {
   /// can't hang the UI indefinitely.
   static const _connectTimeout = Duration(seconds: 15);
 
-  // Known Fichero / AiYin D11s GATT identifiers (lowercased 128-bit form, as
-  // `Guid.str` returns). Preferred on connect; other printers fall back to
-  // generic writable/notify discovery.
-  static const _d11sServiceUuid = '000018f0-0000-1000-8000-00805f9b34fb';
-  static const _d11sWriteCharUuid = '00002af1-0000-1000-8000-00805f9b34fb';
-  static const _d11sNotifyCharUuid = '00002af0-0000-1000-8000-00805f9b34fb';
-
-  // The reference client streams the raster in 200-byte BLE writes spaced 20ms
-  // apart; the printer drops data sent faster than this.
-  static const _bleChunk = 200;
-  static const _bleChunkDelay = Duration(milliseconds: 20);
+  // Write pacing, set per-connection from the printer's profile (thermal
+  // printers drop data sent faster than their link can take). The defaults
+  // match the most conservative profile in use.
+  int _chunkSize = 200;
+  Duration _chunkDelay = const Duration(milliseconds: 20);
+  bool _preferWriteWithResponse = true;
+  // When the previous chunk finished, so pacing spans write() calls — a
+  // command sent right after a raster stream must not tailgate its last chunk.
+  DateTime _lastChunkAt = DateTime.fromMillisecondsSinceEpoch(0);
 
   BluetoothDevice? _device;
   BluetoothCharacteristic? _writeChar;
@@ -57,7 +56,6 @@ class BluetoothService implements PrinterTransport {
   StreamSubscription<List<int>>? _notifySub;
   final StreamController<Uint8List> _notifyController =
       StreamController<Uint8List>.broadcast();
-  bool _sending = false;
 
   BluetoothPrinter? get connectedPrinter => _connectedPrinter;
 
@@ -160,13 +158,20 @@ class BluetoothService implements PrinterTransport {
 
   // ── Connection ────────────────────────────────────────────────────────────
 
-  /// Connects to a freshly discovered [device] and resolves its print
-  /// characteristic. Returns the printer to remember.
+  /// Connects to a freshly discovered [device], targeting [profile]'s GATT
+  /// ids and adopting its write pacing (generic discovery + defaults when the
+  /// profile doesn't specify). Returns the printer to remember.
   Future<BluetoothPrinter> connect(
     BluetoothDevice device, {
     String? name,
+    PrinterProfile? profile,
   }) async {
-    final write = await _openLink(device);
+    final write = await _openLink(
+      device,
+      preferredService: profile?.serviceUuid,
+      preferredChar: profile?.writeCharacteristicUuid,
+      profile: profile,
+    );
     _connectedPrinter = BluetoothPrinter(
       address: device.remoteId.str,
       name: (name != null && name.isNotEmpty)
@@ -176,19 +181,26 @@ class BluetoothService implements PrinterTransport {
                 : device.remoteId.str),
       serviceUuid: write.serviceUuid.str,
       characteristicUuid: write.characteristicUuid.str,
+      profileSlug: profile?.slug,
       connected: true,
     );
     return _connectedPrinter!;
   }
 
   /// Re-opens the link to a [saved] printer (e.g. after an app restart),
-  /// targeting its remembered characteristic so it doesn't re-sniff the device.
-  Future<BluetoothPrinter> reconnect(BluetoothPrinter saved) async {
+  /// targeting its remembered characteristic so it doesn't re-sniff the
+  /// device. [profile] restores the pacing/notify setup (resolved from
+  /// `saved.profileSlug` by the caller).
+  Future<BluetoothPrinter> reconnect(
+    BluetoothPrinter saved, {
+    PrinterProfile? profile,
+  }) async {
     final device = BluetoothDevice.fromId(saved.address);
     final write = await _openLink(
       device,
       preferredService: saved.serviceUuid,
       preferredChar: saved.characteristicUuid,
+      profile: profile,
     );
     _connectedPrinter = saved.copyWith(
       serviceUuid: write.serviceUuid.str,
@@ -229,8 +241,12 @@ class BluetoothService implements PrinterTransport {
     BluetoothDevice device, {
     String? preferredService,
     String? preferredChar,
+    PrinterProfile? profile,
   }) async {
     await disconnect();
+    _chunkSize = profile?.chunkSize ?? 200;
+    _chunkDelay = Duration(milliseconds: profile?.chunkDelayMs ?? 20);
+    _preferWriteWithResponse = profile?.preferWriteWithResponse ?? true;
     if (!await isAdapterOn()) {
       throw const PrinterException(
         'Bluetooth is off. Turn on Bluetooth, then try again.',
@@ -273,31 +289,28 @@ class BluetoothService implements PrinterTransport {
     _device = device;
     _writeChar = write;
     _watchConnection(device);
-    await _subscribeNotify(device);
+    await _subscribeNotify(device, profile: profile);
     return write;
   }
 
-  /// Picks the characteristic to print through: the remembered one (reconnect),
-  /// else the known D11s write characteristic, else the first writable
-  /// characteristic (generic/raw printers), preferring write-with-response.
+  /// Picks the characteristic to print through: the preferred one (the
+  /// profile's write characteristic, or the remembered one on reconnect),
+  /// else the first writable characteristic (profiles with no GATT ids),
+  /// preferring write-with-response.
   BluetoothCharacteristic? _resolveWrite(
     BluetoothDevice device, {
     String? preferredService,
     String? preferredChar,
   }) {
-    if (preferredChar != null) {
-      final c = _findChar(device, preferredChar, service: preferredService);
+    if (preferredChar != null && preferredChar.isNotEmpty) {
+      final c = _findChar(
+        device,
+        preferredChar,
+        service: (preferredService?.isEmpty ?? true) ? null : preferredService,
+      );
       if (c != null && _isWritable(c)) {
         return c;
       }
-    }
-    final known = _findChar(
-      device,
-      _d11sWriteCharUuid,
-      service: _d11sServiceUuid,
-    );
-    if (known != null && _isWritable(known)) {
-      return known;
     }
     BluetoothCharacteristic? fallback;
     for (final s in device.servicesList) {
@@ -311,14 +324,24 @@ class BluetoothService implements PrinterTransport {
     return fallback;
   }
 
-  /// Subscribes to the printer's notify characteristic (D11s `2af0`, else the
-  /// first notify/indicate characteristic) and forwards its bytes to
+  /// Subscribes to the printer's notify characteristic (the profile's, else
+  /// the first notify/indicate characteristic) and forwards its bytes to
   /// [notifications]. Best-effort: raw printers may have none, and printing
   /// still works without status — we just can't read paper/cover/battery.
-  Future<void> _subscribeNotify(BluetoothDevice device) async {
-    final notify =
-        _findChar(device, _d11sNotifyCharUuid, service: _d11sServiceUuid) ??
-        _firstNotify(device);
+  Future<void> _subscribeNotify(
+    BluetoothDevice device, {
+    PrinterProfile? profile,
+  }) async {
+    final notifyUuid = profile?.notifyCharacteristicUuid ?? '';
+    final serviceUuid = profile?.serviceUuid ?? '';
+    final notify = notifyUuid.isEmpty
+        ? _firstNotify(device)
+        : (_findChar(
+                device,
+                notifyUuid,
+                service: serviceUuid.isEmpty ? null : serviceUuid,
+              ) ??
+              _firstNotify(device));
     if (notify == null) {
       return;
     }
@@ -380,32 +403,12 @@ class BluetoothService implements PrinterTransport {
 
   // ── Printing ──────────────────────────────────────────────────────────────
 
-  /// [PrinterTransport.write] — sends [bytes] to the printer, chunked for BLE.
+  /// [PrinterTransport.write] — sends [bytes] to the printer, chunked and
+  /// paced per the connected printer's profile. Throws a [PrinterException]
+  /// when the link is missing or drops.
   @override
-  Future<void> write(List<int> bytes) =>
-      _writeChunked(bytes is Uint8List ? bytes : Uint8List.fromList(bytes));
-
-  /// Sends a complete rendered payload as a single job (interim path for the
-  /// on-device TSPL renderer / raw printers). Drivers like `D11sDriver` use
-  /// [write] directly and sequence their own commands.
-  Future<void> sendBytes(Uint8List data) async {
-    if (_sending) {
-      throw const PrinterException(
-        'A label is already printing. Wait for it to finish, then try again.',
-      );
-    }
-    _sending = true;
-    try {
-      await _writeChunked(data);
-    } finally {
-      _sending = false;
-    }
-  }
-
-  /// Writes [data] to the connected printer in MTU-safe chunks (200 bytes,
-  /// 20ms apart). Throws a [PrinterException] when the link is missing or
-  /// drops.
-  Future<void> _writeChunked(Uint8List data) async {
+  Future<void> write(List<int> bytes) async {
+    final data = bytes is Uint8List ? bytes : Uint8List.fromList(bytes);
     final device = _device;
     final writeChar = _writeChar;
     if (device == null || writeChar == null || device.isDisconnected) {
@@ -413,24 +416,29 @@ class BluetoothService implements PrinterTransport {
         'The printer connection dropped. Reconnect the printer and try again.',
       );
     }
-    // Use write-without-response only when the characteristic can't do
-    // acknowledged writes; acknowledged writes are more reliable for print
-    // jobs where a dropped chunk silently truncates the label.
+    // Acknowledged writes are more reliable for print jobs (a dropped chunk
+    // silently truncates the label), so they're the default; a profile can
+    // opt for write-without-response where the printer prefers it, and a
+    // characteristic that only supports one kind gets that kind.
     final withoutResponse =
-        !writeChar.properties.write &&
-        writeChar.properties.writeWithoutResponse;
+        writeChar.properties.writeWithoutResponse &&
+        (!_preferWriteWithResponse || !writeChar.properties.write);
     try {
-      for (var offset = 0; offset < data.length; offset += _bleChunk) {
-        final end = (offset + _bleChunk < data.length)
-            ? offset + _bleChunk
+      for (var offset = 0; offset < data.length; offset += _chunkSize) {
+        final end = (offset + _chunkSize < data.length)
+            ? offset + _chunkSize
             : data.length;
+        // Pacing spans write() calls: the printer sees one byte stream, so a
+        // command following a raster must keep the same inter-chunk gap.
+        final sinceLast = DateTime.now().difference(_lastChunkAt);
+        if (sinceLast < _chunkDelay) {
+          await Future<void>.delayed(_chunkDelay - sinceLast);
+        }
         await writeChar.write(
           Uint8List.sublistView(data, offset, end),
           withoutResponse: withoutResponse,
         );
-        if (end < data.length) {
-          await Future<void>.delayed(_bleChunkDelay);
-        }
+        _lastChunkAt = DateTime.now();
       }
     } on PrinterException {
       rethrow;

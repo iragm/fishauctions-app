@@ -30,6 +30,15 @@ mixin _$BluetoothPrinter {
   // Null until the printer has been connected at least once.
   String? get serviceUuid => throw _privateConstructorUsedError;
   String? get characteristicUuid =>
+      throw _privateConstructorUsedError; // The ThermalPrinterProfile driving this printer (see
+  // PrinterProfileService). Null for printers saved by pre-profile app
+  // builds, which resolve to the D11s profile those builds hardcoded.
+  String? get profileSlug =>
+      throw _privateConstructorUsedError; // Label media size the printer itself reported on connect (profiles with
+  // a label_size_program). Null when the printer can't say — the user's
+  // label prefs are the fallback.
+  double? get labelWidthMm => throw _privateConstructorUsedError;
+  double? get labelHeightMm =>
       throw _privateConstructorUsedError; // True while an active connection is open.
   bool get connected => throw _privateConstructorUsedError;
 
@@ -55,6 +64,9 @@ abstract class $BluetoothPrinterCopyWith<$Res> {
     String name,
     String? serviceUuid,
     String? characteristicUuid,
+    String? profileSlug,
+    double? labelWidthMm,
+    double? labelHeightMm,
     bool connected,
   });
 }
@@ -78,6 +90,9 @@ class _$BluetoothPrinterCopyWithImpl<$Res, $Val extends BluetoothPrinter>
     Object? name = null,
     Object? serviceUuid = freezed,
     Object? characteristicUuid = freezed,
+    Object? profileSlug = freezed,
+    Object? labelWidthMm = freezed,
+    Object? labelHeightMm = freezed,
     Object? connected = null,
   }) {
     return _then(
@@ -98,6 +113,18 @@ class _$BluetoothPrinterCopyWithImpl<$Res, $Val extends BluetoothPrinter>
                 ? _value.characteristicUuid
                 : characteristicUuid // ignore: cast_nullable_to_non_nullable
                       as String?,
+            profileSlug: freezed == profileSlug
+                ? _value.profileSlug
+                : profileSlug // ignore: cast_nullable_to_non_nullable
+                      as String?,
+            labelWidthMm: freezed == labelWidthMm
+                ? _value.labelWidthMm
+                : labelWidthMm // ignore: cast_nullable_to_non_nullable
+                      as double?,
+            labelHeightMm: freezed == labelHeightMm
+                ? _value.labelHeightMm
+                : labelHeightMm // ignore: cast_nullable_to_non_nullable
+                      as double?,
             connected: null == connected
                 ? _value.connected
                 : connected // ignore: cast_nullable_to_non_nullable
@@ -122,6 +149,9 @@ abstract class _$$BluetoothPrinterImplCopyWith<$Res>
     String name,
     String? serviceUuid,
     String? characteristicUuid,
+    String? profileSlug,
+    double? labelWidthMm,
+    double? labelHeightMm,
     bool connected,
   });
 }
@@ -144,6 +174,9 @@ class __$$BluetoothPrinterImplCopyWithImpl<$Res>
     Object? name = null,
     Object? serviceUuid = freezed,
     Object? characteristicUuid = freezed,
+    Object? profileSlug = freezed,
+    Object? labelWidthMm = freezed,
+    Object? labelHeightMm = freezed,
     Object? connected = null,
   }) {
     return _then(
@@ -164,6 +197,18 @@ class __$$BluetoothPrinterImplCopyWithImpl<$Res>
             ? _value.characteristicUuid
             : characteristicUuid // ignore: cast_nullable_to_non_nullable
                   as String?,
+        profileSlug: freezed == profileSlug
+            ? _value.profileSlug
+            : profileSlug // ignore: cast_nullable_to_non_nullable
+                  as String?,
+        labelWidthMm: freezed == labelWidthMm
+            ? _value.labelWidthMm
+            : labelWidthMm // ignore: cast_nullable_to_non_nullable
+                  as double?,
+        labelHeightMm: freezed == labelHeightMm
+            ? _value.labelHeightMm
+            : labelHeightMm // ignore: cast_nullable_to_non_nullable
+                  as double?,
         connected: null == connected
             ? _value.connected
             : connected // ignore: cast_nullable_to_non_nullable
@@ -181,6 +226,9 @@ class _$BluetoothPrinterImpl implements _BluetoothPrinter {
     required this.name,
     this.serviceUuid,
     this.characteristicUuid,
+    this.profileSlug,
+    this.labelWidthMm,
+    this.labelHeightMm,
     this.connected = false,
   });
 
@@ -200,6 +248,18 @@ class _$BluetoothPrinterImpl implements _BluetoothPrinter {
   final String? serviceUuid;
   @override
   final String? characteristicUuid;
+  // The ThermalPrinterProfile driving this printer (see
+  // PrinterProfileService). Null for printers saved by pre-profile app
+  // builds, which resolve to the D11s profile those builds hardcoded.
+  @override
+  final String? profileSlug;
+  // Label media size the printer itself reported on connect (profiles with
+  // a label_size_program). Null when the printer can't say — the user's
+  // label prefs are the fallback.
+  @override
+  final double? labelWidthMm;
+  @override
+  final double? labelHeightMm;
   // True while an active connection is open.
   @override
   @JsonKey()
@@ -207,7 +267,7 @@ class _$BluetoothPrinterImpl implements _BluetoothPrinter {
 
   @override
   String toString() {
-    return 'BluetoothPrinter(address: $address, name: $name, serviceUuid: $serviceUuid, characteristicUuid: $characteristicUuid, connected: $connected)';
+    return 'BluetoothPrinter(address: $address, name: $name, serviceUuid: $serviceUuid, characteristicUuid: $characteristicUuid, profileSlug: $profileSlug, labelWidthMm: $labelWidthMm, labelHeightMm: $labelHeightMm, connected: $connected)';
   }
 
   @override
@@ -221,6 +281,12 @@ class _$BluetoothPrinterImpl implements _BluetoothPrinter {
                 other.serviceUuid == serviceUuid) &&
             (identical(other.characteristicUuid, characteristicUuid) ||
                 other.characteristicUuid == characteristicUuid) &&
+            (identical(other.profileSlug, profileSlug) ||
+                other.profileSlug == profileSlug) &&
+            (identical(other.labelWidthMm, labelWidthMm) ||
+                other.labelWidthMm == labelWidthMm) &&
+            (identical(other.labelHeightMm, labelHeightMm) ||
+                other.labelHeightMm == labelHeightMm) &&
             (identical(other.connected, connected) ||
                 other.connected == connected));
   }
@@ -233,6 +299,9 @@ class _$BluetoothPrinterImpl implements _BluetoothPrinter {
     name,
     serviceUuid,
     characteristicUuid,
+    profileSlug,
+    labelWidthMm,
+    labelHeightMm,
     connected,
   );
 
@@ -259,6 +328,9 @@ abstract class _BluetoothPrinter implements BluetoothPrinter {
     required final String name,
     final String? serviceUuid,
     final String? characteristicUuid,
+    final String? profileSlug,
+    final double? labelWidthMm,
+    final double? labelHeightMm,
     final bool connected,
   }) = _$BluetoothPrinterImpl;
 
@@ -276,7 +348,17 @@ abstract class _BluetoothPrinter implements BluetoothPrinter {
   @override
   String? get serviceUuid;
   @override
-  String? get characteristicUuid; // True while an active connection is open.
+  String? get characteristicUuid; // The ThermalPrinterProfile driving this printer (see
+  // PrinterProfileService). Null for printers saved by pre-profile app
+  // builds, which resolve to the D11s profile those builds hardcoded.
+  @override
+  String? get profileSlug; // Label media size the printer itself reported on connect (profiles with
+  // a label_size_program). Null when the printer can't say — the user's
+  // label prefs are the fallback.
+  @override
+  double? get labelWidthMm;
+  @override
+  double? get labelHeightMm; // True while an active connection is open.
   @override
   bool get connected;
 

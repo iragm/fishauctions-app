@@ -7,6 +7,7 @@ import '../models/auth_models.dart';
 import '../utils/device_identity.dart';
 import '../utils/secure_storage.dart';
 import 'api_service.dart';
+import 'push_service.dart';
 import 'social_auth_service.dart';
 import 'square_payment_service.dart';
 
@@ -87,6 +88,10 @@ class AuthService {
     // So the next Google sign-in shows the account picker instead of silently
     // reusing the signed-out account. Never throws.
     await SocialAuthService.instance.signOut();
+    // Stop push notifications reaching this device — a signed-out phone
+    // showing the previous user's "invoice ready" is a privacy bug. Must run
+    // while the JWT still exists; best-effort beyond that.
+    await unregisterThisDevice();
     await _api.clearTokens();
     await _storage.delete(key: _keyCachedUser);
   }
@@ -161,15 +166,19 @@ class AuthService {
       deviceName: DeviceIdentity.deviceName,
       platform: DeviceIdentity.platformTag,
       appVersion: DeviceIdentity.appVersion,
+      fcmToken: await PushService.instance.currentToken(),
     );
   }
 
-  /// Register or update this device on the backend.
+  /// Register or update this device on the backend. [fcmToken] enables push
+  /// notifications for this install when present (omitted while null — the
+  /// backend keeps whatever it has).
   Future<void> registerDevice({
     required String deviceUuid,
     required String deviceName,
     required String platform,
     required String appVersion,
+    String? fcmToken,
   }) async {
     try {
       await _api.dio.post(
@@ -179,11 +188,29 @@ class AuthService {
           'device_name': deviceName,
           'platform': platform,
           'app_version': appVersion,
+          if (fcmToken != null && fcmToken.isNotEmpty) 'fcm_token': fcmToken,
         },
       );
     } on DioException catch (e) {
       // Non-fatal — log and continue.
       _log.w('Device registration failed: ${e.response?.statusCode}');
+    }
+  }
+
+  /// Clears this device's push token on the backend
+  /// (`POST /api/mobile/devices/unregister/`) so no further notifications
+  /// reach it. Called during sign-out, before the JWT is dropped.
+  /// Best-effort: deployments without the endpoint yet just 404.
+  Future<void> unregisterThisDevice() async {
+    try {
+      await _api.dio.post(
+        'devices/unregister/',
+        data: {'device_uuid': await DeviceIdentity.uuid()},
+      );
+    } on DioException catch (e) {
+      _log.w('Device unregister failed: ${e.response?.statusCode}');
+    } on Object catch (e) {
+      _log.w('Device unregister failed: $e');
     }
   }
 }

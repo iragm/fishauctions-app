@@ -15,16 +15,21 @@ import '../config/environment.dart';
 import '../config/theme.dart';
 import '../constants/app_constants.dart';
 import '../models/club_menu_item.dart';
+import '../models/label_prefs.dart';
 import '../providers/auth_provider.dart';
 import '../providers/clubs_provider.dart';
 import '../providers/config_provider.dart';
+import '../providers/printer_provider.dart';
 import '../services/api_service.dart';
 import '../services/auth_service.dart';
+import '../services/bluetooth_service.dart';
 import '../services/download_service.dart';
+import '../services/label_prefs_service.dart';
 import '../services/location_service.dart';
 import '../services/square_payment_service.dart';
 import '../utils/android_platform.dart';
 import '../widgets/payment_sheet.dart';
+import '../widgets/printer_connect_sheet.dart';
 import 'command_palette_screen.dart';
 
 class WebViewScreen extends ConsumerStatefulWidget {
@@ -117,12 +122,39 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   /// contextually on a location-aware screen (see _maybeOfferLocation).
   Future<void> _onWebViewCreated(InAppWebViewController controller) async {
     _controller = controller;
-    // Register the calendar bridge before the first load so the page's inline
-    // script finds it (location_fragment_short.html calls callHandler).
-    controller.addJavaScriptHandler(
-      handlerName: 'addToCalendar',
-      callback: _onAddToCalendar,
-    );
+    // Register the JS bridges before the first load so page scripts find
+    // them. addToCalendar: the calendar bridge (location_fragment_short.html).
+    // printerGetState/Connect/Unpair: the /printing/ page's Bluetooth card
+    // (BACKEND_SPEC.md §1.2) — the page JS lives in the Django template so the
+    // card's UX iterates server-side; the app only exposes state + the native
+    // connect/unpair flows. Each printer handler resolves with the current
+    // state object.
+    controller
+      ..addJavaScriptHandler(
+        handlerName: 'addToCalendar',
+        callback: _onAddToCalendar,
+      )
+      ..addJavaScriptHandler(
+        handlerName: 'printerGetState',
+        callback: (_) => _printerState(),
+      )
+      ..addJavaScriptHandler(
+        handlerName: 'printerConnect',
+        callback: (_) async {
+          if (mounted) {
+            // Bottom sheet over the page — the user never leaves /printing/.
+            await PrinterConnectSheet.show(context);
+          }
+          return _printerState();
+        },
+      )
+      ..addJavaScriptHandler(
+        handlerName: 'printerUnpair',
+        callback: (_) async {
+          await ref.read(printerProvider.notifier).forget();
+          return _printerState();
+        },
+      );
     await _applyLocation(prompt: false, fresh: false);
     final initialUrl = await _initialUrl();
     await controller.loadUrl(urlRequest: URLRequest(url: WebUri(initialUrl)));
@@ -382,6 +414,31 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     ).showSnackBar(SnackBar(content: Text(message)));
   }
 
+  /// The state object the printer JS handlers resolve with — what the
+  /// `/printing/` page's Bluetooth card renders. `labelSize` is the size the
+  /// printer itself reported (profiles that can read it); the page offers to
+  /// adopt it into the user's label prefs.
+  Map<String, dynamic> _printerState() {
+    final printer = ref.read(printerProvider).valueOrNull;
+    final hasSize =
+        printer?.labelWidthMm != null && printer?.labelHeightMm != null;
+    return {
+      'supported': true,
+      'connected':
+          printer != null &&
+          BluetoothService.instance.isConnectedTo(printer.address),
+      'name': printer?.name,
+      'address': printer?.address,
+      'profile': printer?.profileSlug,
+      'labelSize': hasSize
+          ? {
+              'width_mm': printer!.labelWidthMm,
+              'height_mm': printer.labelHeightMm,
+            }
+          : null,
+    };
+  }
+
   // ── WebView ↔ native session bridging ─────────────────────────────────────
 
   /// Repairs session drift on each page load. The web navbar is hidden in-app
@@ -608,13 +665,23 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   /// session-authenticated — DownloadService refetches with the WebView's
   /// cookies and hands the file to the OS (calendar/Wallet importer or the
   /// share sheet). See its doc comment for the MIME routing.
+  ///
+  /// PDFs additionally honor the user's print method (the `/printing/`
+  /// dropdown): "System printer" routes them into the OS print dialog instead
+  /// of the share sheet, so the site's existing print buttons — including the
+  /// bulk label sheets — print without any web changes. Bluetooth doesn't
+  /// come through here (per-lot buttons deep-link `fishauctions://print/…`);
+  /// a PDF downloaded while on the Bluetooth method (e.g. a bulk sheet) falls
+  /// back to the normal share flow.
   Future<DownloadStartResponse?> _onDownloadStart(
     InAppWebViewController controller,
     DownloadStartRequest request,
   ) async {
+    final prefs = await LabelPrefsService.instance.fetch();
     final error = await DownloadService.instance.handle(
       request,
       userAgent: AppConstants.userAgent,
+      printPdfWithSystemDialog: prefs?.printMethod == PrintMethod.system,
     );
     if (error != null) {
       _showSnack(error);
@@ -690,12 +757,13 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
         }
       case 'print':
         // fishauctions://print/<lot_pk> — print a label. Without a valid pk
-        // (e.g. a bare "set up printer" link) fall back to printer settings.
+        // (e.g. a bare "set up printing" link) fall back to the /printing/
+        // page, the one place printing is configured.
         final lotPk = int.tryParse(uri.pathSegments.firstOrNull ?? '');
         if (lotPk != null) {
           context.push('/print/$lotPk');
         } else {
-          context.push('/settings/printer');
+          _loadPath('/printing/');
         }
     }
   }
@@ -786,15 +854,6 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
                       indent: true,
                     ),
                   ],
-                ),
-                // Native hardware setup — not a web page.
-                ListTile(
-                  leading: const Icon(Icons.print),
-                  title: const Text('Printer setup'),
-                  onTap: () {
-                    Navigator.of(ctx).pop();
-                    context.push('/settings/printer');
-                  },
                 ),
                 const Divider(),
                 ListTile(

@@ -1,10 +1,13 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
+
+import 'system_print_service.dart';
 
 /// Handles files the WebView asks to download — CSV exports, invoice PDFs,
 /// calendar `.ics`, Apple Wallet `.pkpass`. The system WebView can't download
@@ -45,9 +48,14 @@ class DownloadService {
   /// Downloads [request] (the WebView's download intent) and dispatches the
   /// saved file to the OS. Returns a user-facing error string on failure, or
   /// null on success.
+  ///
+  /// [printPdfWithSystemDialog] — the "System printer" print method: PDFs go
+  /// to the OS print dialog instead of the share sheet (other MIME types are
+  /// unaffected).
   Future<String?> handle(
     DownloadStartRequest request, {
     String? userAgent,
+    bool printPdfWithSystemDialog = false,
   }) async {
     final url = request.url;
     try {
@@ -80,6 +88,13 @@ class DownloadService {
 
       final mime = _resolveMime(request.mimeType, contentType);
       final filename = _resolveFilename(request.suggestedFilename, url, mime);
+      if (printPdfWithSystemDialog && mime.startsWith('application/pdf')) {
+        await SystemPrintService.instance.printPdf(
+          Uint8List.fromList(bytes),
+          jobName: filename,
+        );
+        return null;
+      }
       final path = await _writeTemp(filename, bytes);
       await _dispatch(path, mime);
       return null;
