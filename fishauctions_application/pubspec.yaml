@@ -55,6 +55,9 @@ dependencies:
   # Open a downloaded file with the OS default handler — .ics into the calendar
   # importer, .pkpass into Wallet (iOS). See DownloadService.
   open_filex: ^4.7.0
+  # Installed version/build for device registration — read at runtime so it
+  # can never drift from pubspec.yaml (no hand-synced version constant).
+  package_info_plus: ^9.0.1
   # Temp directory to stage downloaded bytes before share/open.
   path_provider: ^2.1.6
   # Runtime permissions (Bluetooth, NFC, camera)

@@ -80,7 +80,7 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   // into the WebView's Django cookie session happens in exactly two places:
   // the first load boots through the backend handoff when the WebView has no
   // session cookie yet (see _initialUrl), and _reconcileWebSession repairs a
-  // lapsed session when the server bounces a page to /accounts/login/. The
+  // lapsed session when the server bounces a page to /login/. The
   // repair is bounded to one attempt per screen lifetime so a failed/looping
   // handoff can't spin.
   int _handoffAttempts = 0;
@@ -444,14 +444,14 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   /// Repairs session drift on each page load. The web navbar is hidden in-app
   /// (the server detects the app from its User-Agent), so the reliable signal
   /// that the WebView's session has lapsed is the server bouncing an
-  /// auth-required page to /accounts/login/: run the handoff to re-establish
-  /// the web session and resume the intended ?next= destination. The web login
-  /// form is never shown in the app — the native login screen is the one front
-  /// door for both sessions (a web-form login would create a cookie session
-  /// with no JWT).
+  /// auth-required page to /login/ (LOGIN_URL — allauth is mounted at the site
+  /// root, not /accounts/): run the handoff to re-establish the web session and
+  /// resume the intended ?next= destination. The web login form is never shown
+  /// in the app — the native login screen is the one front door for both
+  /// sessions (a web-form login would create a cookie session with no JWT).
   Future<void> _reconcileWebSession(Uri uri) async {
     final webHost = Uri.parse(EnvironmentConfig.webBaseUrl).host;
-    if (uri.path != '/accounts/login/' || uri.host != webHost) {
+    if (uri.path != '/login/' || uri.host != webHost) {
       return;
     }
     if (ref.read(authProvider).valueOrNull != null) {
@@ -479,13 +479,14 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   }
 
   /// Path (+query) of the page currently in the WebView, for the post-handoff
-  /// landing page. Auth pages resolve to their ?next= target, not themselves.
+  /// landing page. The login bounce page resolves to its ?next= target, not
+  /// itself (root-mounted allauth: /login/, not /accounts/login/).
   Future<String?> _currentWebPath() async {
     final current = await _controller?.getUrl();
     if (current == null) {
       return null;
     }
-    if (current.path.startsWith('/accounts/')) {
+    if (current.path == '/login/') {
       return current.queryParameters['next'];
     }
     return _pathOf(current);
@@ -532,7 +533,7 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
           .map((c) => '${c.name}=${c.value}')
           .join('; ');
       await Dio().post<void>(
-        '${EnvironmentConfig.webBaseUrl}/accounts/logout/',
+        '${EnvironmentConfig.webBaseUrl}/logout/',
         data: 'csrfmiddlewaretoken=${Uri.encodeQueryComponent(csrf)}',
         options: Options(
           contentType: Headers.formUrlEncodedContentType,
@@ -621,8 +622,7 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     // sign-out (which also POSTs the web logout and wipes cookies) instead of
     // letting the page navigate. Skip if already signed out so our own menu
     // logout doesn't double-fire.
-    if (uri.path == '/accounts/logout/' &&
-        ref.read(authProvider).valueOrNull != null) {
+    if (uri.path == '/logout/' && ref.read(authProvider).valueOrNull != null) {
       unawaited(_signOut());
       return NavigationActionPolicy.CANCEL;
     }

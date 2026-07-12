@@ -17,17 +17,24 @@ The Django backend lives at https://github.com/iragm/fishauctions. Do not rewrit
 ## Running the App
 
 ```bash
-flutter run --flavor dev -t lib/main.dart       # dev (localhost backend)
-flutter run --flavor staging -t lib/main.dart   # staging backend
-flutter run --flavor prod -t lib/main.dart      # production
+# Android — --flavor picks the applicationId; --dart-define picks the backend.
+flutter run --flavor dev -t lib/main.dart --dart-define=FLAVOR=dev          # staging backend
+flutter run --flavor staging -t lib/main.dart --dart-define=FLAVOR=staging  # staging backend
+flutter run --flavor prod -t lib/main.dart --dart-define=FLAVOR=prod        # production
+
+# iOS — no --flavor (no Xcode schemes; env selection is dart-define only).
+flutter run -t lib/main.dart --dart-define=FLAVOR=staging
 ```
 
-Three flavors are configured in `android/app/build.gradle.kts`:
+Three Android flavors are configured in `android/app/build.gradle.kts`:
 - **dev**: `com.fishauctions.app.dev`
 - **staging**: `com.fishauctions.app.staging`
 - **prod**: `com.fishauctions.app`
 
-`lib/config/environment.dart` maps flavor → API base URL.
+`lib/config/environment.dart` maps `--dart-define=FLAVOR` → API base URL (dev
+and staging both point at `https://staging.auction.fish`; there is no localhost
+target — a phone can't reach one anyway). iOS state and remaining setup:
+`IOS.md`.
 
 ## Architecture
 
@@ -85,16 +92,15 @@ Call this after login. Upserts by `device_uuid` — safe to call repeatedly.
 
 Printing is configured on the `/printing/` web page (print-method dropdown:
 PDF default / System printer / Bluetooth) and the app branches on the user's
-`print_method`. Full backend contract in `BACKEND_SPEC.md` Part 1; the app
-side is implemented, the backend endpoints marked *(pending)* are handed off
-there.
+`print_method`. Full backend contract in `BACKEND_SPEC.md` Part 1; both sides
+are implemented and live (verified against staging 2026-07).
 
 ```
 GET /api/mobile/labels/<lot_pk>/                    # RGB PNG (default fmt)
 GET /api/mobile/labels/<lot_pk>/?fmt=png&resolution=WxH&dpi=N   # exact raster
-GET /api/mobile/labels/<lot_pk>/?fmt=pdf            # (pending) single-lot PDF
-GET /api/mobile/labels/prefs/   + PATCH             # (pending) UserLabelPrefs + warnings
-GET /api/mobile/printers/profiles/                  # (pending) ThermalPrinterProfile rows
+GET /api/mobile/labels/<lot_pk>/?fmt=pdf            # single-lot PDF (WeasyPrint, user's prefs)
+GET /api/mobile/labels/prefs/   + PATCH             # UserLabelPrefs + computed warnings
+GET /api/mobile/printers/profiles/                  # ThermalPrinterProfile rows (ETag'd)
 ```
 
 - **PDF / System printer** — the same WeasyPrint PDFs the website makes;
@@ -132,13 +138,14 @@ Credentials are resolved **per invoice** on the backend (the invoice's
 POST /api/mobile/payments/create/
   Body:    { "invoice_pk": 123 }
   Returns: { "invoice_pk", "amount" ("15.00"), "currency",
-             "location_id", "access_token", "square_application_id",
+             "location_id", "access_token",
              "square_environment", "idempotency_key",
              "reference_id" }   ← reference_id: app MUST tap with this exact value
   (Requires the authenticated operator to be an auction/club admin.)
-  ← square_application_id: the deployment's PUBLIC Square app id; the app
-    initializes the SDK with it (see flow step 2). Required — without it the
-    SDK can't initialize and Tap to Pay fails. NOT the secret access_token.
+  ← the deployment's PUBLIC Square app id comes from GET /api/mobile/config/
+    (`square_application_id`); the app initializes the SDK with it at startup.
+    If the create response also carries `square_application_id` it's used only
+    as a fallback when the config fetch failed. NOT the secret access_token.
 
 POST /api/mobile/payments/confirm/
   Body:    { "invoice_pk": 123, "payment_id": "<Square payment id>",
@@ -156,13 +163,14 @@ open the tap proceeds automatically (create → authorize → charge); the butto
 also the retry after a cancel.
 
 **Payment flow:**
-1. `/payments/create/` → per-invoice amount + seller `access_token` +
-   `location_id` + `reference_id` + `square_application_id`
-2. App initializes the Square SDK with `square_application_id` (once per
-   process, via the `com.fishauctions.app/platform` channel →
-   `MobilePaymentsSdk.initialize`; the Flutter plugin doesn't expose
-   `initialize`), then calls `authorize(accessToken, locationId)` (re-auth if
-   the device was authorized for a different seller)
+1. App initializes the Square SDK with `square_application_id` from
+   `GET /api/mobile/config/` (warmed at WebView mount; once per process, via
+   the `com.fishauctions.app/platform` channel → `MobilePaymentsSdk.initialize`;
+   the Flutter plugin doesn't expose `initialize`)
+2. `/payments/create/` → per-invoice amount + seller `access_token` +
+   `location_id` + `reference_id`; the app then calls
+   `authorize(accessToken, locationId)` (re-auth if the device was authorized
+   for a different seller)
 3. SDK runs the Tap to Pay prompt **with the backend's `reference_id`** →
    captures the card on-device → completed `Payment` with an id
 4. App posts the Square `payment_id` to `/payments/confirm/`
@@ -181,9 +189,8 @@ re-initialize, so the app initializes once per process and refuses a *different*
 app id mid-session (switch deployments → restart).
 
 **Backend status:** the `create`/`confirm` endpoints are implemented on
-`iragm/fishauctions`. `create` must include `square_application_id` in its
-response (this is what the app initializes the SDK with — if it's missing the
-app rejects the response and Tap to Pay can't start). `confirm` verifies the
+`iragm/fishauctions`, and `GET /api/mobile/config/` serves the deployment's
+`square_application_id`/`square_environment`. `confirm` verifies the
 on-device `payment_id` via Square's GetPayment — checking status, amount, and
 the issued `reference_id` — then records it idempotently and marks the invoice
 PAID.
@@ -204,17 +211,18 @@ None of that is testable in CI; CI only verifies the app compiles and links.
 
 - **Tests:** When adding mobile features, push backend tests alongside the endpoints.
 - **PaymentIntent model:** The prompt specified a standalone PaymentIntent model but the backend uses `InvoicePayment` directly. This works — just don't expect a `/payments/<id>/status/` endpoint to exist yet.
-- **iOS flavor config:** Android flavors are fully configured. iOS build configurations are not set up yet (and the Square Tap to Pay entitlement is iOS-only work).
-- **Printing backend endpoints:** the app is written against `BACKEND_SPEC.md` Part 1 (`printers/profiles/`, `labels/prefs/`, `labels/<pk>/?fmt=pdf`, `UserLabelPrefs.print_method`, the `/printing/` page's dropdown + BT card). Until those land the app degrades gracefully: bundled printer profiles, print method defaults to PDF, prefs fetch returns null.
+- **iOS:** project config (bundle id, iOS 16 target, Info.plist keys) is done; the Mac-only work — first signed build, Google iOS OAuth client, the Square platform channel in AppDelegate, and the Tap to Pay entitlement — is checklisted in `IOS.md`.
+- ~~Printing backend endpoints~~ — landed (`printers/profiles/`, `labels/prefs/`, `labels/<pk>/?fmt=pdf`, `UserLabelPrefs.print_method`, the `/printing/` page's dropdown + BT card are live on staging). The app still degrades gracefully when offline: bundled printer profiles, print method defaults to PDF, prefs fetch returns null.
 - **Push notifications:** Backend spec in `BACKEND_SPEC.md` Part 2. App plumbing exists (`fcm_token` sent on device registration when present, `devices/unregister/` called on sign-out) but `PushService.currentToken()` is a stub returning null until a Firebase project + per-flavor `google-services.json` + `firebase_messaging` are wired.
 - **Square Tap to Pay (runtime):** Backend endpoints are done; charging still needs a real NFC device on API 31+ and Square production approval (sandbox works for the full flow). Not exercisable in CI.
-- **Release signing:** Release builds are debug-signed. Add a real keystore before any Play Store upload.
+- **Release signing:** wired in CI (keystore from repo secrets; the release workflow refuses to build unsigned). *Local* `flutter build --release` still falls back to debug signing unless you create `android/key.properties` yourself.
 
 ## CI/CD
 
 GitHub Actions live in `.github/workflows/` (repo root, above `fishauctions_application/`):
-- **ci.yml** — PRs + master pushes: pub get, generated-code freshness check, `dart format` check, `flutter analyze`, `flutter test`.
-- **android-release.yml** — master pushes: builds the prod release APK (requires JDK 17) and uploads it as an artifact. Play Store + iOS/macOS steps are scaffolded but disabled pending signing.
+- **ci.yml** — PRs + master/main pushes: pub get, generated-code freshness check, `dart format` check, `flutter analyze`, `flutter test`.
+- **android-release.yml** — **manual** (`workflow_dispatch`, pick a Play track): runs the CI suite as a gate, restores the upload keystore from secrets (fails fast if `ANDROID_KEYSTORE_BASE64` is missing — a release must be real-signed), builds the signed prod `.aab` **and uploads it to Google Play** on the chosen track (`PLAY_SERVICE_ACCOUNT_JSON`; prerequisites satisfied), plus a signed sideloadable APK artifact. An iOS/macOS job is still a TODO pending Apple signing (see `IOS.md`).
+- **dependabot.yml** — weekly grouped minor/patch PRs (pub, gradle, actions); majors arrive individually.
 
 Builds require **JDK 17** (AGP 9). `minSdk` is **28** (Square SDK floor).
 
@@ -227,12 +235,13 @@ traps signed-out users on three gate screens until a sign-in succeeds:
   button renders only when the deployment's `/api/mobile/config/` returns a
   non-empty `google_server_client_id`; unconfigured deployments simply don't
   offer it (no "not configured" error).
-- `/signup`, `/password-reset` — the django-allauth web flows
-  (`/accounts/signup/`, `/accounts/password/reset/`) hosted in a restricted
-  WebView (`AllauthWebScreen`): navigation is confined to `/accounts/…`, a link
-  to the web login form returns to the native login screen, and anything else
-  opens in the system browser. This keeps reCAPTCHA, email verification, and
-  throttling server-side with no native re-implementation.
+- `/signup`, `/password-reset` — the django-allauth web flows hosted in a
+  restricted WebView (`AllauthWebScreen`). **Allauth is mounted at the site
+  root** (`/signup/`, `/password/reset/`, `/login/`, `/logout/` — not under
+  `/accounts/`): navigation is confined to an allow-list of the flow's own
+  pages, a link to the web login form returns to the native login screen, and
+  anything else opens in the system browser. This keeps reCAPTCHA, email
+  verification, and throttling server-side with no native re-implementation.
 
 The native JWT (`authProvider`) is the single source of truth for "signed in".
 Session restore falls back to a cached profile when the network is down (tokens
@@ -250,10 +259,11 @@ JWT auth is bridged into the WebView's Django cookie session:
   cookies wiped by sign-out) the shell boots through the
   `/api/mobile/auth/web-session/` handoff so the very first page renders signed
   in; otherwise it loads directly and repairs a lapsed session when the server
-  bounces to `/accounts/login/` (`_reconcileWebSession`).
+  bounces to `/login/` (`_reconcileWebSession`; LOGIN_URL — allauth is
+  root-mounted).
 - The web login form is never shown in-app — a web-form login would create a
   cookie session with no JWT.
-- The WebView intercepts specific URL patterns to trigger native flows (e.g. `fishauctions://print/<lot_pk>` → native Bluetooth print dialog, `fishauctions://pay/<invoice_pk>` → native Square payment flow); a web `/accounts/logout/` navigation triggers the full native sign-out instead of navigating.
+- The WebView intercepts specific URL patterns to trigger native flows (e.g. `fishauctions://print/<lot_pk>` → native Bluetooth print dialog, `fishauctions://pay/<invoice_pk>` → native Square payment flow); a web `/logout/` navigation triggers the full native sign-out instead of navigating.
 
 ## Key Decisions
 

@@ -1,6 +1,7 @@
 import 'dart:math';
 
 import 'package:flutter/foundation.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 
 import '../constants/app_constants.dart';
 import 'secure_storage.dart';
@@ -28,7 +29,16 @@ class DeviceIdentity {
   static String get platformTag =>
       defaultTargetPlatform == TargetPlatform.iOS ? 'ios' : 'android';
 
-  static String get appVersion => AppConstants.appVersion;
+  /// The installed build's version ("1.0.0"), read from the platform so it can
+  /// never drift from pubspec.yaml. Falls back to '0.0.0' if the platform
+  /// lookup fails (e.g. in unit tests with no host).
+  static Future<String> appVersion() async {
+    try {
+      return (await PackageInfo.fromPlatform()).version;
+    } on Object {
+      return '0.0.0';
+    }
+  }
 
   static String get deviceName => '${AppConstants.appName} ($platformTag)';
 

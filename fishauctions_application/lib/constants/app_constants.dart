@@ -21,7 +21,4 @@ class AppConstants {
   /// `android:label` in AndroidManifest.xml, which native code can't read from
   /// Dart). For this deployment it equals the site domain.
   static const String appName = 'auction.fish';
-
-  /// App version. Keep in sync with `version` in pubspec.yaml.
-  static const String appVersion = '1.0.0';
 }

@@ -11,6 +11,26 @@ template — never an app constant.
 
 ---
 
+# Amendments (post-implementation)
+
+Part 1 is implemented on the backend and verified against staging (2026-07).
+One correction is still owed:
+
+**`escpos-raster` seed row: `print_width_px` should be 384, not 96.**
+`auctions/printer_programs.py` `SEED_PROFILES` seeds the generic
+"Raw ESC/POS raster (GS v 0)" fallback with `print_width_px: 96` — that's the
+D11s's 12 mm head, not a generic ESC/POS geometry. Nearly every BLE ESC/POS
+printer is a 58 mm unit with a 384-dot head @ 203 dpi; at 96 px it prints a
+~12 mm-wide strip. Change the row to `print_width_px: 384` (the app's bundled
+copy already says 384). Since migration 0320 already ran, edit the value in
+`SEED_PROFILES` **and** update the existing row (Django admin edit on each
+deployment, or a tiny data migration re-running the seed's `update_or_create`).
+The other seed fields now match the app bundle byte-for-byte — keep it that way
+when editing rows the bundle mirrors (`d11s-aiyin`, `d11s-lujiang`,
+`escpos-raster`).
+
+---
+
 # Part 1 — Printing
 
 ## Product requirements (recap)

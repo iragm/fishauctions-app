@@ -76,7 +76,7 @@ class DownloadService {
       // file. Detect that rather than saving a login page as "export.csv".
       final bouncedToLogin =
           contentType.startsWith('text/html') ||
-          response.realUri.path.contains('/accounts/login');
+          response.realUri.path == '/login/';
       if (bouncedToLogin) {
         return 'You need to be signed in to download this.';
       }

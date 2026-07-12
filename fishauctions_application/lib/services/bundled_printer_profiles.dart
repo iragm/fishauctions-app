@@ -73,7 +73,7 @@ const _bundledJson = '''
     },
     {
       "slug": "d11s-lujiang",
-      "name": "D11s (Base / Lujiang board)",
+      "name": "Fichero / AiYin D11s (LuJiang board)",
       "schema_version": 1,
       "priority": 20,
       "match": {
@@ -125,7 +125,7 @@ const _bundledJson = '''
       "slug": "escpos-raster",
       "name": "Raw ESC/POS raster (GS v 0)",
       "schema_version": 1,
-      "priority": 1000,
+      "priority": 900,
       "match": {
         "ble_name_patterns": [],
         "service_uuid": "",
@@ -148,9 +148,9 @@ const _bundledJson = '''
         {"repeat_per_copy": [
           {"tx": "1d 76 30 00 {u16le:width_bytes} {u16le:height_px}"},
           {"tx_raster": true},
-          {"delay_ms": 300},
+          {"delay_ms": 200},
           {"tx": "1d 0c"},
-          {"delay_ms": 300}
+          {"delay_ms": 200}
         ]}
       ],
       "status_program": [],

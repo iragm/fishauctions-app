@@ -165,7 +165,7 @@ class AuthService {
       deviceUuid: await DeviceIdentity.uuid(),
       deviceName: DeviceIdentity.deviceName,
       platform: DeviceIdentity.platformTag,
-      appVersion: DeviceIdentity.appVersion,
+      appVersion: await DeviceIdentity.appVersion(),
       fcmToken: await PushService.instance.currentToken(),
     );
   }

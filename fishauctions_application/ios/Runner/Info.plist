@@ -17,13 +17,24 @@
 	<!-- WebView photo-library uploads: add-image-to-lot and club icon. -->
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Attach photos from your library to your lots.</string>
-	<!-- Native "add to calendar" bridge for auction pickup times. -->
+	<!-- Native "add to calendar" bridge for auction pickup times.
+	     NSCalendarsUsageDescription covers iOS 16; the WriteOnly/FullAccess
+	     keys are the iOS 17+ replacements. -->
 	<key>NSCalendarsUsageDescription</key>
 	<string>Add auction pickup times to your calendar.</string>
+	<key>NSCalendarsWriteOnlyAccessUsageDescription</key>
+	<string>Add auction pickup times to your calendar.</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Add auction pickup times to your calendar.</string>
+	<!-- Distances to auctions on the listings pages (soft, contextual prompt —
+	     never at app open), and required by Square during a Tap to Pay charge
+	     (card-present fraud signal). -->
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Show the distance to each auction, and confirm where Tap to Pay charges happen.</string>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>Fishauctions Application</string>
+	<string>auction.fish</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
