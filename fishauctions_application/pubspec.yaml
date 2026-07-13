@@ -67,7 +67,7 @@ dependencies:
   # Temp directory to stage downloaded bytes before share/open.
   path_provider: ^2.1.6
   # Runtime permissions (Bluetooth, NFC, camera)
-  permission_handler: ^11.3.1
+  permission_handler: ^12.0.3
   # OS print dialog (Android print framework / AirPrint) + PdfPreview widget.
   # Used by the "System printer" print method: label PDFs from the server are
   # handed to a printer configured on the phone instead of the share sheet.
