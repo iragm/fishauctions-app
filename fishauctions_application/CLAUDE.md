@@ -195,9 +195,11 @@ on-device `payment_id` via Square's GetPayment — checking status, amount, and
 the issued `reference_id` — then records it idempotently and marks the invoice
 PAID.
 
-Runtime Tap to Pay still needs: a real NFC device on API 31+, Square production
-approval for Tap to Pay, and the iOS Tap to Pay entitlement (iOS not wired yet).
-None of that is testable in CI; CI only verifies the app compiles and links.
+Runtime Tap to Pay still needs: a real NFC device on API 31+ (Android) or an
+iPhone XS+ on iOS 16.4+, Square production approval for Tap to Pay, and — on
+iOS — Apple's proximity-reader entitlement (code is wired on both platforms;
+the iOS checklist is in `IOS.md`). None of that is testable in CI; CI only
+verifies the app compiles and links.
 
 ## Django Backend Notes (from CLAUDE.md in iragm/fishauctions)
 
@@ -213,7 +215,7 @@ None of that is testable in CI; CI only verifies the app compiles and links.
 - **PaymentIntent model:** The prompt specified a standalone PaymentIntent model but the backend uses `InvoicePayment` directly. This works — just don't expect a `/payments/<id>/status/` endpoint to exist yet.
 - **iOS:** project config (bundle id, iOS 16 target, Info.plist keys) is done; the Mac-only work — first signed build, Google iOS OAuth client, the Square platform channel in AppDelegate, and the Tap to Pay entitlement — is checklisted in `IOS.md`.
 - ~~Printing backend endpoints~~ — landed (`printers/profiles/`, `labels/prefs/`, `labels/<pk>/?fmt=pdf`, `UserLabelPrefs.print_method`, the `/printing/` page's dropdown + BT card are live on staging). The app still degrades gracefully when offline: bundled printer profiles, print method defaults to PDF, prefs fetch returns null.
-- **Push notifications:** Backend spec in `BACKEND_SPEC.md` Part 2. App plumbing exists (`fcm_token` sent on device registration when present, `devices/unregister/` called on sign-out) but `PushService.currentToken()` is a stub returning null until a Firebase project + per-flavor `google-services.json` + `firebase_messaging` are wired.
+- **Push notifications:** the backend side of `BACKEND_SPEC.md` Part 2 is **implemented** (`auctions/notifications.py` notify_user choke point, `send_push_to_user` + `promo_push_notifications` tasks, `UserData.push_notifications_instead_of_email`, `PushNotificationSent`, firebase-admin) but inert by design until (a) `FIREBASE_CREDENTIALS_JSON` is set on the deployment and (b) devices report real FCM tokens. App plumbing exists (`fcm_token` sent on device registration when present, `devices/unregister/` called on sign-out) but `PushService.currentToken()` is a stub returning null until a Firebase project + per-flavor `google-services.json` + `firebase_messaging` are wired. Until both land, every notification falls back to email (`user_prefers_push()` is false for everyone).
 - **Square Tap to Pay (runtime):** Backend endpoints are done; charging still needs a real NFC device on API 31+ and Square production approval (sandbox works for the full flow). Not exercisable in CI.
 - **Release signing:** wired in CI (keystore from repo secrets; the release workflow refuses to build unsigned). *Local* `flutter build --release` still falls back to debug signing unless you create `android/key.properties` yourself.
 
@@ -264,6 +266,7 @@ JWT auth is bridged into the WebView's Django cookie session:
 - The web login form is never shown in-app — a web-form login would create a
   cookie session with no JWT.
 - The WebView intercepts specific URL patterns to trigger native flows (e.g. `fishauctions://print/<lot_pk>` → native Bluetooth print dialog, `fishauctions://pay/<invoice_pk>` → native Square payment flow); a web `/logout/` navigation triggers the full native sign-out instead of navigating.
+- Home-screen quick actions (long-press the launcher icon) deep-link into web pages: `ShortcutService` owns the type→path mapping ("Lots in my last auction" → `/lots/my-last-auction/` backend redirect, "Selling" → `/selling/`, "Invoices" → `/invoices/`); the shell consumes the pending path at mount (surviving the login trap via the handoff `?next=`) or navigates in place when already up.
 
 ## Key Decisions
 

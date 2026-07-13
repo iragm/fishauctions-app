@@ -10,7 +10,7 @@ import 'package:permission_handler/permission_handler.dart';
 
 import '../models/printer_model.dart';
 import '../models/printer_profile.dart';
-import '../utils/android_platform.dart';
+import '../utils/platform_bridge.dart';
 import 'printer_exception.dart';
 import 'printer_transport.dart';
 
@@ -85,7 +85,7 @@ class BluetoothService implements PrinterTransport {
   /// 11 and below need runtime location to return BLE scan results.
   Future<bool> requestScanPermissions() async {
     final perms = <Permission>[Permission.bluetoothScan];
-    if (await AndroidPlatform.sdkInt() < 31) {
+    if (await PlatformBridge.sdkInt() < 31) {
       perms.add(Permission.locationWhenInUse);
     }
     final statuses = await perms.request();

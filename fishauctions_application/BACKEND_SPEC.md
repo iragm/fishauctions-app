@@ -14,9 +14,33 @@ template — never an app constant.
 # Amendments (post-implementation)
 
 Part 1 is implemented on the backend and verified against staging (2026-07).
-One correction is still owed:
+Part 2 is also implemented server-side (`notifications.py` choke point,
+`send_push_to_user` / `promo_push_notifications` tasks, `UserData.
+push_notifications_instead_of_email`, firebase-admin) but is inert until
+`FIREBASE_CREDENTIALS_JSON` is provisioned and the app ships real FCM tokens
+(see CLAUDE.md "What's NOT Done Yet" → Push notifications for the app-side
+list). Two small backend items are still owed:
+
+**`GET /lots/my-last-auction/` — redirect for the app's home-screen shortcut.**
+The app registers a "Lots in my last auction" quick action (long-press the
+launcher icon; `ShortcutService`). Only the server knows
+`userdata.last_auction_used`, so the shortcut points at this URL:
+
+- `login_required`. 302 to `/lots/?auction=<userdata.last_auction_used.slug>`
+  when set (and the auction isn't deleted); plain `/lots/` otherwise.
+- No template, no query params in, nothing else — a `RedirectView`-sized view.
+- Until it lands, that one shortcut 404s in the WebView (the other two,
+  `/selling/` and `/invoices/`, already exist).
+
+**When iOS push lands: `send_fcm_message` needs an `apns` config.** It
+currently builds only `android=messaging.AndroidConfig(...)`; data-only
+messages don't wake iOS apps without an APNs block
+(`apns=messaging.APNSConfig(payload=messaging.APNSPayload(aps=messaging.Aps(
+content_available=True)))` plus the `apns-priority: 5` header). Not needed
+until the app ships iOS push tokens.
 
 **`escpos-raster` seed row: `print_width_px` should be 384, not 96.**
+(Still owed.)
 `auctions/printer_programs.py` `SEED_PROFILES` seeds the generic
 "Raw ESC/POS raster (GS v 0)" fallback with `print_width_px: 96` — that's the
 D11s's 12 mm head, not a generic ESC/POS geometry. Nearly every BLE ESC/POS

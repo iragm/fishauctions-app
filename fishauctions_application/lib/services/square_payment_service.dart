@@ -4,7 +4,7 @@ import 'package:logger/logger.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:square_mobile_payments_sdk/square_mobile_payments_sdk.dart';
 
-import '../utils/android_platform.dart';
+import '../utils/platform_bridge.dart';
 
 final _log = Logger();
 
@@ -38,34 +38,45 @@ class SquarePaymentService {
   ///
   /// On Android the answer comes from the platform, not the SDK: the Square
   /// Flutter plugin's `tapToPaySettings.isDeviceCapable()` is iOS-only and
-  /// throws `MissingPluginException` on Android. iOS (not wired yet) uses the
-  /// SDK call.
+  /// throws `MissingPluginException` on Android. iOS asks the SDK (which
+  /// checks the iPhone XS+ / iOS 16.4+ Tap to Pay floor).
   Future<bool> isDeviceCapable() {
     if (Platform.isAndroid) {
-      return AndroidPlatform.isTapToPayCapable();
+      return PlatformBridge.isTapToPayCapable();
     }
     return _sdk.tapToPaySettings.isDeviceCapable();
   }
 
-  /// Ensures the runtime fine-location permission that Square Tap to Pay
-  /// requires on Android. Without it, [charge] fails with
+  /// iOS only: Tap to Pay on iPhone requires the device to be linked to an
+  /// Apple account once (an interactive Apple sheet, Square terms included).
+  /// No-op on Android and when already linked. A throw here means the link
+  /// was declined/failed — the charge can't proceed.
+  Future<void> ensureAppleAccountLinked() async {
+    if (!Platform.isIOS) {
+      return;
+    }
+    if (await _sdk.tapToPaySettings.isAppleAccountLinked()) {
+      return;
+    }
+    await _sdk.tapToPaySettings.linkAppleAccount();
+  }
+
+  /// Ensures the runtime location permission that Square Tap to Pay requires
+  /// on both platforms. Without it, [charge] fails with
   /// [PaymentErrorCode.locationPermissionNeeded] (the native
   /// `payment_no_permission_location`) — location is a card-present fraud
   /// signal for the reader, unrelated to our distance-cookie use of location.
   ///
-  /// The permission is declared in the manifest but must be granted at runtime.
-  /// The only other place that prompts for it (`LocationService`) fires solely
-  /// on the auctions/lots web pages, so a cashier who goes straight to checkout
-  /// would never have granted it — hence we request it here before the tap.
+  /// The permission is declared in the manifest/Info.plist but must be granted
+  /// at runtime. The only other place that prompts for it (`LocationService`)
+  /// fires solely on the auctions/lots web pages, so a cashier who goes
+  /// straight to checkout would never have granted it — hence we request it
+  /// here before the tap.
   ///
   /// Returns whether it's granted. Prompts once if the user hasn't decided; a
   /// permanent denial returns false without a prompt (see
-  /// [isLocationPermanentlyDenied]). No-op → true off Android (iOS Tap to Pay
-  /// isn't wired yet).
+  /// [isLocationPermanentlyDenied]).
   Future<bool> ensureLocationPermission() async {
-    if (!Platform.isAndroid) {
-      return true;
-    }
     final status = await Permission.locationWhenInUse.request();
     return status.isGranted;
   }
@@ -85,7 +96,7 @@ class SquarePaymentService {
   /// [applicationId] is the deployment's Square Application ID (from
   /// `/api/mobile/config/`, warmed at startup); the SDK is initialized with it
   /// first, since authorize() can't run on an uninitialized SDK. Init is
-  /// once-per-process and idempotent (see [AndroidPlatform.initializeSquare]),
+  /// once-per-process and idempotent (see [PlatformBridge.initializeSquare]),
   /// so re-calling it here after the startup warm-up is a no-op.
   ///
   /// Different invoices can belong to different sellers, so if the device is
@@ -96,7 +107,7 @@ class SquarePaymentService {
     required String accessToken,
     required String locationId,
   }) async {
-    await AndroidPlatform.initializeSquare(applicationId);
+    await PlatformBridge.initializeSquare(applicationId);
     if (await isAuthorized) {
       final current = await _sdk.authManager.getAuthorizedLocation();
       if (current?.id == locationId) {

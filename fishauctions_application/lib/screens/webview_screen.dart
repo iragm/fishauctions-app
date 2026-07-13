@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 
 import 'package:add_2_calendar/add_2_calendar.dart';
 import 'package:dio/dio.dart';
@@ -26,8 +27,9 @@ import '../services/bluetooth_service.dart';
 import '../services/download_service.dart';
 import '../services/label_prefs_service.dart';
 import '../services/location_service.dart';
+import '../services/shortcut_service.dart';
 import '../services/square_payment_service.dart';
-import '../utils/android_platform.dart';
+import '../utils/platform_bridge.dart';
 import '../widgets/payment_sheet.dart';
 import '../widgets/printer_connect_sheet.dart';
 import 'command_palette_screen.dart';
@@ -94,6 +96,10 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // Home-screen shortcut tapped while the shell is already up → navigate
+    // in place. (Cold starts are handled by _initialUrl consuming the pending
+    // path instead — see _onShortcutTapped.)
+    ShortcutService.instance.pending.addListener(_onShortcutTapped);
     // Warm the deployment config and pre-initialize the Square SDK off the
     // startup critical path — never blocks first paint (the WebView loads
     // concurrently), so the eventual Tap to Pay is instant.
@@ -108,7 +114,7 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     try {
       final cfg = await ref.read(configProvider.future);
       if (cfg.hasSquare) {
-        await AndroidPlatform.initializeSquare(cfg.squareApplicationId);
+        await PlatformBridge.initializeSquare(cfg.squareApplicationId);
       }
     } on Object catch (e) {
       debugPrint('Square SDK warm-up skipped: $e');
@@ -167,14 +173,21 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   /// session handoff so the very first page renders signed in. When the
   /// persisted cookie is present we load the site directly — no extra round
   /// trip — and _reconcileWebSession repairs it if the server says it lapsed.
+  ///
+  /// A pending home-screen shortcut (cold start from a quick action, or a tap
+  /// that trapped through the login screen first) becomes the landing page —
+  /// threaded through the handoff's ?next= when one runs.
   Future<String> _initialUrl() async {
+    final shortcutPath = ShortcutService.instance.consume();
     try {
       final cookies = await CookieManager.instance().getCookies(
         url: WebUri(EnvironmentConfig.webBaseUrl),
       );
       final hasWebSession = cookies.any((c) => c.name == 'sessionid');
       if (!hasWebSession) {
-        final handoff = await AuthService.instance.createWebSessionHandoffUrl();
+        final handoff = await AuthService.instance.createWebSessionHandoffUrl(
+          next: shortcutPath,
+        );
         if (handoff != null) {
           return handoff;
         }
@@ -182,13 +195,30 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     } on Object catch (e) {
       debugPrint('Web session bootstrap skipped: $e');
     }
-    return EnvironmentConfig.webBaseUrl;
+    return shortcutPath == null
+        ? EnvironmentConfig.webBaseUrl
+        : '${EnvironmentConfig.webBaseUrl}$shortcutPath';
   }
 
   @override
   void dispose() {
+    ShortcutService.instance.pending.removeListener(_onShortcutTapped);
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
+  }
+
+  /// A quick action fired while this screen exists. Before the WebView is
+  /// created the path is deliberately left pending — _initialUrl (about to
+  /// run) consumes it as the landing page; taking it here too would double-
+  /// navigate or lose it.
+  void _onShortcutTapped() {
+    if (_controller == null || ShortcutService.instance.pending.value == null) {
+      return;
+    }
+    final path = ShortcutService.instance.consume();
+    if (path != null) {
+      _loadPath(path);
+    }
   }
 
   @override
@@ -387,8 +417,11 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       }
       if (!capable) {
         _showSnack(
-          'This device can\'t take Tap to Pay — it needs NFC and Android 12 '
-          'or newer.',
+          Platform.isIOS
+              ? 'This device can\'t take Tap to Pay — it needs an iPhone XS '
+                    'or newer on iOS 16.4+.'
+              : 'This device can\'t take Tap to Pay — it needs NFC and '
+                    'Android 12 or newer.',
         );
         return;
       }

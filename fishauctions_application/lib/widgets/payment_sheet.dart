@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
@@ -179,8 +180,25 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
 
       if (!await square.isDeviceCapable()) {
         _fail(
-          'This device can\'t take Tap to Pay payments. It needs NFC and '
-          'Android 12 or newer.',
+          Platform.isIOS
+              ? 'This device can\'t take Tap to Pay payments. It needs an '
+                    'iPhone XS or newer on iOS 16.4+.'
+              : 'This device can\'t take Tap to Pay payments. It needs NFC '
+                    'and Android 12 or newer.',
+        );
+        return;
+      }
+
+      // iOS: Tap to Pay requires a one-time Apple account link (an
+      // interactive Apple sheet). Doing it here — before the location gate
+      // and the tap — keeps the first-ever charge flow linear. No-op on
+      // Android and on every later charge.
+      try {
+        await square.ensureAppleAccountLinked();
+      } on Exception {
+        _fail(
+          'Tap to Pay on iPhone needs this device linked to an Apple '
+          'account. The link was cancelled or failed — try again.',
         );
         return;
       }

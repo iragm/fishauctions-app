@@ -66,14 +66,18 @@ dependencies:
   # Used by the "System printer" print method: label PDFs from the server are
   # handed to a printer configured on the phone instead of the share sheet.
   printing: ^5.14.2
+  # Home-screen quick actions (long-press the launcher icon) deep-linking into
+  # web destinations in the shell. Mapping lives in ShortcutService.
+  quick_actions: ^1.1.0
   riverpod: ^2.5.1
   riverpod_annotation: ^2.3.5
   # Share sheet for downloaded CSV/PDF exports (save / open / share).
   share_plus: ^12.0.2
   # Square Mobile Payments SDK — in-person / Tap to Pay.
   # Requires Android minSdk 28 (set in android/app/build.gradle.kts) and the
-  # public Square Maven repo (no token). iOS needs the Tap to Pay entitlement
-  # and is not wired up yet. See lib/services/square_payment_service.dart.
+  # public Square Maven repo (no token); iOS 16+ (set in the Xcode project) and
+  # Apple's Tap to Pay entitlement before real charges (checklist: IOS.md).
+  # See lib/services/square_payment_service.dart.
   square_mobile_payments_sdk: ^2026.5.1
   # Open external / target=_blank links (connect banners, map directions, Google
   # Wallet) in the system browser instead of the in-app WebView.

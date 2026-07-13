@@ -1,9 +1,9 @@
 # iOS — current state and what's left
 
-The Dart layer is fully platform-aware already (Bluetooth printing, permission
-flows, AirPrint, downloads, calendar all branch correctly; Square paths no-op
-safely on iOS until wired). What's missing is project-level config — most of
-which is now done in-repo — and the Mac-only native/signing work below.
+The Dart layer is fully platform-aware (Bluetooth printing, permission flows,
+AirPrint, downloads, calendar all branch correctly), and the Square Tap to Pay
+plumbing is now written for iOS too. What remains is Mac-only: the first
+signed build, and the Apple/Square approvals below.
 
 ## Done in-repo (no Mac needed, committed here)
 
@@ -17,6 +17,16 @@ which is now done in-repo — and the Mac-only native/signing work below.
   charge requirement).
 - Plugins integrate via Swift Package Manager (Flutter 3.44) — no
   permission_handler Podfile macros needed.
+- `AppDelegate.swift` implements the `com.fishauctions.app/platform` channel
+  (`initializeSquare`) with the cached-id early-init pattern; the Dart bridge
+  (`lib/utils/platform_bridge.dart`, ex-`android_platform.dart`) now routes
+  Square init through the channel on iOS as well.
+- `SquarePaymentService`: location permission is requested on iOS before a
+  charge (Square requires it there too), and `ensureAppleAccountLinked()` runs
+  the one-time Apple account link ahead of the first iOS charge (the payment
+  sheet calls it; no-op on Android).
+- Home-screen quick actions (`ShortcutService`) work on iOS with no extra
+  project config.
 
 ## First run on a device (needs a Mac + Xcode)
 
@@ -42,33 +52,53 @@ which is now done in-repo — and the Mac-only native/signing work below.
 - `serverClientId` keeps coming from `/api/mobile/config/` (already wired in
   `SocialAuthService`).
 
-## Tap to Pay on iPhone (the real iOS work)
+## Tap to Pay on iPhone — remaining to-do list
 
-1. **AppDelegate platform channel** — mirror `MainActivity.kt`'s
-   `com.fishauctions.app/platform` channel with an `initializeSquare` handler
-   calling `MobilePaymentsSDK.initialize(...)` (the Flutter plugin exposes
-   authorize/charge but not initialize, same as Android). Square's docs want
-   init inside `didFinishLaunchingWithOptions`, but our app id arrives at
-   runtime from `/api/mobile/config/` — so: cache the id (UserDefaults) when
-   first seen, init late on the very first run, init early from the cache on
-   every later launch, and refuse a *different* id ("restart to switch
-   deployments" — same semantics as Android). `getSdkInt` /
-   `isTapToPayCapable` stay Android-only; Dart already routes iOS capability
-   to the plugin's `isDeviceCapable()`.
-2. **Entitlement** `com.apple.developer.proximity-reader.payment.acceptance`
-   — request from Apple (Square's dashboard walks through it), then add
-   `Runner.entitlements` + provisioning profile carrying it.
-3. **Apple account linking** — the plugin exposes `linkAppleAccount` /
-   `isAppleAccountLinked`; the payment sheet needs a one-time "link your Apple
-   account" step on iOS before the first charge (no Android equivalent).
-4. **Location gate** — `SquarePaymentService.ensureLocationPermission()`
-   currently returns true off-Android; extend it to prompt on iOS too (Square
-   requires location authorization during a charge; the plist key is already
-   in place).
-5. Hardware floor is iPhone XS+ on iOS 16.4+; `isDeviceCapable()` answers at
-   runtime and the existing "this device can't take Tap to Pay" UI handles it.
-6. Square dashboard: accept the Tap to Pay on iPhone terms for each seller
-   account.
+Code is written; everything left needs a Mac, an Apple Developer account, or
+Square-side approval. In order:
+
+- [x] AppDelegate `com.fishauctions.app/platform` channel with
+      `initializeSquare` → `MobilePaymentsSDK.initialize(squareApplicationID:)`
+      (cached-id early init in `didFinishLaunching`; refuse a different id —
+      restart to switch deployments, same semantics as Android).
+- [x] Dart bridge routes Square init through the channel on iOS
+      (`PlatformBridge.initializeSquare`); capability check uses the plugin's
+      `isDeviceCapable()` on iOS (hardware floor: iPhone XS+ on iOS 16.4+).
+- [x] Location permission requested on iOS before a charge
+      (`ensureLocationPermission`; `NSLocationWhenInUseUsageDescription` in
+      Info.plist).
+- [x] One-time Apple account link step in the payment sheet
+      (`ensureAppleAccountLinked` → plugin's `isAppleAccountLinked` /
+      `linkAppleAccount`), with a clear message on cancel/failure.
+- [ ] **First build on a Mac** — `AppDelegate.swift` was written without an
+      iOS toolchain; expect at most minor compile fixes (the
+      `MobilePaymentsSDK.initialize` call matches the Square plugin's own
+      example app verbatim). `open ios/Runner.xcworkspace`, pick a signing
+      team, `flutter run -t lib/main.dart --dart-define=FLAVOR=staging`.
+- [ ] **Sandbox smoke test with the mock reader** — with the staging config
+      (sandbox app id), authorize completes on a simulator/device; the plugin
+      ships `MockReaderUI` (`showMockReaderUI`) to exercise a full tap → 
+      `payments/confirm/` round-trip without the entitlement or real hardware.
+      Temporary debug hook; don't ship a button for it.
+- [ ] **Request the Tap to Pay entitlement** from Apple:
+      `com.apple.developer.proximity-reader.payment.acceptance` (Apple's
+      "Tap to Pay on iPhone" entitlement request form on
+      developer.apple.com; Square's Tap to Pay docs link it). Needs the
+      production bundle id `com.fishauctions.app` registered first.
+- [ ] **After the grant**: create `ios/Runner/Runner.entitlements` containing
+      that entitlement, set `CODE_SIGN_ENTITLEMENTS = Runner/Runner.entitlements`
+      on the Runner target, regenerate the provisioning profile. (Deliberately
+      NOT added now — an entitlements file the profile doesn't carry breaks
+      signing for the plain build above.)
+- [ ] **Square dashboard**: accept the Tap to Pay on iPhone terms for each
+      seller account (per-seller, like the Android reader agreement).
+- [ ] **Real-device production test**: iPhone XS+ on iOS 16.4+, production
+      Square app id from prod `/api/mobile/config/`, real card, small
+      invoice; verify the invoice flips to PAID and the web checkout page
+      re-renders.
+- [ ] When iOS *push* lands later: the backend's `send_fcm_message` needs an
+      `apns` config block for data-only delivery (noted in BACKEND_SPEC.md
+      Amendments) plus an APNs auth key in Firebase.
 
 ## Distribution (later)
 
