@@ -1,0 +1,131 @@
+name: iOS Release
+
+# Manually-triggered iOS build, mirroring android-release.yml. Runs the full CI
+# suite as a gate, then builds the iOS app on a macOS runner.
+#
+# Two modes via the `distribute` input:
+#   • false (default) — WORKS TODAY, no secrets needed: an unsigned
+#     `flutter build ios --no-codesign` that compiles the whole app (Swift
+#     AppDelegate, plugins, SPM/CocoaPods) on real Apple toolchain and uploads
+#     the .app as an artifact. This is the macOS equivalent of the Android
+#     compile gate and is how we verify the iOS build before any signing exists.
+#   • true — the signed TestFlight path. Scaffolded and fail-fast on missing
+#     secrets (same pattern as the Android keystore step). Leave it on `false`
+#     until the App Store Connect signing material below is in repo secrets.
+on:
+  workflow_dispatch:
+    inputs:
+      distribute:
+        description: "Signed build + upload to TestFlight (needs signing secrets)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: ios-release-${{ github.ref }}
+  # Don't cancel an in-progress release — it may be mid-upload to App Store Connect.
+  cancel-in-progress: false
+
+defaults:
+  run:
+    working-directory: fishauctions_application
+
+env:
+  FLUTTER_VERSION: 3.44.1
+
+jobs:
+  # Gate: reuse the exact CI checks (codegen freshness, format, analyze, test) so
+  # a build can never ship code that wouldn't pass CI — identical to the Android
+  # release's gate. Runs on Linux; only the build job below needs macOS.
+  verify:
+    name: CI checks
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    name: Build iOS app
+    needs: verify
+    # macOS is required for any iOS build. `macos-latest` tracks the current
+    # Apple-silicon image; pin (e.g. macos-15) + maxim-lobanov/setup-xcode if a
+    # future image bumps Xcode and breaks the build.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      # ── Unsigned build (default) ───────────────────────────────────────────
+      # No --flavor: iOS has no Xcode schemes; environment selection is
+      # dart-define only (Android's --flavor merely sets the applicationId).
+      # --no-codesign skips signing, so this needs no certificates — it just
+      # proves the app compiles and links on Apple toolchain (the point of the
+      # gate today). Build name/number mirror the Android job.
+      - name: Build unsigned iOS app
+        if: ${{ !inputs.distribute }}
+        run: >
+          flutter build ios --release --no-codesign
+          --dart-define=FLAVOR=prod
+          --build-number=${{ github.run_number }}
+          --build-name=1.${{ github.run_number }}
+
+      - name: Upload unsigned .app artifact
+        if: ${{ !inputs.distribute }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-app-unsigned-${{ github.sha }}
+          # Not installable (unsigned) — this is a build-verification artifact.
+          path: fishauctions_application/build/ios/iphoneos/Runner.app
+          if-no-files-found: error
+          retention-days: 14
+
+      # ── Signed build + TestFlight (distribute == true) ─────────────────────
+      # SCAFFOLD. Nothing below runs until `distribute` is true AND these repo
+      # secrets exist. Uses an App Store Connect API key (no cert/profile
+      # juggling): create one at App Store Connect → Users and Access → Keys,
+      # and store the .p8 (base64) + ids as secrets. The apple-actions steps
+      # import signing material and export a TestFlight-ready .ipa.
+      - name: Check signing secrets
+        if: ${{ inputs.distribute }}
+        env:
+          BUILD_CERTIFICATE_BASE64: ${{ secrets.IOS_DIST_CERTIFICATE_BASE64 }}
+          APPSTORE_API_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
+        run: |
+          if [ -z "$BUILD_CERTIFICATE_BASE64" ] || [ -z "$APPSTORE_API_KEY_ID" ]; then
+            echo "::error::Signed iOS build requested but signing secrets are missing."
+            echo "::error::Set IOS_DIST_CERTIFICATE_BASE64, IOS_DIST_CERTIFICATE_PASSWORD,"
+            echo "::error::IOS_PROVISIONING_PROFILE_BASE64, APPSTORE_API_KEY_ID,"
+            echo "::error::APPSTORE_API_ISSUER_ID, APPSTORE_API_PRIVATE_KEY. See IOS.md."
+            exit 1
+          fi
+
+      - name: Import signing certificate & profile
+        if: ${{ inputs.distribute }}
+        uses: apple-actions/import-codesign-certs@v3
+        with:
+          p12-file-base64: ${{ secrets.IOS_DIST_CERTIFICATE_BASE64 }}
+          p12-password: ${{ secrets.IOS_DIST_CERTIFICATE_PASSWORD }}
+
+      # Requires ios/ExportOptions.plist (method: app-store, your team id) —
+      # add it alongside this workflow when wiring signing.
+      - name: Build signed IPA
+        if: ${{ inputs.distribute }}
+        run: >
+          flutter build ipa --release
+          --dart-define=FLAVOR=prod
+          --build-number=${{ github.run_number }}
+          --build-name=1.${{ github.run_number }}
+          --export-options-plist=ios/ExportOptions.plist
+
+      - name: Upload to TestFlight
+        if: ${{ inputs.distribute }}
+        uses: apple-actions/upload-testflight-build@v3
+        with:
+          app-path: fishauctions_application/build/ios/ipa/fishauctions_application.ipa
+          issuer-id: ${{ secrets.APPSTORE_API_ISSUER_ID }}
+          api-key-id: ${{ secrets.APPSTORE_API_KEY_ID }}
+          api-private-key: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}

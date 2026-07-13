@@ -90,12 +90,15 @@ Square-side approval. In order:
       on the Runner target, regenerate the provisioning profile. (Deliberately
       NOT added now — an entitlements file the profile doesn't carry breaks
       signing for the plain build above.)
-- [ ] **Square dashboard**: accept the Tap to Pay on iPhone terms for each
-      seller account (per-seller, like the Android reader agreement).
 - [ ] **Real-device production test**: iPhone XS+ on iOS 16.4+, production
       Square app id from prod `/api/mobile/config/`, real card, small
       invoice; verify the invoice flips to PAID and the web checkout page
       re-renders.
+
+> No Square "per-seller Tap to Pay" sign-off exists. The integrator's Square
+> account is already approved for Tap to Pay, and OAuth-connected seller
+> accounts inherit that — there is no per-seller dashboard T&C step to gate on
+> (applies to both platforms; don't reintroduce it).
 - [ ] When iOS *push* lands later: the backend's `send_fcm_message` needs an
       `apns` config block for data-only delivery (noted in BACKEND_SPEC.md
       Amendments) plus an APNs auth key in Firebase.

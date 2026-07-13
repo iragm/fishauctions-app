@@ -143,6 +143,6 @@ jobs:
           track: ${{ inputs.track }}
           status: completed
 
-  # TODO(apple): add a macos-latest job to build iOS once Apple signing
-  # (certificates, provisioning profiles, and the Tap to Pay entitlement) is
-  # configured. iOS flavor schemes are not set up yet either.
+  # iOS builds live in the sibling ios-release.yml (a macOS runner can't share
+  # this Linux job). It compiles unsigned today; its signed/TestFlight path is
+  # scaffolded pending App Store Connect signing material — see IOS.md.
