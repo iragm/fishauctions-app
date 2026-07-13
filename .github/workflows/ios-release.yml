@@ -48,7 +48,7 @@ jobs:
     # future image bumps Xcode and breaks the build.
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: subosito/flutter-action@v2
         with:
@@ -75,7 +75,7 @@ jobs:
 
       - name: Upload unsigned .app artifact
         if: ${{ !inputs.distribute }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ios-app-unsigned-${{ github.sha }}
           # Not installable (unsigned) — this is a build-verification artifact.
@@ -105,7 +105,7 @@ jobs:
 
       - name: Import signing certificate & profile
         if: ${{ inputs.distribute }}
-        uses: apple-actions/import-codesign-certs@v3
+        uses: apple-actions/import-codesign-certs@v7
         with:
           p12-file-base64: ${{ secrets.IOS_DIST_CERTIFICATE_BASE64 }}
           p12-password: ${{ secrets.IOS_DIST_CERTIFICATE_PASSWORD }}
@@ -123,7 +123,7 @@ jobs:
 
       - name: Upload to TestFlight
         if: ${{ inputs.distribute }}
-        uses: apple-actions/upload-testflight-build@v3
+        uses: apple-actions/upload-testflight-build@v5
         with:
           app-path: fishauctions_application/build/ios/ipa/fishauctions_application.ipa
           issuer-id: ${{ secrets.APPSTORE_API_ISSUER_ID }}
