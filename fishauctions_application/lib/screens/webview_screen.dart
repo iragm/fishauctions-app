@@ -27,6 +27,7 @@ import '../services/bluetooth_service.dart';
 import '../services/download_service.dart';
 import '../services/label_prefs_service.dart';
 import '../services/location_service.dart';
+import '../services/push_service.dart';
 import '../services/shortcut_service.dart';
 import '../services/square_payment_service.dart';
 import '../utils/platform_bridge.dart';
@@ -100,10 +101,18 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     // in place. (Cold starts are handled by _initialUrl consuming the pending
     // path instead — see _onShortcutTapped.)
     ShortcutService.instance.pending.addListener(_onShortcutTapped);
+    // Notification tap → navigate the WebView there; foreground message →
+    // in-app banner. (A cold start from a tap is picked up in
+    // _onWebViewCreated once the controller exists.)
+    PushService.instance.pendingRoute.addListener(_onPushRoute);
+    PushService.instance.foregroundMessage.addListener(_onForegroundPush);
     // Warm the deployment config and pre-initialize the Square SDK off the
     // startup critical path — never blocks first paint (the WebView loads
     // concurrently), so the eventual Tap to Pay is instant.
     unawaited(_warmSquare());
+    // Bring up push (FCM) once config is known — inert unless this deployment
+    // configured push for this exact build. Off the critical path too.
+    unawaited(_warmPush());
   }
 
   /// Loads `/api/mobile/config/` and initializes the Square SDK with the
@@ -118,6 +127,25 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       }
     } on Object catch (e) {
       debugPrint('Square SDK warm-up skipped: $e');
+    }
+  }
+
+  /// Bring up push (FCM) from the deployment config, then — if a token resulted
+  /// — re-register the device so the backend gets the token (the login-time
+  /// registration ran before push was ready). Also re-registers on future token
+  /// refreshes. Best-effort: push stays inert on failure or when this
+  /// deployment/build has no push config.
+  Future<void> _warmPush() async {
+    try {
+      final cfg = await ref.read(configProvider.future);
+      PushService.instance.onTokenChanged = () =>
+          unawaited(AuthService.instance.registerThisDevice());
+      await PushService.instance.init(cfg);
+      if (PushService.instance.token != null) {
+        unawaited(AuthService.instance.registerThisDevice());
+      }
+    } on Object catch (e) {
+      debugPrint('Push warm-up skipped: $e');
     }
   }
 
@@ -164,6 +192,9 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     await _applyLocation(prompt: false, fresh: false);
     final initialUrl = await _initialUrl();
     await controller.loadUrl(urlRequest: URLRequest(url: WebUri(initialUrl)));
+    // A notification that cold-started the app (tapped while terminated) left a
+    // pending route during push init; now that the controller exists, honor it.
+    _onPushRoute();
   }
 
   /// The first URL to load. The user is always natively signed in when this
@@ -203,6 +234,8 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   @override
   void dispose() {
     ShortcutService.instance.pending.removeListener(_onShortcutTapped);
+    PushService.instance.pendingRoute.removeListener(_onPushRoute);
+    PushService.instance.foregroundMessage.removeListener(_onForegroundPush);
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -219,6 +252,54 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     if (path != null) {
       _loadPath(path);
     }
+  }
+
+  /// A notification tapped while the shell is up (or backgrounded) → navigate
+  /// the WebView. A tap that cold-starts the app from the terminated state is
+  /// handled in _onWebViewCreated once the controller exists.
+  void _onPushRoute() {
+    if (_controller == null ||
+        PushService.instance.pendingRoute.value == null) {
+      return;
+    }
+    final route = PushService.instance.consumeRoute();
+    if (route != null) {
+      _openPushUrl(route);
+    }
+  }
+
+  /// A message arrived while foregrounded (FCM displays nothing then) → a brief
+  /// in-app banner with a "View" action that opens its target.
+  void _onForegroundPush() {
+    final message = PushService.instance.foregroundMessage.value;
+    PushService.instance.foregroundMessage.value = null;
+    if (message == null || !mounted) {
+      return;
+    }
+    final text = message.title.isNotEmpty ? message.title : message.body;
+    if (text.isEmpty) {
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(text),
+        action: message.url.isEmpty
+            ? null
+            : SnackBarAction(
+                label: 'View',
+                onPressed: () => _openPushUrl(message.url),
+              ),
+      ),
+    );
+  }
+
+  /// Opens a push target in the WebView: an absolute URL is loaded as-is, a
+  /// site-relative path is resolved against the deployment base.
+  void _openPushUrl(String target) {
+    final url = target.startsWith('http')
+        ? target
+        : '${EnvironmentConfig.webBaseUrl}$target';
+    _controller?.loadUrl(urlRequest: URLRequest(url: WebUri(url)));
   }
 
   @override

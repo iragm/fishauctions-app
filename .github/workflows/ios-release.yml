@@ -84,36 +84,73 @@ jobs:
           retention-days: 14
 
       # ── Signed build + TestFlight (distribute == true) ─────────────────────
-      # SCAFFOLD. Nothing below runs until `distribute` is true AND these repo
-      # secrets exist. Uses an App Store Connect API key (no cert/profile
-      # juggling): create one at App Store Connect → Users and Access → Keys,
-      # and store the .p8 (base64) + ids as secrets. The apple-actions steps
-      # import signing material and export a TestFlight-ready .ipa.
+      # Mac-less signing via an App Store Connect API key + Xcode automatic
+      # cloud signing (`-allowProvisioningUpdates`): Xcode creates and manages
+      # the distribution certificate and provisioning profile in the cloud, so
+      # there is NO hand-made cert/.p12 or .mobileprovision to maintain. The
+      # only secrets are the API key (three values) and the team id:
+      #   APPSTORE_API_KEY_ID       — the key's ID (e.g. 2X9…)
+      #   APPSTORE_API_ISSUER_ID    — the issuer UUID (same page)
+      #   APPSTORE_API_PRIVATE_KEY  — the .p8 contents (paste the whole file)
+      #   APPLE_TEAM_ID             — your 10-char Developer Team ID
+      # Step-by-step to create these: PUSH.md / IOS.md. First `distribute:true`
+      # run is the shakeout — cloud signing needs the bundle id registered and
+      # a TestFlight app record to exist for com.fishauctions.app.
       - name: Check signing secrets
         if: ${{ inputs.distribute }}
         env:
-          BUILD_CERTIFICATE_BASE64: ${{ secrets.IOS_DIST_CERTIFICATE_BASE64 }}
           APPSTORE_API_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
+          APPSTORE_API_ISSUER_ID: ${{ secrets.APPSTORE_API_ISSUER_ID }}
+          APPSTORE_API_PRIVATE_KEY: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          if [ -z "$BUILD_CERTIFICATE_BASE64" ] || [ -z "$APPSTORE_API_KEY_ID" ]; then
-            echo "::error::Signed iOS build requested but signing secrets are missing."
-            echo "::error::Set IOS_DIST_CERTIFICATE_BASE64, IOS_DIST_CERTIFICATE_PASSWORD,"
-            echo "::error::IOS_PROVISIONING_PROFILE_BASE64, APPSTORE_API_KEY_ID,"
-            echo "::error::APPSTORE_API_ISSUER_ID, APPSTORE_API_PRIVATE_KEY. See IOS.md."
+          missing=
+          for v in APPSTORE_API_KEY_ID APPSTORE_API_ISSUER_ID APPSTORE_API_PRIVATE_KEY APPLE_TEAM_ID; do
+            [ -z "${!v}" ] && missing="$missing $v"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Signed iOS build requested but missing secrets:$missing (see IOS.md)."
             exit 1
           fi
 
-      - name: Import signing certificate & profile
+      # xcodebuild reads the key from ~/.appstoreconnect/private_keys or
+      # ~/private_keys as AuthKey_<KEYID>.p8; the archive/export use it for
+      # -allowProvisioningUpdates, and the TestFlight upload reuses it.
+      - name: Stage App Store Connect API key
         if: ${{ inputs.distribute }}
-        uses: apple-actions/import-codesign-certs@v3
-        with:
-          p12-file-base64: ${{ secrets.IOS_DIST_CERTIFICATE_BASE64 }}
-          p12-password: ${{ secrets.IOS_DIST_CERTIFICATE_PASSWORD }}
+        env:
+          APPSTORE_API_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
+          APPSTORE_API_PRIVATE_KEY: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/private_keys
+          printf '%s' "$APPSTORE_API_PRIVATE_KEY" > ~/private_keys/AuthKey_${APPSTORE_API_KEY_ID}.p8
 
-      # Requires ios/ExportOptions.plist (method: app-store, your team id) —
-      # add it alongside this workflow when wiring signing.
+      # Generated (not committed) so the team id stays a secret. Automatic
+      # signing means Xcode resolves the profile itself; the API key auth block
+      # lets the export talk to App Store Connect non-interactively.
+      - name: Write ExportOptions.plist
+        if: ${{ inputs.distribute }}
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          cat > ios/ExportOptions.plist <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>method</key><string>app-store</string>
+            <key>signingStyle</key><string>automatic</string>
+            <key>teamID</key><string>${APPLE_TEAM_ID}</string>
+            <key>uploadSymbols</key><true/>
+          </dict></plist>
+          PLIST
+
+      # flutter build ipa archives then exports; with automatic signing it adds
+      # -allowProvisioningUpdates and uses the staged API key. DEVELOPMENT_TEAM
+      # is forced via the Flutter→Xcode env passthrough so the archive signs.
       - name: Build signed IPA
         if: ${{ inputs.distribute }}
+        env:
+          FLUTTER_XCODE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_TEAM_ID }}
         run: >
           flutter build ipa --release
           --dart-define=FLAVOR=prod

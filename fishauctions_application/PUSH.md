@@ -1,182 +1,205 @@
-# Push Notifications — setup checklist (Firebase / FCM + APNs)
+# Push Notifications — setup + status (Firebase / FCM + APNs)
 
-Status of the feature end-to-end, and the concrete to-do to turn it on. This is
-the app + ops side; the backend (`BACKEND_SPEC.md` Part 2) is **already
-implemented** and inert by design.
+End-to-end plan to turn push on. The **app side is now implemented**; what
+remains is two Firebase projects, a small backend addition, and the env var.
 
-## Where each half stands
+## Status
 
-- **Backend (done):** `auctions/notifications.py` routes every user
-  notification through `notify_user`, which calls `send_push_to_user` when the
-  user prefers push, else emails. `send_fcm_message` sends a **data-only** FCM
-  message (`title`/`body`/`url`/`category` in `data`, `AndroidConfig` priority
-  `high`). `PushNotificationSent` dedupes; `promo_push_notifications` handles
-  promos. It stays dormant until `FIREBASE_CREDENTIALS_JSON` is set *and* a
-  device reports a real token — `push_configured()` / `user_prefers_push()`
-  both gate on those, so today everyone falls back to email.
-- **App (stub):** `lib/services/push_service.dart` `currentToken()` returns
-  `null`. Registration plumbing is already live — `AuthService.registerThisDevice`
-  sends `fcm_token` **when present**, and sign-out calls `devices/unregister/`.
-  No `firebase_*` plugins, no Firebase project yet.
+| Layer | State |
+|---|---|
+| Backend send path | **Done** — `auctions/notifications.py`: `notify_user` choke point, `send_push_to_user`, `promo_push_notifications`, `PushNotificationSent` dedupe. Inert until `FIREBASE_CREDENTIALS_JSON` is set and a device reports a token. |
+| App (Flutter) | **Done (this repo)** — `PushService` initializes FCM from the runtime config, requests permission, registers the token, routes taps into the WebView, shows a foreground banner. Inert (email fallback) until the config below is served. |
+| Firebase projects | **You** — create staging + prod (Part A). |
+| Config endpoint `firebase` block | **Backend** — Part D prompt. |
+| `FIREBASE_CREDENTIALS_JSON` | **You/ops** — already wired in code; just set the env var per deployment. |
 
-So three things remain: **(1)** a Firebase project + APNs key, **(2)** deliver
-its *client* config to the app, **(3)** wire `firebase_messaging` in the app.
+## Architecture decisions
 
-## Decision: deliver Firebase client config via `/api/mobile/config/`
+**Client config rides `GET /api/mobile/config/`.** The four values FCM needs
+(`api_key`, `app_id`, `messaging_sender_id`, `project_id`) are public — the same
+class as `square_application_id`, which already goes through this endpoint — so
+they're served at runtime instead of bundling `google-services.json`. One binary
+serves any deployment. The **secret** half (`FIREBASE_CREDENTIALS_JSON`) stays
+server-side.
 
-**Yes — the Firebase client config can and should ride the existing public
-config endpoint**, exactly like `square_application_id` already does. The four
-values FCM needs on the client (`apiKey`, `appId`, `messagingSenderId`,
-`projectId`) are **public** — they ship inside `google-services.json` /
-`GoogleService-Info.plist` in every app binary, and Google documents them as
-non-secret. They fit the endpoint's stated "PUBLIC VALUES ONLY" contract. The
-**secret** half (the FCM v1 service-account JSON = `FIREBASE_CREDENTIALS_JSON`,
-and the APNs `.p8` key) stays server-side — the same split as Square's public
-app id vs. per-invoice secret access token.
+**Two Firebase projects: staging and prod** (dev shares the staging backend, so
+no separate dev project). Why two, not one:
+- The **iOS bundle id is `com.fishauctions.app` in every environment** (no iOS
+  flavors). A Firebase project can't hold two iOS apps with the same bundle id,
+  so staging and prod iOS apps *must* live in separate projects.
+- Clean isolation: a staging test push can't reach prod devices; separate
+  service-account creds per deployment.
 
-This keeps the "one binary serves any deployment" property: no
-`google-services.json` baked into the build, a fork points the app at its own
-backend and gets its own Firebase project's config at runtime.
+Each project holds the apps for the deployment(s) that backend serves:
 
-**The one wrinkle — `appId` is per-package.** Unlike the single Square app id,
-`FirebaseOptions.appId` (and its `apiKey`) is bound to the applicationId /
-bundle id, so the three Android flavors are **three Firebase Android apps** with
-three `appId`s. The app already knows its own id at runtime (`package_info_plus`),
-so the endpoint returns a map keyed by package/bundle id and the app selects its
-own entry. Proposed shape:
+| Project | Android app | iOS app | Backend that serves it |
+|---|---|---|---|
+| `fishauctions-staging` | `com.fishauctions.app.staging` | `com.fishauctions.app` | staging.auction.fish (dev + staging flavors) |
+| `fishauctions` (prod) | `com.fishauctions.app` | `com.fishauctions.app` | production |
+
+The **dev** Android flavor (`com.fishauctions.app.dev`) has no Firebase app; a
+dev build finds no matching config and cleanly gets no push (email fallback).
+
+**Config shape — flat, self-checking.** Each backend returns only its own
+project's values, tagged with the package/bundle they're for. The app compares
+that id to its own (`package_info_plus`) and only initializes on a match — so a
+dev-flavor build hitting the staging backend disables push instead of
+registering against the wrong app id:
 
 ```jsonc
 // GET /api/mobile/config/  (adds "firebase"; existing keys unchanged)
+// Absent/partial → app treats it as "no push". Example: the staging backend.
 "firebase": {
   "android": {
-    "com.fishauctions.app":         { "api_key": "…", "app_id": "1:NNN:android:…", "messaging_sender_id": "NNN", "project_id": "fishauctions-…" },
-    "com.fishauctions.app.staging": { "api_key": "…", "app_id": "1:NNN:android:…", "messaging_sender_id": "NNN", "project_id": "fishauctions-…" },
-    "com.fishauctions.app.dev":     { "api_key": "…", "app_id": "1:NNN:android:…", "messaging_sender_id": "NNN", "project_id": "fishauctions-…" }
+    "package_name":        "com.fishauctions.app.staging",
+    "api_key":             "AIzaSy…",         // google-services.json client.api_key.current_key
+    "app_id":              "1:889…:android:…", // …client.client_info.mobilesdk_app_id
+    "messaging_sender_id": "889…",             // project_info.project_number
+    "project_id":          "fishauctions-staging"
   },
   "ios": {
-    "com.fishauctions.app":         { "api_key": "…", "app_id": "1:NNN:ios:…", "messaging_sender_id": "NNN", "project_id": "fishauctions-…" }
+    "bundle_id":           "com.fishauctions.app",
+    "api_key":             "AIzaSy…",         // GoogleService-Info.plist API_KEY
+    "app_id":              "1:889…:ios:…",     // GOOGLE_APP_ID
+    "messaging_sender_id": "889…",             // GCM_SENDER_ID
+    "project_id":          "fishauctions-staging"
   }
 }
 ```
 
-Empty/absent `firebase`, or no entry for this package → push simply stays off
-for that build (email fallback), mirroring how `hasSquare` gates Tap to Pay.
-
-> **Caveat to verify on device:** initializing Firebase from runtime values
-> (`Firebase.initializeApp(options: …)`) instead of the bundled
-> `google-services.json` is a supported but off-the-beaten-path "manual
-> initialization" path. It means **caching** the fetched config locally and
-> initializing from cache on cold start — including in the background isolate —
-> so a killed-app push can still be handled (same cache-and-init-early pattern
-> as the Square app id on iOS). The very first launch before the first config
-> fetch can't receive a background push, which is fine (no token is registered
-> yet either). **Confirm the first terminated-state delivery on a real device**
-> before calling this done. If it proves fiddly, the fallback is the standard
-> per-flavor `google-services.json` + `GoogleService-Info.plist` in the build —
-> lower-risk but bakes the Firebase project into the binary, against the
-> one-binary goal.
+**Messages are `notification`+`data` (hybrid), not data-only.** The current
+`send_fcm_message` is data-only, which forces the app to render notifications in
+the terminated state (a fragile background-isolate path) and doesn't display on
+iOS at all. Switching to a `notification` block (title/body) **plus** `data`
+(url/category) makes the OS display it in background/terminated on **both**
+platforms, and the app only handles the foreground banner + tap-routing. This is
+the Part D backend change and is what the app was built against.
 
 ---
 
-## Part A — Firebase project + APNs key (console / ops)
+## Part A — Firebase project setup (do once each, ~15 min)
 
-Do this once for the deployment. **Where:** <https://console.firebase.google.com/>.
+**Where:** <https://console.firebase.google.com/>. Do **staging first**, then
+repeat for **prod**.
 
-- [ ] **Create the Firebase project** (or reuse an existing Google Cloud
-      project). Name it for the deployment (e.g. `fishauctions`).
-- [ ] **Register the Android apps** — one per flavor applicationId:
-      `com.fishauctions.app`, `com.fishauctions.app.staging`,
-      `com.fishauctions.app.dev`. Download each `google-services.json` — **not
-      to commit**; you only need the four values (`api_key`/`current_key`,
-      `mobilesdk_app_id`, `project_number`, `project_id`) to paste into the
-      backend config (Part D).
-- [ ] **Register the iOS app** — bundle id `com.fishauctions.app`. Same: harvest
-      the values from `GoogleService-Info.plist` for the config endpoint.
-- [ ] **Cloud Messaging API (V1)** — on by default for new projects. Confirm at
-      Project settings → Cloud Messaging (the legacy server key is irrelevant;
-      the backend uses the V1 API via the service account).
-- [ ] **Service-account key for the backend** — Project settings → *Service
-      accounts* → **Generate new private key** → download the JSON. This is the
-      secret `FIREBASE_CREDENTIALS_JSON` env var on the deployment (hand to the
-      backend; never in the app or config endpoint).
-- [ ] **APNs auth key (iOS)** — at <https://developer.apple.com/account> →
-      *Certificates, Identifiers & Profiles* → **Keys** → **+** → enable *Apple
-      Push Notifications service (APNs)* → **download the `.p8` once** (Apple
-      shows it a single time). Note the **Key ID** and your **Team ID**.
-- [ ] **Upload the APNs key to Firebase** — Project settings → Cloud Messaging →
-      *Apple app configuration* → **APNs Authentication Key** → upload the `.p8`
-      + Key ID + Team ID. This is what lets FCM reach iOS devices.
+### Staging project (`fishauctions-staging`)
+- [ ] **Create project** → name `fishauctions-staging`. Analytics optional.
+- [ ] **Add Android app** → package name `com.fishauctions.app.staging`. Skip
+      the SDK/Gradle steps (we don't bundle the file). **Download
+      `google-services.json`** and keep it to harvest four values:
+      `current_key` → `api_key`, `mobilesdk_app_id` → `app_id`,
+      `project_number` → `messaging_sender_id`, `project_id`.
+- [ ] **Add iOS app** → bundle id `com.fishauctions.app`. Download
+      `GoogleService-Info.plist`; harvest `API_KEY`, `GOOGLE_APP_ID`,
+      `GCM_SENDER_ID`, `PROJECT_ID`.
+- [ ] **APNs auth key** (needed for iOS delivery; can defer until iOS testing):
+      <https://developer.apple.com/account> → *Certificates, Identifiers &
+      Profiles* → **Keys** → **+** → enable *Apple Push Notifications service
+      (APNs)* → **download the `.p8` once**, note **Key ID** + **Team ID**. Then
+      Firebase → Project settings → *Cloud Messaging* → *Apple app config* →
+      **APNs Authentication Key** → upload it. (One APNs key works for all your
+      apps/projects.)
+- [ ] **Service-account key** → Project settings → *Service accounts* →
+      **Generate new private key**. This JSON is **staging's**
+      `FIREBASE_CREDENTIALS_JSON` env var. Secret — never in the app or config.
 
-## Part B — Android app wiring
+### Prod project (`fishauctions`)
+- [ ] Repeat: **Android app** `com.fishauctions.app`, **iOS app**
+      `com.fishauctions.app`, upload the same APNs key, generate a **separate**
+      service-account key → **prod's** `FIREBASE_CREDENTIALS_JSON`.
 
-- [ ] Add deps: `firebase_core`, `firebase_messaging`, and
-      `flutter_local_notifications` (the backend sends **data-only** messages,
-      which don't self-display — the app renders them). No `google-services`
-      Gradle plugin and no `google-services.json` in the build if we take the
-      config-API path.
-- [ ] Extend `AppConfig` (`lib/models/app_config.dart`) to parse the `firebase`
-      map; add a `FirebaseClientConfig? firebaseFor(package, platform)` selector
-      keyed on `package_info_plus`'s `packageName`.
-- [ ] On startup, if a config entry exists: cache it (secure storage / prefs)
-      and `Firebase.initializeApp(options: FirebaseOptions(...))` from cache
-      (so cold start / background isolate don't depend on the network).
-- [ ] Implement `PushService.currentToken()` → request the Android 13+
-      `POST_NOTIFICATIONS` runtime permission, then
-      `FirebaseMessaging.instance.getToken()`. Re-register the device on
-      `onTokenRefresh` (the seam is already noted in `push_service.dart`).
-- [ ] Register a background handler (`@pragma('vm:entry-point')`,
-      `FirebaseMessaging.onBackgroundMessage`) that re-inits Firebase from cache
-      and renders the data message via `flutter_local_notifications`; foreground
-      `onMessage` renders too. Tap → route the message's `url` into the WebView
-      (reuse the existing deep-link/next-path plumbing).
-- [ ] Confirm `registerThisDevice` now sends the real `fcm_token`
-      (`push_configured()` on the backend flips true once a device reports one).
+You'll end with two sets of client values (→ the config endpoint, Part D) and two
+service-account JSONs (→ the two deployments' env).
 
-## Part C — iOS / APNs specifics (after the Mac build exists — see `IOS.md`)
+## Part B — App side (done)
 
-- [ ] Xcode **Runner** target → *Signing & Capabilities*: add **Push
-      Notifications** and **Background Modes → Remote notifications**.
-- [ ] Same runtime-config init as Android (bundle id `com.fishauctions.app`
-      entry), plus the standard iOS permission prompt.
-- [ ] **Backend prerequisite (Part D):** the current data-only message has no
-      `apns` block, so iOS won't display/deliver it when backgrounded. That
-      backend change must land before iOS push works at all.
+Implemented here; no further app work needed to light up Android:
+- `AppConfig.firebase` parses the block above (`lib/models/app_config.dart`).
+- `PushService.init` (`lib/services/push_service.dart`) matches the config's id
+  to this build, initializes Firebase from runtime `FirebaseOptions`, requests
+  permission (iOS + Android 13+), gets/refreshes the FCM token.
+- The token flows through the existing `AuthService.registerThisDevice`
+  (`fcm_token`); the shell re-registers once a token arrives and on refresh.
+- Taps route `data.url` into the WebView; foreground messages show a SnackBar
+  with a "View" action (`webview_screen.dart`).
+- Absent config → inert, email fallback (today's behavior, unchanged).
 
-## Part D — Backend handoff (for `iragm/fishauctions`)
+## Part C — iOS specifics + Mac-less signing
 
-Spec these for the backend; **do not edit that repo here**:
+iOS push additionally needs (all deferrable until you build for iPhone):
+- [ ] Xcode **Runner** target capabilities: **Push Notifications** + **Background
+      Modes → Remote notifications**. (Editing `Runner.entitlements` /
+      project — do alongside the Tap to Pay entitlement in `IOS.md`.)
+- [ ] The APNs key uploaded in Part A.
 
-- [ ] **Add `firebase` to `MobileConfigView`** (`auctions/mobile/views.py`,
-      ~line 566) — the per-package public map above, sourced from new settings
-      (mirror how `SQUARE_APPLICATION_ID` is read). Public values only; the
-      view's own docstring already forbids secrets.
-- [ ] **Make `send_fcm_message` iOS-capable** (`auctions/notifications.py:132`).
-      It's currently Android-only data-only. Add an `apns` block so iOS both
-      wakes and displays, without changing the Android path (Android ignores
-      `apns`):
-      ```python
-      apns=messaging.APNSConfig(
-          headers={"apns-priority": "10"},
-          payload=messaging.APNSPayload(aps=messaging.Aps(
-              alert=messaging.ApsAlert(title=title, body=body),
-              content_available=True,      # deliver data to a backgrounded app
-              mutable_content=True,
-          )),
-      ),
-      ```
-      (Keeps the top-level `data` for tap-routing; the `alert` is what APNs
-      shows.) Already flagged in `BACKEND_SPEC.md` Amendments.
-- [ ] Set `FIREBASE_CREDENTIALS_JSON` (Part A service-account JSON) on the
-      deployment. `push_configured()` returns true once it's present.
+**Signing is CI-only (no Mac).** `ios-release.yml` signs via an **App Store
+Connect API key** + Xcode **automatic cloud signing** — no hand-made
+certificate or provisioning profile. Create the key and set four repo secrets:
+
+- [ ] App Store Connect → **Users and Access** → **Integrations** (Keys) → *App
+      Store Connect API* → **Generate API Key**, role **App Manager** →
+      **download the `.p8` once**. Note the **Key ID** and the **Issuer ID**
+      (shown above the table).
+- [ ] Find your **Team ID**: <https://developer.apple.com/account> → Membership.
+- [ ] Register the app: App Store Connect → **Apps** → **+** → new app, bundle
+      id `com.fishauctions.app` (creates the TestFlight record cloud signing
+      targets).
+- [ ] Set repo secrets (Settings → Secrets and variables → Actions):
+      `APPSTORE_API_KEY_ID`, `APPSTORE_API_ISSUER_ID`,
+      `APPSTORE_API_PRIVATE_KEY` (paste the whole `.p8`), `APPLE_TEAM_ID`.
+- [ ] Run **iOS Release** with `distribute: true`. First run is the shakeout
+      (cloud signing + the app record must exist).
+
+Until then, run it with `distribute` **off** for the free unsigned
+compile-check (verifies `AppDelegate.swift` + plugins build on Apple toolchain).
+
+## Part D — Backend handoff (prompt for `iragm/fishauctions`)
+
+Copy this to implement server-side (do **not** edit that repo from here):
+
+> **1. Serve the Firebase client config from `/api/mobile/config/`.**
+> In `MobileConfigView.get` (`auctions/mobile/views.py`, ~line 566) add a
+> `"firebase"` key built from new settings, following the flat per-platform
+> shape in `PUSH.md` (`android` → `package_name`+4 values, `ios` →
+> `bundle_id`+4 values). Source them from env-backed settings (mirror
+> `SQUARE_APPLICATION_ID`), e.g. `FIREBASE_ANDROID_PACKAGE_NAME`,
+> `FIREBASE_ANDROID_API_KEY`, `FIREBASE_ANDROID_APP_ID`,
+> `FIREBASE_MESSAGING_SENDER_ID`, `FIREBASE_PROJECT_ID`, and the `FIREBASE_IOS_*`
+> equivalents. Omit a platform (or the whole `firebase` key) when its vars are
+> unset. **Public values only** — the view's docstring already forbids secrets.
+>
+> **2. Make `send_fcm_message` a notification+data hybrid.**
+> In `auctions/notifications.py:132`, add a `notification` block so the OS
+> displays the message in background/terminated on both platforms, keeping the
+> `data` for tap-routing:
+> ```python
+> message = messaging.Message(
+>     notification=messaging.Notification(title=title or "", body=body or ""),
+>     data={"title": title or "", "body": body or "",
+>           "url": url or "", "category": category or ""},
+>     token=token,
+>     android=messaging.AndroidConfig(priority="high", collapse_key=collapse_key or None),
+>     apns=messaging.APNSConfig(
+>         headers={"apns-priority": "10"},
+>         payload=messaging.APNSPayload(aps=messaging.Aps(sound="default")),
+>     ),
+> )
+> ```
+> (The top-level `notification` covers display; `apns` just adds sound/priority.)
+>
+> **3. Set `FIREBASE_CREDENTIALS_JSON`** per deployment — staging's
+> service-account JSON on staging, prod's on prod. No code change (already read
+> in `settings.py` + `notifications.py`); `push_configured()` flips true once
+> set.
 
 ## Test path
 
-1. Backend: set `FIREBASE_CREDENTIALS_JSON` on **staging**; confirm
-   `push_configured()` is true.
-2. Android: install a build, grant notifications, sign in → device registers
-   with a real `fcm_token`. In the web UI toggle "push instead of email"
-   (`UserData.push_notifications_instead_of_email`).
-3. Trigger a notification (e.g. a watched-lot event, or the promo command) →
-   expect a notification tapped through to the right web page. **Verify with the
-   app foregrounded, backgrounded, and killed.**
-4. iOS: only after Part C + the `apns` backend change; repeat on an iPhone.
+1. Set `FIREBASE_CREDENTIALS_JSON` on **staging** + deploy the config-endpoint
+   change; confirm `push_configured()` is true and `/api/mobile/config/` returns
+   the `firebase` block.
+2. Install a **staging** Android build, grant notifications, sign in → the
+   device registers with a real `fcm_token`. Toggle "push instead of email"
+   (`UserData.push_notifications_instead_of_email`) in the web UI.
+3. Trigger a notification (watched-lot event, or the promo command). Verify the
+   tap lands on the right page **foregrounded, backgrounded, and killed**.
+4. iOS: after Part C (entitlement + signed TestFlight build + an iPhone), repeat.

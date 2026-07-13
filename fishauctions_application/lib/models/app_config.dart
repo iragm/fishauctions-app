@@ -11,6 +11,7 @@ class AppConfig {
     required this.squareEnvironment,
     required this.googleServerClientId,
     required this.brandName,
+    this.firebase,
   });
 
   factory AppConfig.fromJson(Map<String, dynamic> json) => AppConfig(
@@ -18,6 +19,7 @@ class AppConfig {
     squareEnvironment: _str(json['square_environment']),
     googleServerClientId: _str(json['google_server_client_id']),
     brandName: _str(json['brand_name']),
+    firebase: FirebaseClientConfig.tryParse(json['firebase']),
   );
 
   /// The deployment's public Square Application ID used to initialize the
@@ -44,6 +46,12 @@ class AppConfig {
   /// `AppConstants.appName`. For this deployment it equals the site domain.
   final String brandName;
 
+  /// Public Firebase *client* config for push, or null when this deployment
+  /// has no push configured (then push stays inert → email fallback).
+  /// Delivered here — like [squareApplicationId] — so one binary serves any
+  /// deployment without a bundled `google-services.json`. See `PUSH.md`.
+  final FirebaseClientConfig? firebase;
+
   /// Whether this deployment can do Tap to Pay at all (has a Square app id).
   bool get hasSquare => squareApplicationId.isNotEmpty;
 
@@ -68,4 +76,82 @@ class AppConfig {
   }
 
   static String _str(Object? v) => v == null ? '' : v.toString();
+}
+
+/// The `firebase` block of `GET /api/mobile/config/` — the public client config
+/// for FCM, split by platform. Each deployment (staging / prod backend) returns
+/// only its own project's values; the values are the same class as those in a
+/// `google-services.json` / `GoogleService-Info.plist` (public, ship in every
+/// binary), so serving them here — not baking a config file into the build —
+/// keeps one binary able to serve any deployment. The secret half (the FCM
+/// service-account JSON) stays server-side. See `PUSH.md`.
+class FirebaseClientConfig {
+  const FirebaseClientConfig({this.android, this.ios});
+
+  /// Present and complete only when the deployment configured push for that
+  /// platform; null otherwise (that platform simply gets no push).
+  final FirebaseAppOptions? android;
+  final FirebaseAppOptions? ios;
+
+  /// The options for the running platform, or null if this deployment has no
+  /// push config for it.
+  FirebaseAppOptions? forPlatform({required bool isIOS}) =>
+      isIOS ? ios : android;
+
+  static FirebaseClientConfig? tryParse(Object? raw) {
+    if (raw is! Map) {
+      return null;
+    }
+    final android = FirebaseAppOptions.tryParse(
+      raw['android'],
+      idKey: 'package_name',
+    );
+    final ios = FirebaseAppOptions.tryParse(raw['ios'], idKey: 'bundle_id');
+    if (android == null && ios == null) {
+      return null;
+    }
+    return FirebaseClientConfig(android: android, ios: ios);
+  }
+}
+
+/// One platform's Firebase client options — the four values
+/// `FirebaseOptions` needs, plus the applicationId/bundle id the config targets
+/// so the app can refuse a config meant for a different build (a dev-flavor
+/// install hitting the staging backend). Only exposed when every field is
+/// present — a partial block is treated as "no push" rather than a crash.
+class FirebaseAppOptions {
+  const FirebaseAppOptions({
+    required this.applicationId,
+    required this.apiKey,
+    required this.appId,
+    required this.messagingSenderId,
+    required this.projectId,
+  });
+
+  /// Android `package_name` / iOS `bundle_id` this config is for.
+  final String applicationId;
+  final String apiKey;
+  final String appId;
+  final String messagingSenderId;
+  final String projectId;
+
+  static FirebaseAppOptions? tryParse(Object? raw, {required String idKey}) {
+    if (raw is! Map) {
+      return null;
+    }
+    final opts = FirebaseAppOptions(
+      applicationId: AppConfig._str(raw[idKey]),
+      apiKey: AppConfig._str(raw['api_key']),
+      appId: AppConfig._str(raw['app_id']),
+      messagingSenderId: AppConfig._str(raw['messaging_sender_id']),
+      projectId: AppConfig._str(raw['project_id']),
+    );
+    final complete =
+        opts.applicationId.isNotEmpty &&
+        opts.apiKey.isNotEmpty &&
+        opts.appId.isNotEmpty &&
+        opts.messagingSenderId.isNotEmpty &&
+        opts.projectId.isNotEmpty;
+    return complete ? opts : null;
+  }
 }

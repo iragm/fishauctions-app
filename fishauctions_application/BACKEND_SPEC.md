@@ -32,25 +32,17 @@ launcher icon; `ShortcutService`). Only the server knows
 - Until it lands, that one shortcut 404s in the WebView (the other two,
   `/selling/` and `/invoices/`, already exist).
 
-**Push client config should ride `GET /api/mobile/config/`.** The Firebase
-*client* config the app needs (`api_key`, `app_id`, `messaging_sender_id`,
-`project_id`) is public — the same class of value as `square_application_id`,
-which already goes through this endpoint — so add a per-package `firebase` map
-there rather than baking `google-services.json` into the build. The secret half
-(`FIREBASE_CREDENTIALS_JSON`) stays server-side. Full proposed payload shape and
-rationale (incl. the `app_id`-is-per-flavor wrinkle) in `PUSH.md` → "Decision"
-and Part D. Keeps one binary serving any deployment.
-
-**When iOS push lands: `send_fcm_message` needs an `apns` config.** It currently
-builds only `android=messaging.AndroidConfig(...)`; the data-only message never
-reaches a backgrounded/killed iOS app, and even `content_available` alone is a
-*silent* push (shows nothing). To both wake and display on iOS, add an APNs
-block carrying a real alert — keep the top-level `data` for tap-routing:
-`apns=messaging.APNSConfig(headers={"apns-priority": "10"},
-payload=messaging.APNSPayload(aps=messaging.Aps(alert=messaging.ApsAlert(
-title=title, body=body), content_available=True, mutable_content=True)))`.
-Android ignores `apns`, so its path is unchanged. Not needed until the app ships
-iOS push tokens; see `PUSH.md` Part D.
+**Push: two backend changes — see `PUSH.md` Part D for the exact prompt.** The
+app side is implemented and reads its Firebase *client* config from
+`/api/mobile/config/` (public values, same as `square_application_id`; the
+secret `FIREBASE_CREDENTIALS_JSON` stays server-side). Owed server-side:
+(1) add a flat, per-platform, self-tagged `firebase` block to `MobileConfigView`
+(shape in `PUSH.md`), and (2) make `send_fcm_message` a **notification+data
+hybrid** (add `notification=messaging.Notification(title, body)`, keep `data`
+for tap-routing, add an `apns` block for sound/priority) so the OS displays it
+in background/terminated on both platforms — the current data-only message never
+displays on iOS. `FIREBASE_CREDENTIALS_JSON` itself is already wired; just set it
+per deployment.
 
 **`escpos-raster` seed row: `print_width_px` should be 384, not 96.**
 (Still owed.)

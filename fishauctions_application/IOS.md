@@ -100,17 +100,25 @@ Square-side approval. In order:
 > accounts inherit that — there is no per-seller dashboard T&C step to gate on
 > (applies to both platforms; don't reintroduce it).
 - [ ] When iOS *push* lands later: the backend's `send_fcm_message` needs an
-      `apns` config block for data-only delivery (noted in BACKEND_SPEC.md
-      Amendments) plus an APNs auth key in Firebase.
+      `notification`+`data` hybrid so iOS displays it (the current data-only
+      message doesn't) — the exact backend change is in `PUSH.md` Part D — plus
+      an APNs auth key in Firebase and the push capability below.
 
-## Distribution (later)
+## Distribution — CI only, no Mac
 
-- App Store Connect app for `com.fishauctions.app`; signing certs/profiles.
-- CI: `android-release.yml` has the TODO for a `macos-latest` job — needs the
-  signing material in repo secrets first; keep disabled until then.
-- Push: when FCM lands (BACKEND_SPEC Part 2 — `PushService` is a stub on all
-  platforms today), iOS additionally needs an APNs auth key uploaded to
-  Firebase and the push capability enabled.
-- iOS "flavors": not needed for environment selection. Only add per-env bundle
-  ids/schemes if staging and prod must coexist on one iPhone the way they do
-  on Android.
+Builds run on the `macos-latest` runner in `.github/workflows/ios-release.yml`:
+- **Unsigned (default):** `flutter build ios --no-codesign`, no secrets — the
+  compile/link check on Apple toolchain. Works today.
+- **Signed → TestFlight (`distribute: true`):** **App Store Connect API key +
+  Xcode automatic cloud signing** — no hand-made certificate or provisioning
+  profile to maintain. Secrets and step-by-step are in `PUSH.md` Part C
+  (`APPSTORE_API_KEY_ID`, `APPSTORE_API_ISSUER_ID`, `APPSTORE_API_PRIVATE_KEY`,
+  `APPLE_TEAM_ID`). Register `com.fishauctions.app` in App Store Connect first.
+
+Also needed for iOS **push**: enable the **Push Notifications** + **Background
+Modes → Remote notifications** capabilities on the Runner target (do it with the
+Tap to Pay entitlement work above), and upload the APNs key to Firebase.
+
+iOS "flavors": not needed for environment selection. Only add per-env bundle
+ids/schemes if staging and prod must coexist on one iPhone the way they do on
+Android.

@@ -40,6 +40,19 @@ class DeviceIdentity {
     }
   }
 
+  /// The running build's applicationId / bundle id (e.g.
+  /// `com.fishauctions.app.staging`). Used to match the Firebase client config
+  /// the backend hands out: if the config's target id differs from this build
+  /// (a dev flavor hitting the staging backend), push isn't meant for it.
+  /// Empty if the platform lookup fails (unit tests) → treated as no match.
+  static Future<String> packageName() async {
+    try {
+      return (await PackageInfo.fromPlatform()).packageName;
+    } on Object {
+      return '';
+    }
+  }
+
   static String get deviceName => '${AppConstants.appName} ($platformTag)';
 
   static String _generateV4() {
