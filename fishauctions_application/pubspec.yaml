@@ -41,7 +41,7 @@ dependencies:
   # distances). Replaces the browser geolocation prompt the web UI uses.
   geolocator: ^14.0.2
   # Navigation
-  go_router: ^14.6.2
+  go_router: ^17.3.0
   # Native Google Sign-In. Google blocks OAuth/One-Tap inside embedded WebViews,
   # so Google login happens natively: the SDK returns an ID token which the
   # backend (/api/mobile/auth/google/) verifies and exchanges for a JWT. Needs a
