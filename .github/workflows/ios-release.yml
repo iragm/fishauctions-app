@@ -70,6 +70,15 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
+      # Marketing version = the build date (CalVer, e.g. 2026.7.13), computed by
+      # the identical step in android-release.yml so both stores share one scheme
+      # with nothing to bump, store, or forget. `10#` forces base-10 so a leading
+      # zero isn't read as octal (and Apple dislikes "07").
+      - name: Compute version name (CalVer)
+        run: |
+          Y=$(date -u +%Y); M=$(date -u +%m); D=$(date -u +%d)
+          echo "BUILD_NAME=$Y.$((10#$M)).$((10#$D))" >> "$GITHUB_ENV"
+
       # ── Unsigned build (default) ───────────────────────────────────────────
       # No --flavor: iOS has no Xcode schemes; environment selection is
       # dart-define only (Android's --flavor merely sets the applicationId).
@@ -77,19 +86,18 @@ jobs:
       # proves the app compiles and links on Apple toolchain (the point of the
       # gate today).
       #
-      # Versioning: --build-number (CFBundleVersion) comes from this workflow's
-      # run number — a counter independent of Android's, which is correct: the
-      # App Store and Play track versions separately, so they needn't match and
-      # can't collide. The marketing version (CFBundleShortVersionString) is left
-      # to pubspec.yaml's `version` (shared with Android); bump it in a commit at
-      # release time. App Store only needs the build number to rise within a
-      # marketing version, which the run number guarantees.
+      # Versioning: --build-number (CFBundleVersion) is this workflow's run
+      # number — independent of Android's, which is correct: the App Store and
+      # Play track versions separately, so they needn't match and can't collide.
+      # --build-name (CFBundleShortVersionString) is the shared CalVer date, so
+      # the public version moves on its own with nothing to remember.
       - name: Build unsigned iOS app
         if: ${{ !inputs.distribute }}
         run: >
           flutter build ios --release --no-codesign
           --dart-define=FLAVOR=${{ inputs.flavor }}
           --build-number=${{ github.run_number }}
+          --build-name=$BUILD_NAME
 
       - name: Upload unsigned .app artifact
         if: ${{ !inputs.distribute }}
@@ -173,6 +181,7 @@ jobs:
           flutter build ipa --release
           --dart-define=FLAVOR=${{ inputs.flavor }}
           --build-number=${{ github.run_number }}
+          --build-name=$BUILD_NAME
           --export-options-plist=ios/ExportOptions.plist
 
       - name: Upload to TestFlight

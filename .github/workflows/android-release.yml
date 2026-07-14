@@ -56,6 +56,17 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
+      # Marketing version = the build date (CalVer, e.g. 2026.7.13), computed
+      # by the identical step in ios-release.yml so both stores share one scheme
+      # with nothing to bump, store, or forget. `10#` forces base-10 so a leading
+      # zero doesn't read as octal (and Apple dislikes "07"). This is only the
+      # human-facing string; the per-store build number below is what guarantees
+      # uniqueness.
+      - name: Compute version name (CalVer)
+        run: |
+          Y=$(date -u +%Y); M=$(date -u +%m); D=$(date -u +%d)
+          echo "BUILD_NAME=$Y.$((10#$M)).$((10#$D))" >> "$GITHUB_ENV"
+
       # Restore the upload keystore + key.properties from secrets so the build is
       # signed with the real key. If ANDROID_KEYSTORE_BASE64 is unset the build
       # would fall back to debug signing (see build.gradle.kts) — which the Play
@@ -91,16 +102,15 @@ jobs:
       # This counter is per-workflow and independent of the iOS build number —
       # separate stores, so they neither need to match nor can collide.
       #
-      # The marketing version (versionName) is intentionally NOT overridden here:
-      # it comes from pubspec.yaml's `version` (currently 1.0.0), the single
-      # source shared with iOS. Bump it in a commit when you cut a release; the
-      # build number above still auto-increments every run, so you don't touch
-      # pubspec per build.
+      # --build-name is the CalVer date from the step above (shared scheme with
+      # iOS), so the public version moves on its own — pubspec's version is used
+      # only for local/dev builds.
       - name: Build signed prod app bundle
         run: >
           flutter build appbundle --release --flavor prod
           --dart-define=FLAVOR=prod
           --build-number=${{ github.run_number }}
+          --build-name=$BUILD_NAME
 
       - name: Upload .aab artifact
         uses: actions/upload-artifact@v4
@@ -119,6 +129,7 @@ jobs:
           flutter build apk --release --flavor prod
           --dart-define=FLAVOR=prod
           --build-number=${{ github.run_number }}
+          --build-name=$BUILD_NAME
 
       - name: Upload .apk artifact
         uses: actions/upload-artifact@v4
