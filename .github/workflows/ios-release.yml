@@ -9,9 +9,15 @@ name: iOS Release
 #     AppDelegate, plugins, SPM/CocoaPods) on real Apple toolchain and uploads
 #     the .app as an artifact. This is the macOS equivalent of the Android
 #     compile gate and is how we verify the iOS build before any signing exists.
-#   • true — the signed TestFlight path. Scaffolded and fail-fast on missing
-#     secrets (same pattern as the Android keystore step). Leave it on `false`
-#     until the App Store Connect signing material below is in repo secrets.
+#   • true — the signed TestFlight path. Fail-fast on missing signing secrets
+#     (same pattern as the Android keystore step).
+#
+# The `flavor` input picks the backend (staging vs prod). iOS has no on-device
+# `flutter run` without a Mac, so this workflow is the ONLY way to get a build
+# onto a phone — it therefore serves both roles: `staging` for test builds (the
+# default — don't test push / Tap to Pay against prod invoices) and `prod` for a
+# release. Same App Store Connect signing either way (Apple signing is
+# account-level, not per-environment); only the bundled backend URL changes.
 on:
   workflow_dispatch:
     inputs:
@@ -19,6 +25,11 @@ on:
         description: "Signed build + upload to TestFlight (needs signing secrets)"
         type: boolean
         default: false
+      flavor:
+        description: "Backend the build points at"
+        type: choice
+        default: staging
+        options: [staging, prod]
 
 concurrency:
   group: ios-release-${{ github.ref }}
@@ -64,14 +75,21 @@ jobs:
       # dart-define only (Android's --flavor merely sets the applicationId).
       # --no-codesign skips signing, so this needs no certificates — it just
       # proves the app compiles and links on Apple toolchain (the point of the
-      # gate today). Build name/number mirror the Android job.
+      # gate today).
+      #
+      # Versioning: --build-number (CFBundleVersion) comes from this workflow's
+      # run number — a counter independent of Android's, which is correct: the
+      # App Store and Play track versions separately, so they needn't match and
+      # can't collide. The marketing version (CFBundleShortVersionString) is left
+      # to pubspec.yaml's `version` (shared with Android); bump it in a commit at
+      # release time. App Store only needs the build number to rise within a
+      # marketing version, which the run number guarantees.
       - name: Build unsigned iOS app
         if: ${{ !inputs.distribute }}
         run: >
           flutter build ios --release --no-codesign
-          --dart-define=FLAVOR=prod
+          --dart-define=FLAVOR=${{ inputs.flavor }}
           --build-number=${{ github.run_number }}
-          --build-name=1.${{ github.run_number }}
 
       - name: Upload unsigned .app artifact
         if: ${{ !inputs.distribute }}
@@ -153,9 +171,8 @@ jobs:
           FLUTTER_XCODE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_TEAM_ID }}
         run: >
           flutter build ipa --release
-          --dart-define=FLAVOR=prod
+          --dart-define=FLAVOR=${{ inputs.flavor }}
           --build-number=${{ github.run_number }}
-          --build-name=1.${{ github.run_number }}
           --export-options-plist=ios/ExportOptions.plist
 
       - name: Upload to TestFlight

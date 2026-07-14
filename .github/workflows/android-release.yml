@@ -88,16 +88,19 @@ jobs:
       # Google Play rejects an upload whose versionCode isn't strictly greater
       # than the last, so this auto-increments it without editing pubspec. (If
       # you also upload by hand, keep hand-picked codes below this run number.)
+      # This counter is per-workflow and independent of the iOS build number —
+      # separate stores, so they neither need to match nor can collide.
       #
-      # --build-name sets the human-facing versionName to 1.<run number> so
-      # every release is uniquely labelled without editing pubspec. The pubspec
-      # version stays at 1.0.0+1 and is only used for local/dev builds.
+      # The marketing version (versionName) is intentionally NOT overridden here:
+      # it comes from pubspec.yaml's `version` (currently 1.0.0), the single
+      # source shared with iOS. Bump it in a commit when you cut a release; the
+      # build number above still auto-increments every run, so you don't touch
+      # pubspec per build.
       - name: Build signed prod app bundle
         run: >
           flutter build appbundle --release --flavor prod
           --dart-define=FLAVOR=prod
           --build-number=${{ github.run_number }}
-          --build-name=1.${{ github.run_number }}
 
       - name: Upload .aab artifact
         uses: actions/upload-artifact@v4
@@ -116,7 +119,6 @@ jobs:
           flutter build apk --release --flavor prod
           --dart-define=FLAVOR=prod
           --build-number=${{ github.run_number }}
-          --build-name=1.${{ github.run_number }}
 
       - name: Upload .apk artifact
         uses: actions/upload-artifact@v4

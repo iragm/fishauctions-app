@@ -4,6 +4,12 @@
 <dict>
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
+	<!-- Export compliance: the app uses only standard/exempt encryption (HTTPS
+	     to the backend, OS keychain). Declaring this false lets every TestFlight
+	     and App Store build skip the manual encryption question that otherwise
+	     blocks each upload from distribution. -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<!-- BLE thermal label printing (flutter_blue_plus). Shown when the app first
 	     uses Bluetooth. -->
 	<key>NSBluetoothAlwaysUsageDescription</key>
