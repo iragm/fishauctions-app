@@ -13,15 +13,30 @@ template — never an app constant.
 
 # Status
 
-Parts 1 and 2 are fully implemented on the backend (including the follow-up
-items that used to be listed here: the `/lots/my-last-auction/` shortcut
-redirect, the `firebase` block in `MobileConfigView`, the notification+data
-hybrid FCM message, and the `escpos-raster` 384 px seed fix). Part 2 stays
-inert per deployment until `FIREBASE_CREDENTIALS_JSON` is set and the app
-ships real FCM tokens (see `PUSH.md`).
+Parts 1 and 2 are implemented on the backend. Of the four Part 1/2 follow-up
+items, two are live and two are **still owed** (verified against the local
+`iragm/fishauctions` checkout):
 
-**Part 3 (AR lot scanning & location mapping, below) is the outstanding
-work** — nothing from it exists on the backend yet.
+- ✅ `firebase` block in `MobileConfigView` (`auctions/mobile/views.py:585`).
+- ✅ notification+data+apns hybrid FCM message
+  (`auctions/notifications.py:135`).
+- ❌ **`GET /lots/my-last-auction/` redirect — not present.** No such route or
+  view exists; the app's home-screen "Lots in my last auction" quick action
+  (`ShortcutService` → `/lots/my-last-auction/`) 404s until it lands.
+  `login_required`; 302 to `/lots/?auction=<userdata.last_auction_used.slug>`
+  when set (and not deleted), plain `/lots/` otherwise — a `RedirectView`-sized
+  view.
+- ❌ **`escpos-raster` seed `print_width_px` is still `96`, should be `384`**
+  (`auctions/printer_programs.py:393`). 96 is the D11s 12 mm head, not a
+  generic 58 mm ESC/POS head; at 96 px it prints a ~12 mm strip. Fix
+  `SEED_PROFILES` **and** update the existing DB row (the migration already
+  ran). Leave `d11s-aiyin`/`d11s-lujiang` at 96 — those are correct.
+
+Part 2 also stays inert per deployment until `FIREBASE_CREDENTIALS_JSON` is set
+and the app ships real FCM tokens (see `PUSH.md`).
+
+**Part 3 (AR lot scanning & location mapping, below) is the largest
+outstanding work** — nothing from it exists on the backend yet.
 
 ---
 
