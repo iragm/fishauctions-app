@@ -58,6 +58,11 @@ dependencies:
   json_annotation: ^4.9.0
   # Logging
   logger: ^2.1.0
+  # Camera + QR detection for AR lot mode (ML Kit on Android, Vision on iOS).
+  # Continuous multi-barcode detection with per-code corner points — the
+  # corners drive both the on-screen overlay and the range/bearing estimates
+  # sent to the backend's lot-position solver (BACKEND_SPEC.md Part 3).
+  mobile_scanner: ^7.3.0
   # Open a downloaded file with the OS default handler — .ics into the calendar
   # importer, .pkpass into Wallet (iOS). See DownloadService.
   open_filex: ^4.7.0
@@ -77,6 +82,10 @@ dependencies:
   quick_actions: ^1.1.0
   riverpod: ^2.5.1
   riverpod_annotation: ^2.3.5
+  # Accelerometer (gravity → camera pitch, to project QR sightings onto the
+  # floor plane) and gyroscope (yaw integration for AR locate mode). Needs
+  # NSMotionUsageDescription on iOS.
+  sensors_plus: ^7.1.0
   # Share sheet for downloaded CSV/PDF exports (save / open / share).
   share_plus: ^12.0.2
   # Square Mobile Payments SDK — in-person / Tap to Pay.

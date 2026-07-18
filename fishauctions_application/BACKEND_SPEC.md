@@ -1,4 +1,4 @@
-# Backend Spec — Web-Configurable Printing & Push Notifications
+# Backend Spec — Web-Configurable Printing, Push Notifications & AR Lot Mapping
 
 Handoff spec for `iragm/fishauctions` (the Django backend). The Flutter app work is
 tracked separately in this repo; this document is everything the *backend* needs so
@@ -653,3 +653,324 @@ clicks counter; note as future work).
 - Device register with token upsert; token moved between device rows; unregister
   clears token and stops sends.
 - Dead-token pruning on FCM unregistered error (mock the admin SDK).
+
+---
+
+# Part 3 — AR Lot Scanning & Location Mapping
+
+## Product requirements (recap)
+
+- The auction rules page gets an **"AR Lots"** button next to "View Lots",
+  visible to all users but **app-only** (`request.is_mobile_app`).
+- In AR mode the app's camera scans lot QR codes and overlays each visible
+  lot's name (or just a dot when many labels are in frame). The dot/chip is a
+  **star** when the current user watches the lot and **green** when the lot is
+  recommended for them.
+- When a single lot is visible and roughly centered, the app shows a card with
+  the lot picture (if any) and the **custom fields that print on labels in that
+  lot's auction**, plus an "open lot page" button. Opening the page records a
+  view with `src=ar`, which must also count as "QR scanned".
+- As users scan, the app estimates each label's position relative to the camera
+  and reports those observations; the **server** fuses them into a relative 2D
+  map of lot locations. Recent scans outweigh old ones (lots get moved
+  mid-auction) and nonsensical measurements are dropped.
+- Auction admins get a **2D lot map** page: all located unsold lots, a
+  "locate a lot" search, a "clear all locations" button, and a "% of unsold
+  lots with a known location" indicator. Lots marked sold disappear from it.
+- The lot detail page gets an app-only **"Locate with AR"** button that opens
+  AR mode aimed at that lot; the app walks the user through scanning nearby
+  labels until it can point at the target.
+
+Division of labor, same as Parts 1–2: the app is a dumb sensor + display. It
+turns QR sightings into `(range, bearing)` measurements and renders overlays
+from server-provided metadata; **all fusion, scoring, and history live here.**
+
+## What already exists (no work needed)
+
+- QR content: `Lot.qr_code` → `https://<domain>/qr/<pk>/` (`models.py:7491`),
+  route `lot_by_pk_qr` → `LotQRView` redirecting to `lot_link?src=qr`
+  (`views.py:1505`). The app parses the pk straight out of the scanned URL.
+- Scan tracking: the lot page's beacon POSTs `src` to `PageViewCreate`
+  (`views.py:2166`) into `PageView.source`. No new plumbing — the app opens
+  `lot_link?src=ar` and the beacon does the rest (one aggregate tweak below).
+- App detection: `MobileAppMiddleware` sets `request.is_mobile_app`
+  (`middleware.py:5`); `auction.html` already uses it.
+- Watched: `Watch` rows (`models.py:9022`); recommended:
+  `get_recommended_lots(...)` (`filters.py:994`).
+- Custom label fields: `Auction.label_print_fields` +
+  `custom_field_1_name` / `custom_checkbox_name` / `custom_dropdown_name`, and
+  the per-lot `custom_field_1` / `custom_checkbox_label` /
+  `custom_dropdown_label` properties (`models.py` ~2523–2563, ~7659).
+- Admin plumbing: `AuctionViewMixin` (`views.py:319`) + `auction_ribbon.html`.
+
+## 3.1 Models (new, `auctions/models.py`)
+
+```python
+class LotObservation(models.Model):
+    """One AR sighting of a lot label from a phone camera frame.
+
+    Raw solver input, pruned aggressively — this is a rolling measurement
+    buffer, not history. All detections sharing (session_id, frame_id) were
+    seen in the same camera frame, which is what makes them mutually
+    constraining."""
+
+    auction = models.ForeignKey(Auction, on_delete=models.CASCADE, related_name="ar_observations")
+    lot = models.ForeignKey(Lot, on_delete=models.CASCADE, related_name="ar_observations")
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL)
+    session_id = models.UUIDField()          # one per AR screen mount
+    frame_id = models.CharField(max_length=32)  # unique per camera frame within a session
+    captured_at = models.DateTimeField()     # client clock, clamped to <= now on ingest
+    created_at = models.DateTimeField(auto_now_add=True)
+    range_m = models.FloatField()            # camera→label distance estimate, meters
+    bearing_deg = models.FloatField()        # horizontal angle in that frame's camera coords, +right
+    quality = models.FloatField(default=1.0) # 0..1, from QR pixel size / detection sharpness
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["auction", "captured_at"]),
+            models.Index(fields=["session_id", "frame_id"]),
+        ]
+
+
+class LotPosition(models.Model):
+    """Solved 2D position of a lot in an auction-local frame.
+
+    Coordinates are meters in an arbitrary but solve-to-solve stable frame
+    (origin/orientation pinned by priors, §3.2). Scale is approximate — range
+    estimates assume a nominal printed QR size — so treat as a relative map."""
+
+    lot = models.OneToOneField(Lot, on_delete=models.CASCADE, related_name="ar_position")
+    auction = models.ForeignKey(Auction, on_delete=models.CASCADE, related_name="ar_positions")
+    x = models.FloatField()
+    y = models.FloatField()
+    confidence = models.FloatField(default=0)   # 0..1
+    observation_count = models.IntegerField(default=0)
+    updated_at = models.DateTimeField(auto_now=True)
+```
+
+## 3.2 Solver (`auctions/ar_mapping.py`, new)
+
+**Dependency:** add `numpy` + `scipy` to `requirements.in`. (GTSAM was
+considered; a 2D range-bearing landmark graph doesn't need it, and the gtsam
+wheel is a heavyweight C++ dependency. `scipy.optimize.least_squares` with a
+robust loss covers this.)
+
+Formulation — classic 2D landmark SLAM, solved from scratch each pass over the
+observation window:
+
+- **Variables:** one camera pose `(x, y, θ)` per distinct `(session_id,
+  frame_id)`; one landmark `(x, y)` per lot with surviving observations.
+- **Measurements:** each observation contributes two residuals against its
+  frame's pose and its lot's landmark:
+  `[range_m − ‖L − C‖,  wrap(bearing − (atan2(Ly−Cy, Lx−Cx) − θ)) · range_m]`.
+- **Weights:** `w = quality · exp(−age_hours / 3)`. Observations older than
+  24 h or with `w < 0.05` are excluded — this is the "recent scans win" knob:
+  a moved lot's old sightings fade on a ~3 h half-life and vanish within a day.
+- **Frame chaining:** consecutive frames of one session within 10 s get a weak
+  motion prior (soft residual on camera displacement beyond ~3 m, no heading
+  prior). This lets single-detection frames chain A…B sweeps; frames with ≥2
+  detections constrain lots directly.
+- **Gauge / stability:** each lot that already has a `LotPosition` gets a weak
+  prior (weight ~0.1) pulling its landmark toward the previous solution, so
+  the map doesn't rotate/flip between solves and the admin page doesn't swim.
+  Cold start (no priors): pin the first landmark at the origin and the second
+  to the +x axis.
+- **Robustness:** `least_squares(loss="soft_l1")`; after convergence drop
+  observations whose residual norm exceeds 3× the median and re-solve once
+  ("dropping measurements that make no sense"). Provide `jac_sparsity` — the
+  problem is very sparse and this keeps a 500-lot auction subsecond.
+- **Output:** rewrite `LotPosition` rows for solved landmarks (confidence from
+  surviving-observation count and mean residual; suggested
+  `min(1, n_obs / 5) · exp(−mean_residual_m)`), delete positions whose lot no
+  longer has surviving observations.
+
+**Trigger & pruning:** the observations endpoint sets a cache flag
+`ar_dirty_<auction_pk>`; a beat task `update_ar_positions` (every 60 s, same
+pattern as `endauctions` in `fishauctions/celery.py`) solves flagged auctions
+and deletes `LotObservation` rows older than 24 h. A 60 s cadence is plenty —
+the map is an admin overview, not a live tracker.
+
+**Scale:** ranges assume a nominal printed QR edge (`AR_QR_EDGE_MM`, settings
+default `12.0`, echoed to the app in §3.3 so it can be tuned server-side).
+Wrong absolute scale distorts distances uniformly; the layout stays right.
+
+## 3.3 Mobile API (`auctions/mobile/`, three new endpoints)
+
+All: `permission_classes = [IsMobileAuthenticated]`,
+`throttle_classes = [ScopedRateThrottle]` with a **new scope**
+`"mobile_ar": "240/min"` (an active AR session ships a metadata fetch or an
+observation batch every few seconds; `mobile_api`'s 1000/hour would starve it —
+same reasoning that created `mobile_search`). Routes in `mobile/urls.py`:
+`ar/lots/`, `ar/observations/`, `ar/positions/`.
+
+### `GET /api/mobile/ar/lots/?auction=<slug>&lots=<pk,pk,...>`
+
+Overlay + card metadata for up to **50** scanned pks per call. Any
+authenticated user — this returns nothing beyond what the public lot page
+shows, plus the caller's own watch/recommendation state.
+
+```json
+{
+  "auction": {"slug": "tfcb-2026", "title": "TFCB Annual Auction", "qr_edge_mm": 12.0},
+  "lots": [
+    {
+      "pk": 123,
+      "in_auction": true,
+      "lot_number": "45",              // Lot.lot_number_display
+      "name": "Apistogramma cacatuoides pair",
+      "thumbnail_url": "https://…",    // Lot.thumbnail image URL or null
+      "watched": true,
+      "recommended": false,
+      "sold": false,                    // Lot.sold
+      "removed": false,                 // banned or is_deleted or deactivated
+      "lot_url": "/lots/123/apisto-pair/",  // Lot.lot_link (path)
+      "label_fields": [{"label": "Table", "value": "3"}],
+      "has_position": true
+    }
+  ]
+}
+```
+
+- `auction` resolves by slug (404 if missing). `qr_edge_mm` =
+  `settings.AR_QR_EDGE_MM` (the app's range math uses it).
+- `watched`: one `Watch.objects.filter(user=…, lot_number__in=…)` query.
+- `recommended`: membership in `get_recommended_lots(user=…, auction=…,
+  qty=25)` — compute the recommended-pk set once and cache per
+  `(user, auction)` for 5 min; it's an ordering annotation, not a flag, and is
+  too expensive per-scan otherwise.
+- `label_fields`: only the auction's **custom** fields, only when present in
+  `auction.label_print_fields`, in that field-list's order:
+  `custom_field_1` (label = `auction.custom_field_1_name`),
+  `custom_checkbox_label` (label = `auction.custom_checkbox_name`),
+  `custom_dropdown_label` (label = `auction.custom_dropdown_name`). Skip
+  fields whose per-lot value is empty. Reuse the existing Lot properties — do
+  not re-derive display strings.
+- pks not in this auction (someone scans a stray label): return the row with
+  `in_auction: false` and name/thumbnail only — the app shows a neutral chip
+  and sends no observations for it. Deleted/unknown pks: `in_auction: false`,
+  `removed: true`, `name: null`.
+- `has_position`: whether a `LotPosition` row exists (drives the app's
+  "this lot hasn't been mapped yet" message in locate mode).
+
+### `POST /api/mobile/ar/observations/`
+
+```json
+{
+  "auction": "tfcb-2026",
+  "session_id": "0d0f6c9e-…",
+  "frames": [
+    {
+      "frame_id": "f000123",
+      "captured_at": "2026-07-17T15:04:05.123Z",
+      "detections": [
+        {"lot": 123, "range_m": 1.4, "bearing_deg": -12.5, "quality": 0.8}
+      ]
+    }
+  ]
+}
+```
+
+- Limits: ≤50 frames/call, ≤10 detections/frame. Sanity bounds enforced
+  server-side: `0.05 ≤ range_m ≤ 30`, `−90 ≤ bearing_deg ≤ 90`,
+  `0 < quality ≤ 1`; `captured_at` clamped to `now()`. Violations drop the
+  detection, not the batch.
+- Detections whose lot isn't in the auction (or is deleted/banned) are
+  silently dropped — buyers scanning stray labels mustn't 400 the batch.
+- Creates `LotObservation` rows, sets the dirty flag, returns
+  `202 {"accepted": <n>}`. Any authenticated user: every scanning attendee is
+  a data source, not just admins.
+
+### `GET /api/mobile/ar/positions/?auction=<slug>`
+
+```json
+{
+  "updated_at": "2026-07-17T15:04:05Z",
+  "positions": [{"lot": 123, "x": 1.2, "y": -3.4, "confidence": 0.7}],
+  "unsold_total": 210,
+  "unsold_with_position": 140
+}
+```
+
+- Positions only for lots that are **not sold and not removed** (`Lot.sold`,
+  `banned`, `is_deleted`, `deactivated`) — selling a lot removes it here and on
+  the admin map with no extra bookkeeping.
+- Any authenticated user (locate mode needs it). `updated_at` = latest
+  `LotPosition.updated_at` for the auction, null when empty.
+
+## 3.4 Web template changes
+
+- **`auction.html`** (Quick Actions, next to "View Lots" ~line 163): app-only
+  sibling button —
+  `{% if request.is_mobile_app %}<a href="fishauctions://ar/{{ auction.slug }}"
+  class="btn btn-primary btn-sm w-100"><i class="bi bi-badge-ar"></i>
+  AR Lots</a>{% endif %}`. Visible to every user (not admin-gated).
+- **Lot detail page** (`view_lot_images.html` button row): app-only
+  `{% if request.is_mobile_app and lot.auction %}<a
+  href="fishauctions://ar/{{ lot.auction.slug }}?locate={{ lot.pk }}" …>
+  <i class="bi bi-geo-alt"></i> Locate with AR</a>{% endif %}`.
+- **Scan counting:** `Auction.number_of_lots_with_scanned_qr`
+  (`models.py:3645`) currently filters `pageview__source__icontains="qr"`;
+  widen to also count AR opens:
+  `Q(pageview__source__icontains="qr") | Q(pageview__source__iexact="ar")`.
+  The app opens lot pages as `lot_link?src=ar`; nothing else to record.
+
+## 3.5 Admin lot map page (web, works on desktop too)
+
+- **URL:** `auctions/<slug>/lot-map/` (name `auction_lot_map`), view
+  `AuctionLotMap(LoginRequiredMixin, AuctionViewMixin, TemplateView)` —
+  admin-only (default `allow_non_admins = False` path raises), template
+  `auction_lot_map.html` with `{% include 'auction_ribbon.html' %}`; add a
+  "Lot map" `dropdown-item` to the ribbon's More menu.
+- **Data:** `auctions/<slug>/lot-map/data/` (admin-only JSON, same view module)
+  returning the §3.3 positions payload plus `lot_number`/`name` per row and
+  the full unsold-lot list `[{pk, lot_number, name, has_position}]` for the
+  locate search. The page polls it every ~10 s.
+- **Render:** inline SVG sized to the position extent (padded viewBox, equal
+  axis scale). One dot per located unsold lot, `lot_number_display` as the dot
+  label, confidence → opacity, click → small popover with lot name + link.
+  No basemap — the frame is relative, there's nothing to draw under it.
+- **Controls:**
+  - *Locate a lot:* search/datalist over the unsold-lot list; selecting one
+    with a position pans/highlights its dot (pulse animation); without one
+    shows "no location known yet".
+  - *Clear all locations:* POST `auctions/<slug>/lot-map/clear/` (CSRF,
+    JS confirm) → deletes the auction's `LotObservation` + `LotPosition` rows.
+  - *Coverage stat:* "140 of 210 unsold lots located (67%)" from the data
+    payload.
+
+## 3.6 Settings / infra summary
+
+- `AR_QR_EDGE_MM = 12.0` (approximate printed QR edge; tune if labels change).
+- `DEFAULT_THROTTLE_RATES["mobile_ar"] = "240/min"`.
+- `requirements.in`: `numpy`, `scipy`.
+- Beat schedule: `update_ar_positions` every 60 s.
+- Migration for the two models + indexes.
+
+## 3.7 Out of scope for the backend (app work, for context)
+
+- Camera + QR detection (`mobile_scanner`), on-device range/bearing estimation
+  from QR corner geometry and the gravity vector, observation batching, the
+  overlay/card UI, and locate-mode pose solving from known positions — all in
+  the app, already implemented against this contract.
+- The app degrades gracefully until Part 3 lands: scanning still overlays
+  lot pks parsed from the QR itself and the lot-page button still works;
+  metadata/observations/positions calls that 404 simply disable those layers.
+
+## 3.8 Tests to ship with the backend changes
+
+- `ar/lots/`: JWT required; batch cap; watched/recommended flags per-user;
+  `label_fields` honors `label_print_fields` + auction custom-field names and
+  skips empty values; cross-auction pk → `in_auction: false`; deleted pk →
+  `removed: true`; `qr_edge_mm` echoes settings.
+- `ar/observations/`: JWT required; rows created with clamped `captured_at`;
+  out-of-range detections dropped while valid siblings persist; cross-auction
+  lots dropped; frame/detection caps enforced; dirty flag set; 202 shape.
+- `ar/positions/`: sold/banned/deleted lots excluded; unsold counters right;
+  empty auction → empty payload with null `updated_at`.
+- Solver (`ar_mapping`) unit tests, synthetic geometry: a square of 4 lots
+  observed from a few poses is recovered up to a rigid transform (compare
+  pairwise distances); an outlier observation is rejected; a "moved lot"
+  converges near its new spot once fresh observations outweigh stale ones;
+  a second solve with priors keeps the old frame (no rotation/flip).
+- Web: map page + data + clear are admin-only (403 for a buyer); clear wipes
+  both tables; `number_of_lots_with_scanned_qr` counts `src=ar` PageViews.

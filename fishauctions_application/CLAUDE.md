@@ -119,6 +119,34 @@ GET /api/mobile/printers/profiles/                  # ThermalPrinterProfile rows
   `printerConnect` / `printerUnpair` (each resolves with
   `{supported, connected, name, address, profile, labelSize}`).
 
+### AR Lot Mode
+
+Camera screen (`ar_lots_screen.dart`) that scans lot-label QR codes
+(`https://<domain>/qr/<pk>/`) and overlays lot names — or dots when >3 are in
+frame (star = watched, green = recommended). One label centered/close pops a
+card (photo + the auction's custom label fields + "open lot page", which loads
+`lot_link?src=ar` in the WebView so the page-view beacon records the scan).
+Entry: app-only web buttons → `fishauctions://ar/<auction_slug>` (rules page)
+and `?locate=<lot_pk>` (lot page "Locate with AR").
+
+Each sighting also yields a `(range, bearing)` estimate (QR corner quad +
+gravity pitch, `ar_geometry.dart`) batched to the backend
+(`ar_session.dart`/`ar_api.dart`), where a solver fuses everyone's scans into
+a per-auction 2D lot map (recency-weighted, outlier-dropping) with an admin
+map page. Locate mode solves the phone's own pose from ≥2 sighted mapped lots
+(Gauss–Newton, on-device) and aims an arrow at the target, gyro-stabilized.
+
+```
+GET  /api/mobile/ar/lots/?auction=<slug>&lots=<pks>   # overlay/card metadata
+POST /api/mobile/ar/observations/                     # measured sightings
+GET  /api/mobile/ar/positions/?auction=<slug>         # solved lot positions
+```
+
+**Backend status: NOT implemented yet** — full contract in `BACKEND_SPEC.md`
+Part 3 (models, scipy solver, endpoints, web buttons, admin map). The app
+degrades gracefully meanwhile: pk-only overlay chips, observation upload
+disables itself on 404, locate mode reports lots as unmapped.
+
 ### Payments (Square Tap to Pay)
 
 Uses the official **`square_mobile_payments_sdk`** Flutter plugin (the Mobile
@@ -217,6 +245,7 @@ verifies the app compiles and links.
 - ~~Printing backend endpoints~~ — landed (`printers/profiles/`, `labels/prefs/`, `labels/<pk>/?fmt=pdf`, `UserLabelPrefs.print_method`, the `/printing/` page's dropdown + BT card are live on staging). The app still degrades gracefully when offline: bundled printer profiles, print method defaults to PDF, prefs fetch returns null.
 - **Push notifications:** the backend side of `BACKEND_SPEC.md` Part 2 is **implemented** (`auctions/notifications.py` notify_user choke point, `send_push_to_user` + `promo_push_notifications` tasks, `UserData.push_notifications_instead_of_email`, `PushNotificationSent`, firebase-admin) but inert by design until (a) `FIREBASE_CREDENTIALS_JSON` is set on the deployment and (b) devices report real FCM tokens. App plumbing exists (`fcm_token` sent on device registration when present, `devices/unregister/` called on sign-out) but `PushService.currentToken()` is a stub returning null until a Firebase project + `firebase_messaging` are wired (the plan delivers the public Firebase client config via `/api/mobile/config/`, not a bundled `google-services.json`). Until both land, every notification falls back to email (`user_prefers_push()` is false for everyone). **Full setup checklist + config-endpoint decision: `PUSH.md`.**
 - **Square Tap to Pay (runtime):** Backend endpoints are done; charging still needs a real NFC device on API 31+ and Square production approval (sandbox works for the full flow). Not exercisable in CI.
+- **AR lot mode backend:** the app side is implemented; the entire backend half — `LotObservation`/`LotPosition` models, the scipy position solver + Celery task, the three `/api/mobile/ar/*` endpoints, the app-only "AR Lots"/"Locate with AR" template buttons, the `src=ar` scan-count tweak, and the admin lot-map page — is specced in `BACKEND_SPEC.md` Part 3 and not yet implemented. Until it lands, AR mode runs in degraded pk-only overlay mode and no positions accumulate.
 - **Release signing:** wired in CI (keystore from repo secrets; the release workflow refuses to build unsigned). *Local* `flutter build --release` still falls back to debug signing unless you create `android/key.properties` yourself.
 
 ## CI/CD

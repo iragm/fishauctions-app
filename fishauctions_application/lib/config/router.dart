@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 
 import '../providers/auth_provider.dart';
 import '../screens/allauth_web_screen.dart';
+import '../screens/ar_lots_screen.dart';
 import '../screens/login_screen.dart';
 import '../screens/print_label_screen.dart';
 import '../screens/splash_screen.dart';
@@ -81,6 +82,16 @@ final routerProvider = Provider<GoRouter>((ref) {
         path: '/print/:lotPk',
         builder: (context, state) =>
             PrintLabelScreen(lotPk: int.parse(state.pathParameters['lotPk']!)),
+      ),
+      // AR lot mode — reached via the web's fishauctions://ar/<slug> deep
+      // links (auction rules page; lot pages add ?locate=<pk>). Pops with a
+      // web path for the shell to load when the user opens a lot page.
+      GoRoute(
+        path: '/ar/:auctionSlug',
+        builder: (context, state) => ArLotsScreen(
+          auctionSlug: state.pathParameters['auctionSlug']!,
+          locateLotPk: int.tryParse(state.uri.queryParameters['locate'] ?? ''),
+        ),
       ),
     ],
   );

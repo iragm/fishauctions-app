@@ -19,7 +19,12 @@
 	<!-- WebView camera: the barcode check-in scanner (getUserMedia) and photo
 	     capture for the web's image uploads. -->
 	<key>NSCameraUsageDescription</key>
-	<string>Scan check-in barcodes and take photos of your lots.</string>
+	<string>Scan check-in barcodes and lot labels, and take photos of your lots.</string>
+	<!-- sensors_plus (AR lot mode): gravity/gyro steady the scan overlay and
+	     keep directions pointed the right way while you turn. Without this
+	     key iOS kills the app on first motion access. -->
+	<key>NSMotionUsageDescription</key>
+	<string>Keep AR lot scanning steady and pointed the right way.</string>
 	<!-- WebView photo-library uploads: add-image-to-lot and club icon. -->
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Attach photos from your library to your lots.</string>

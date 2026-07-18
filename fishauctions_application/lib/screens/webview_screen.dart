@@ -879,6 +879,29 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
         } else {
           _loadPath('/printing/');
         }
+      case 'ar':
+        // fishauctions://ar/<auction_slug>[?locate=<lot_pk>] — AR lot mode
+        // (auction rules page button; lot pages add ?locate to aim at one
+        // lot). A missing slug means a malformed link; ignore it.
+        final slug = uri.pathSegments.firstOrNull;
+        if (slug != null && slug.isNotEmpty) {
+          unawaited(_launchAr(slug, uri.queryParameters['locate']));
+        }
+    }
+  }
+
+  /// Push the AR screen and, when it pops with a web path (the card's "open
+  /// lot page" button, carrying `?src=ar` so the page-view beacon records the
+  /// scan), load that page in the shell — same await-then-act shape as
+  /// [_launchPayment].
+  Future<void> _launchAr(String auctionSlug, String? locateLotPk) async {
+    final locate = int.tryParse(locateLotPk ?? '');
+    final query = locate == null ? '' : '?locate=$locate';
+    final result = await context.push(
+      '/ar/${Uri.encodeComponent(auctionSlug)}$query',
+    );
+    if (result is String && mounted) {
+      _loadPath(result);
     }
   }
 
