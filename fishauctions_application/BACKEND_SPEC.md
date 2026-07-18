@@ -11,52 +11,17 @@ template — never an app constant.
 
 ---
 
-# Amendments (post-implementation)
+# Status
 
-Part 1 is implemented on the backend and verified against staging (2026-07).
-Part 2 is also implemented server-side (`notifications.py` choke point,
-`send_push_to_user` / `promo_push_notifications` tasks, `UserData.
-push_notifications_instead_of_email`, firebase-admin) but is inert until
-`FIREBASE_CREDENTIALS_JSON` is provisioned and the app ships real FCM tokens
-(see CLAUDE.md "What's NOT Done Yet" → Push notifications for the app-side
-list). Two small backend items are still owed:
+Parts 1 and 2 are fully implemented on the backend (including the follow-up
+items that used to be listed here: the `/lots/my-last-auction/` shortcut
+redirect, the `firebase` block in `MobileConfigView`, the notification+data
+hybrid FCM message, and the `escpos-raster` 384 px seed fix). Part 2 stays
+inert per deployment until `FIREBASE_CREDENTIALS_JSON` is set and the app
+ships real FCM tokens (see `PUSH.md`).
 
-**`GET /lots/my-last-auction/` — redirect for the app's home-screen shortcut.**
-The app registers a "Lots in my last auction" quick action (long-press the
-launcher icon; `ShortcutService`). Only the server knows
-`userdata.last_auction_used`, so the shortcut points at this URL:
-
-- `login_required`. 302 to `/lots/?auction=<userdata.last_auction_used.slug>`
-  when set (and the auction isn't deleted); plain `/lots/` otherwise.
-- No template, no query params in, nothing else — a `RedirectView`-sized view.
-- Until it lands, that one shortcut 404s in the WebView (the other two,
-  `/selling/` and `/invoices/`, already exist).
-
-**Push: two backend changes — see `PUSH.md` Part D for the exact prompt.** The
-app side is implemented and reads its Firebase *client* config from
-`/api/mobile/config/` (public values, same as `square_application_id`; the
-secret `FIREBASE_CREDENTIALS_JSON` stays server-side). Owed server-side:
-(1) add a flat, per-platform, self-tagged `firebase` block to `MobileConfigView`
-(shape in `PUSH.md`), and (2) make `send_fcm_message` a **notification+data
-hybrid** (add `notification=messaging.Notification(title, body)`, keep `data`
-for tap-routing, add an `apns` block for sound/priority) so the OS displays it
-in background/terminated on both platforms — the current data-only message never
-displays on iOS. `FIREBASE_CREDENTIALS_JSON` itself is already wired; just set it
-per deployment.
-
-**`escpos-raster` seed row: `print_width_px` should be 384, not 96.**
-(Still owed.)
-`auctions/printer_programs.py` `SEED_PROFILES` seeds the generic
-"Raw ESC/POS raster (GS v 0)" fallback with `print_width_px: 96` — that's the
-D11s's 12 mm head, not a generic ESC/POS geometry. Nearly every BLE ESC/POS
-printer is a 58 mm unit with a 384-dot head @ 203 dpi; at 96 px it prints a
-~12 mm-wide strip. Change the row to `print_width_px: 384` (the app's bundled
-copy already says 384). Since migration 0320 already ran, edit the value in
-`SEED_PROFILES` **and** update the existing row (Django admin edit on each
-deployment, or a tiny data migration re-running the seed's `update_or_create`).
-The other seed fields now match the app bundle byte-for-byte — keep it that way
-when editing rows the bundle mirrors (`d11s-aiyin`, `d11s-lujiang`,
-`escpos-raster`).
+**Part 3 (AR lot scanning & location mapping, below) is the outstanding
+work** — nothing from it exists on the backend yet.
 
 ---
 
@@ -670,10 +635,14 @@ clicks counter; note as future work).
   the lot picture (if any) and the **custom fields that print on labels in that
   lot's auction**, plus an "open lot page" button. Opening the page records a
   view with `src=ar`, which must also count as "QR scanned".
-- As users scan, the app estimates each label's position relative to the camera
-  and reports those observations; the **server** fuses them into a relative 2D
-  map of lot locations. Recent scans outweigh old ones (lots get moved
-  mid-auction) and nonsensical measurements are dropped.
+- As users scan, the app measures each label's direction from the camera and
+  reports those observations; the **server** fuses them into a relative 2D map
+  of lot locations. Recent scans outweigh old ones (lots get moved mid-auction)
+  and nonsensical measurements are dropped.
+- **Nothing may depend on the printed size of the QR code.** Sellers print on
+  arbitrary label sizes, so apparent-size ranging is banned by design; all
+  measurements are angles (bearing + gravity-referenced depression), which are
+  size-independent and pixel-accurate.
 - Auction admins get a **2D lot map** page: all located unsold lots, a
   "locate a lot" search, a "clear all locations" button, and a "% of unsold
   lots with a known location" indicator. Lots marked sold disappear from it.
@@ -682,8 +651,9 @@ clicks counter; note as future work).
   labels until it can point at the target.
 
 Division of labor, same as Parts 1–2: the app is a dumb sensor + display. It
-turns QR sightings into `(range, bearing)` measurements and renders overlays
-from server-provided metadata; **all fusion, scoring, and history live here.**
+turns QR sightings into `(bearing, depression)` angle measurements and renders
+overlays from server-provided metadata; **all fusion, scoring, and history
+live here.**
 
 ## What already exists (no work needed)
 
@@ -721,9 +691,10 @@ class LotObservation(models.Model):
     frame_id = models.CharField(max_length=32)  # unique per camera frame within a session
     captured_at = models.DateTimeField()     # client clock, clamped to <= now on ingest
     created_at = models.DateTimeField(auto_now_add=True)
-    range_m = models.FloatField()            # camera→label distance estimate, meters
     bearing_deg = models.FloatField()        # horizontal angle in that frame's camera coords, +right
-    quality = models.FloatField(default=1.0) # 0..1, from QR pixel size / detection sharpness
+    depression_deg = models.FloatField()     # ray angle below horizontal (gravity-referenced), +down
+    quality = models.FloatField(default=1.0) # 0..1, detection sharpness
+    fov_calibrated = models.BooleanField(default=False)  # bearings from device-reported FOV?
 
     class Meta:
         indexes = [
@@ -736,8 +707,9 @@ class LotPosition(models.Model):
     """Solved 2D position of a lot in an auction-local frame.
 
     Coordinates are meters in an arbitrary but solve-to-solve stable frame
-    (origin/orientation pinned by priors, §3.2). Scale is approximate — range
-    estimates assume a nominal printed QR size — so treat as a relative map."""
+    (origin/orientation pinned by priors, §3.2). Layout is bearing-accurate;
+    absolute scale comes only from the soft phone-height prior (±30%), so
+    treat as a relative map."""
 
     lot = models.OneToOneField(Lot, on_delete=models.CASCADE, related_name="ar_position")
     auction = models.ForeignKey(Auction, on_delete=models.CASCADE, related_name="ar_positions")
@@ -751,25 +723,37 @@ class LotPosition(models.Model):
 ## 3.2 Solver (`auctions/ar_mapping.py`, new)
 
 **Dependency:** add `numpy` + `scipy` to `requirements.in`. (GTSAM was
-considered; a 2D range-bearing landmark graph doesn't need it, and the gtsam
-wheel is a heavyweight C++ dependency. `scipy.optimize.least_squares` with a
-robust loss covers this.)
+considered; a 2D bearing-graph doesn't need it, and the gtsam wheel is a
+heavyweight C++ dependency. `scipy.optimize.least_squares` with a robust loss
+covers this.)
 
-Formulation — classic 2D landmark SLAM, solved from scratch each pass over the
-observation window:
+Formulation — **bearing-dominant bundle adjustment** (triangulation, not
+ranging), solved from scratch each pass over the observation window. Bearings
+from QR corner centroids are good to ~0.1° regardless of how the label was
+printed; that precision, across frames taken from different standing spots, is
+what pins landmarks — there are no measured ranges anywhere.
 
 - **Variables:** one camera pose `(x, y, θ)` per distinct `(session_id,
-  frame_id)`; one landmark `(x, y)` per lot with surviving observations.
-- **Measurements:** each observation contributes two residuals against its
-  frame's pose and its lot's landmark:
-  `[range_m − ‖L − C‖,  wrap(bearing − (atan2(Ly−Cy, Lx−Cx) − θ)) · range_m]`.
-- **Weights:** `w = quality · exp(−age_hours / 3)`. Observations older than
-  24 h or with `w < 0.05` are excluded — this is the "recent scans win" knob:
-  a moved lot's old sightings fade on a ~3 h half-life and vanish within a day.
+  frame_id)`; one landmark `(x, y)` per lot with surviving observations; one
+  **height nuisance `h_j` per session** (phone height above the label plane,
+  prior `0.65 ± 0.3 m` — standing phone ≈ 1.4 m, table labels ≈ 0.75 m).
+- **Bearing residual** (the strong one): per observation,
+  `wrap((atan2(Ly−Cy, Lx−Cx) − θ) − bearing_ccw) / σ_b`, where
+  `bearing_ccw = −radians(bearing_deg)` and `σ_b = 0.01 rad` for
+  `fov_calibrated` observations, `0.02` otherwise.
+- **Depression pseudo-range** (the weak one — fixes scale and helps chain
+  single-detection frames): when `depression_deg > 8°`, the label-plane model
+  gives `r̃ = h_j / tan(depression)`; residual `(‖L − C‖ − r̃) / (0.5 · r̃)`.
+  Level views (small depression) contribute no range information — correct,
+  since a distant label and a near one look the same there.
+- **Weights:** everything above additionally scaled by
+  `w = quality · exp(−age_hours / 3)`. Observations older than 24 h or with
+  `w < 0.05` are excluded — the "recent scans win" knob: a moved lot's old
+  sightings fade on a ~3 h half-life and vanish within a day.
 - **Frame chaining:** consecutive frames of one session within 10 s get a weak
   motion prior (soft residual on camera displacement beyond ~3 m, no heading
   prior). This lets single-detection frames chain A…B sweeps; frames with ≥2
-  detections constrain lots directly.
+  detections constrain lots directly through their bearing differences.
 - **Gauge / stability:** each lot that already has a `LotPosition` gets a weak
   prior (weight ~0.1) pulling its landmark toward the previous solution, so
   the map doesn't rotate/flip between solves and the admin page doesn't swim.
@@ -781,7 +765,7 @@ observation window:
   problem is very sparse and this keeps a 500-lot auction subsecond.
 - **Output:** rewrite `LotPosition` rows for solved landmarks (confidence from
   surviving-observation count and mean residual; suggested
-  `min(1, n_obs / 5) · exp(−mean_residual_m)`), delete positions whose lot no
+  `min(1, n_obs / 5) · exp(−mean_residual)`), delete positions whose lot no
   longer has surviving observations.
 
 **Trigger & pruning:** the observations endpoint sets a cache flag
@@ -790,9 +774,12 @@ pattern as `endauctions` in `fishauctions/celery.py`) solves flagged auctions
 and deletes `LotObservation` rows older than 24 h. A 60 s cadence is plenty —
 the map is an admin overview, not a live tracker.
 
-**Scale:** ranges assume a nominal printed QR edge (`AR_QR_EDGE_MM`, settings
-default `12.0`, echoed to the app in §3.3 so it can be tuned server-side).
-Wrong absolute scale distorts distances uniformly; the layout stays right.
+**Accuracy & scale:** relative positions within a well-scanned cluster land in
+the centimeter-to-decimeter band (bearing-limited); that's what the app's
+ghost marker projects from, and it is scale-free. Absolute meters come only
+from the soft height prior, so treat them as ±30% — fine for the admin map
+(relative layout) and the "about N m" locate readout, and it never distorts
+the layout itself.
 
 ## 3.3 Mobile API (`auctions/mobile/`, three new endpoints)
 
@@ -811,7 +798,7 @@ shows, plus the caller's own watch/recommendation state.
 
 ```json
 {
-  "auction": {"slug": "tfcb-2026", "title": "TFCB Annual Auction", "qr_edge_mm": 12.0},
+  "auction": {"slug": "tfcb-2026", "title": "TFCB Annual Auction"},
   "lots": [
     {
       "pk": 123,
@@ -831,8 +818,7 @@ shows, plus the caller's own watch/recommendation state.
 }
 ```
 
-- `auction` resolves by slug (404 if missing). `qr_edge_mm` =
-  `settings.AR_QR_EDGE_MM` (the app's range math uses it).
+- `auction` resolves by slug (404 if missing).
 - `watched`: one `Watch.objects.filter(user=…, lot_number__in=…)` query.
 - `recommended`: membership in `get_recommended_lots(user=…, auction=…,
   qty=25)` — compute the recommended-pk set once and cache per
@@ -858,20 +844,25 @@ shows, plus the caller's own watch/recommendation state.
 {
   "auction": "tfcb-2026",
   "session_id": "0d0f6c9e-…",
+  "fov_hdeg": 68.4,
   "frames": [
     {
       "frame_id": "f000123",
       "captured_at": "2026-07-17T15:04:05.123Z",
       "detections": [
-        {"lot": 123, "range_m": 1.4, "bearing_deg": -12.5, "quality": 0.8}
+        {"lot": 123, "bearing_deg": -12.5, "depression_deg": 28.9, "quality": 0.8}
       ]
     }
   ]
 }
 ```
 
+- `fov_hdeg` (optional): the device-reported camera horizontal FOV the
+  bearings were computed against. Present ⇒ store `fov_calibrated=True` on the
+  batch's rows (tighter bearing σ in the solver); absent ⇒ the app used its
+  assumed-FOV fallback.
 - Limits: ≤50 frames/call, ≤10 detections/frame. Sanity bounds enforced
-  server-side: `0.05 ≤ range_m ≤ 30`, `−90 ≤ bearing_deg ≤ 90`,
+  server-side: `−90 ≤ bearing_deg ≤ 90`, `−90 ≤ depression_deg ≤ 90`,
   `0 < quality ≤ 1`; `captured_at` clamped to `now()`. Violations drop the
   detection, not the batch.
 - Detections whose lot isn't in the auction (or is deleted/banned) are
@@ -940,18 +931,29 @@ shows, plus the caller's own watch/recommendation state.
 
 ## 3.6 Settings / infra summary
 
-- `AR_QR_EDGE_MM = 12.0` (approximate printed QR edge; tune if labels change).
 - `DEFAULT_THROTTLE_RATES["mobile_ar"] = "240/min"`.
 - `requirements.in`: `numpy`, `scipy`.
 - Beat schedule: `update_ar_positions` every 60 s.
 - Migration for the two models + indexes.
+- **Optional but high-leverage: print the label QR larger.** Nothing in the
+  math uses QR size, but *decode distance* scales linearly with printed size —
+  a ~15 mm code decodes at roughly 1 m, a 40 mm one at 2.5 m+ (the app scans
+  at 2560×1440). A bump to the label template's `qr_from_text size=…` is the
+  cheapest way to make AR usable from further back; entirely a product knob,
+  no contract impact.
 
 ## 3.7 Out of scope for the backend (app work, for context)
 
-- Camera + QR detection (`mobile_scanner`), on-device range/bearing estimation
-  from QR corner geometry and the gravity vector, observation batching, the
-  overlay/card UI, and locate-mode pose solving from known positions — all in
-  the app, already implemented against this contract.
+- Camera + QR detection (`mobile_scanner` at 2560×1440), angle measurement
+  from QR corner centroids + the gravity vector against the device-reported
+  camera FOV (platform channel; assumed-FOV fallback), observation batching,
+  the overlay/card UI — all in the app, already implemented against this
+  contract.
+- Locate mode is app-side too: bearing-only resection from ≥3 mapped lots
+  gives the coarse compass arrow, and when mapped lots are on screen the app
+  fits a map→screen homography and projects the target directly into the
+  camera view (the "ghost pin") — that path never touches ranges or scale, so
+  its precision is the map's local accuracy.
 - The app degrades gracefully until Part 3 lands: scanning still overlays
   lot pks parsed from the QR itself and the lot-page button still works;
   metadata/observations/positions calls that 404 simply disable those layers.
@@ -961,16 +963,19 @@ shows, plus the caller's own watch/recommendation state.
 - `ar/lots/`: JWT required; batch cap; watched/recommended flags per-user;
   `label_fields` honors `label_print_fields` + auction custom-field names and
   skips empty values; cross-auction pk → `in_auction: false`; deleted pk →
-  `removed: true`; `qr_edge_mm` echoes settings.
+  `removed: true`.
 - `ar/observations/`: JWT required; rows created with clamped `captured_at`;
-  out-of-range detections dropped while valid siblings persist; cross-auction
-  lots dropped; frame/detection caps enforced; dirty flag set; 202 shape.
+  out-of-range angles dropped while valid siblings persist; cross-auction
+  lots dropped; frame/detection caps enforced; `fov_hdeg` present/absent →
+  `fov_calibrated` set/cleared; dirty flag set; 202 shape.
 - `ar/positions/`: sold/banned/deleted lots excluded; unsold counters right;
   empty auction → empty payload with null `updated_at`.
 - Solver (`ar_mapping`) unit tests, synthetic geometry: a square of 4 lots
-  observed from a few poses is recovered up to a rigid transform (compare
-  pairwise distances); an outlier observation is rejected; a "moved lot"
-  converges near its new spot once fresh observations outweigh stale ones;
-  a second solve with priors keeps the old frame (no rotation/flip).
+  observed from a few poses is recovered up to a similarity transform
+  (compare shape, not meters — scale is prior-driven); an outlier observation
+  is rejected; a "moved lot" converges near its new spot once fresh
+  observations outweigh stale ones; a second solve with priors keeps the old
+  frame (no rotation/flip); depression + height prior recovers roughly
+  metric scale for a synthetic standing-height session.
 - Web: map page + data + clear are admin-only (403 for a buyer); clear wipes
   both tables; `number_of_lots_with_scanned_qr` counts `src=ar` PageViews.

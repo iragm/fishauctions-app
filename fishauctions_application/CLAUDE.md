@@ -129,12 +129,18 @@ card (photo + the auction's custom label fields + "open lot page", which loads
 Entry: app-only web buttons → `fishauctions://ar/<auction_slug>` (rules page)
 and `?locate=<lot_pk>` (lot page "Locate with AR").
 
-Each sighting also yields a `(range, bearing)` estimate (QR corner quad +
-gravity pitch, `ar_geometry.dart`) batched to the backend
-(`ar_session.dart`/`ar_api.dart`), where a solver fuses everyone's scans into
-a per-auction 2D lot map (recency-weighted, outlier-dropping) with an admin
-map page. Locate mode solves the phone's own pose from ≥2 sighted mapped lots
-(Gauss–Newton, on-device) and aims an arrow at the target, gyro-stabilized.
+Each sighting also yields an **angle-only** `(bearing, depression)`
+measurement (QR corner centroids + gravity against the device-reported camera
+FOV — deliberately nothing depends on the printed QR size, since sellers print
+arbitrary label sizes; `ar_geometry.dart`, `PlatformBridge.cameraHorizontalFovDeg`)
+batched to the backend (`ar_session.dart`/`ar_api.dart`), where a
+bearing-dominant solver triangulates everyone's scans into a per-auction 2D
+lot map (recency-weighted, outlier-dropping; scale from a phone-height prior)
+with an admin map page. Locate mode: bearing-only resection from ≥3 sighted
+mapped lots gives a gyro-stabilized compass arrow, and when mapped lots are on
+screen the app fits a map→screen homography and pins the target directly in
+the camera view (ghost marker — scale-free, centimeter-class near a scanned
+cluster).
 
 ```
 GET  /api/mobile/ar/lots/?auction=<slug>&lots=<pks>   # overlay/card metadata

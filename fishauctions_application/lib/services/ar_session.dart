@@ -15,12 +15,15 @@ class LocateUnmapped extends LocateState {
 }
 
 /// Not oriented yet: the user needs to scan labels of mapped lots.
-/// [fixCount] is how many distinct mapped lots have been sighted so far
-/// (2 are needed).
+/// [fixCount] is how many distinct mapped lots have been sighted so far —
+/// bearing-only resection needs 3 (with some angular spread between them).
 class LocateNeedScans extends LocateState {
   const LocateNeedScans(this.fixCount);
 
   final int fixCount;
+
+  /// Distinct mapped lots a resection needs.
+  static const int required = 3;
 }
 
 /// Oriented: point the arrow [bearingRightRad] radians right of straight
@@ -137,8 +140,8 @@ class ArSessionController {
       detections.add(
         ArDetection(
           lotPk: entry.key,
-          rangeM: entry.value.rangeM,
           bearingDeg: entry.value.bearingDeg,
+          depressionDeg: entry.value.depressionDeg,
           quality: entry.value.quality,
         ),
       );
@@ -272,7 +275,6 @@ class ArSessionController {
         LandmarkFix(
           x: f.position.x,
           y: f.position.y,
-          rangeM: f.measurement.rangeM,
           // Rotate the recorded device-frame bearing into the *current*
           // device frame: turning left (ccw, +yaw) moves old landmarks to
           // the right (+bearing).
@@ -287,6 +289,14 @@ class ArSessionController {
       _yawAtSolve = _yawRad;
     }
   }
+
+  /// The target lot's solved map position, when known — the ghost-marker
+  /// projection needs it (the screen owns the image-side data).
+  ArLotPosition? get targetPosition =>
+      _targetPk == null ? null : _positions[_targetPk];
+
+  /// Any mapped lot's solved position (ghost-marker anchor lookup).
+  ArLotPosition? positionOf(int lotPk) => _positions[lotPk];
 
   /// Current guidance for locate mode; null when locate mode is off.
   LocateState? get locateState {

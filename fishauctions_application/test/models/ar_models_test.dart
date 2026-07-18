@@ -64,12 +64,13 @@ void main() {
   });
 
   group('ArAuctionMeta', () {
-    test('parses with a default QR edge', () {
+    test('parses slug and title, rejects non-maps', () {
       final auction = ArAuctionMeta.tryParse(const {
         'slug': 'tfcb',
         'title': 'TFCB Annual',
       });
-      expect(auction!.qrEdgeMm, 12.0);
+      expect(auction!.slug, 'tfcb');
+      expect(auction.title, 'TFCB Annual');
       expect(ArAuctionMeta.tryParse('nope'), isNull);
     });
   });
@@ -100,15 +101,15 @@ void main() {
   });
 
   group('ArFrame', () {
-    test('serializes the observation payload shape', () {
+    test('serializes the angle-only observation payload shape', () {
       final frame = ArFrame(
         frameId: 'f000001',
         capturedAt: DateTime.utc(2026, 7, 17, 12, 30),
         detections: const [
           ArDetection(
             lotPk: 5,
-            rangeM: 1.234567,
             bearingDeg: -12.3456,
+            depressionDeg: 28.912,
             quality: 0.876,
           ),
         ],
@@ -118,9 +119,11 @@ void main() {
       expect(json['captured_at'], '2026-07-17T12:30:00.000Z');
       final d = (json['detections'] as List).single as Map<String, dynamic>;
       expect(d['lot'], 5);
-      expect(d['range_m'], 1.235);
       expect(d['bearing_deg'], -12.35);
+      expect(d['depression_deg'], 28.91);
       expect(d['quality'], 0.88);
+      // No size-derived range — the whole point of the angle-only design.
+      expect(d.containsKey('range_m'), isFalse);
     });
   });
 }

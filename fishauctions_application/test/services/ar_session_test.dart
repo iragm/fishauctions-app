@@ -11,8 +11,8 @@ class _Clock {
   void advance(Duration d) => now = now.add(d);
 }
 
-ArMeasurement _m({double range = 2, double bearing = 0}) =>
-    ArMeasurement(rangeM: range, bearingDeg: bearing, quality: 0.8);
+ArMeasurement _m({double bearing = 0, double depression = 20}) =>
+    ArMeasurement(bearingDeg: bearing, depressionDeg: depression, quality: 0.8);
 
 void main() {
   late _Clock clock;
@@ -85,7 +85,7 @@ void main() {
     });
 
     test('frame ids are unique and payload survives the round trip', () {
-      session.addFrame({1: _m(range: 1.5, bearing: -12.5)});
+      session.addFrame({1: _m(bearing: -12.5, depression: 31.2)});
       clock.advance(ArSessionController.perLotInterval);
       session.addFrame({1: _m()});
       clock.advance(ArSessionController.flushInterval);
@@ -94,8 +94,9 @@ void main() {
       expect(frames.map((f) => f.frameId).toSet(), hasLength(frames.length));
       final d = frames.first.detections.single.toJson();
       expect(d['lot'], 1);
-      expect(d['range_m'], 1.5);
       expect(d['bearing_deg'], -12.5);
+      expect(d['depression_deg'], 31.2);
+      expect(d.containsKey('range_m'), isFalse);
     });
   });
 
@@ -117,10 +118,10 @@ void main() {
     /// The measurement a camera at (2,−3) facing +y takes of a landmark.
     ArMeasurement measureFrom(double lx, double ly) {
       const px = 2.0, py = -3.0, theta = math.pi / 2;
-      final dx = lx - px, dy = ly - py;
       return ArMeasurement(
-        rangeM: math.sqrt(dx * dx + dy * dy),
-        bearingDeg: -wrapRad(math.atan2(dy, dx) - theta) * 180 / math.pi,
+        bearingDeg:
+            -wrapRad(math.atan2(ly - py, lx - px) - theta) * 180 / math.pi,
+        depressionDeg: 25,
         quality: 0.9,
       );
     }
@@ -134,8 +135,11 @@ void main() {
       expect(session.locateState, isA<LocateUnmapped>());
     });
 
-    test('asks for scans until two mapped lots are sighted, then aims', () {
-      session.setLocateTarget(9, positions({1: (0, 0), 2: (4, 0), 9: (2, 1)}));
+    test('asks for scans until three mapped lots are sighted, then aims', () {
+      session.setLocateTarget(
+        9,
+        positions({1: (0, 0), 2: (4, 0), 3: (1, 3), 9: (2, 1)}),
+      );
       expect(session.locateState, isA<LocateNeedScans>());
 
       session.addFrame({1: measureFrom(0, 0)});
@@ -143,7 +147,11 @@ void main() {
       expect(oneFix, isA<LocateNeedScans>());
       expect((oneFix! as LocateNeedScans).fixCount, 1);
 
+      // Two distinct landmarks are not enough for bearing-only resection.
       session.addFrame({2: measureFrom(4, 0)});
+      expect((session.locateState! as LocateNeedScans).fixCount, 2);
+
+      session.addFrame({3: measureFrom(1, 3)});
       final aim = session.locateState;
       expect(aim, isA<LocateAim>());
       // Camera at (2,−3) facing +y; target (2,1) is dead ahead, 4 m out.
@@ -154,8 +162,15 @@ void main() {
 
     test('turning after the solve swings the arrow by the gyro yaw', () {
       session
-        ..setLocateTarget(9, positions({1: (0, 0), 2: (4, 0), 9: (2, 1)}))
-        ..addFrame({1: measureFrom(0, 0), 2: measureFrom(4, 0)});
+        ..setLocateTarget(
+          9,
+          positions({1: (0, 0), 2: (4, 0), 3: (1, 3), 9: (2, 1)}),
+        )
+        ..addFrame({
+          1: measureFrom(0, 0),
+          2: measureFrom(4, 0),
+          3: measureFrom(1, 3),
+        });
       expect(session.locateState, isA<LocateAim>());
       // Turn left 0.5 rad (ccw about gravity, phone upright): the target,
       // previously dead ahead, should now read 0.5 rad to the right.

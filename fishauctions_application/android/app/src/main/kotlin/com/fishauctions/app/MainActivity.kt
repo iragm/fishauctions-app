@@ -1,11 +1,15 @@
 package com.fishauctions.app
 
+import android.content.Context
 import android.content.pm.PackageManager
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
 import android.os.Build
 import com.squareup.sdk.mobilepayments.MobilePaymentsSdk
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import kotlin.math.atan
 
 class MainActivity : FlutterActivity() {
     private val channelName = "com.fishauctions.app/platform"
@@ -17,10 +21,33 @@ class MainActivity : FlutterActivity() {
                 when (call.method) {
                     "getSdkInt" -> result.success(Build.VERSION.SDK_INT)
                     "isTapToPayCapable" -> result.success(isTapToPayCapable())
+                    "getCameraFov" -> result.success(backCameraHorizontalFovDeg())
                     "initializeSquare" -> initializeSquare(call.argument("applicationId"), result)
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    // Horizontal field of view of the back main camera in degrees, or null when
+    // it can't be determined. Derived from the lens focal length and the
+    // physical sensor width (hfov = 2·atan(sensorWidth / 2f)) — the same wide
+    // camera CameraX (mobile_scanner) selects by default. AR lot mode uses it
+    // to compute accurate QR bearings without a hardcoded FOV guess.
+    private fun backCameraHorizontalFovDeg(): Double? = try {
+        val manager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        manager.cameraIdList.asSequence()
+            .map { manager.getCameraCharacteristics(it) }
+            .filter { it.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK }
+            .mapNotNull { chars ->
+                val focal = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+                    ?.firstOrNull() ?: return@mapNotNull null
+                val sensor = chars.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
+                    ?: return@mapNotNull null
+                Math.toDegrees(2.0 * atan(sensor.width / (2.0 * focal)))
+            }
+            .firstOrNull()
+    } catch (e: Throwable) {
+        null
     }
 
     // Whether this device can take a Square Tap to Pay charge: NFC hardware plus

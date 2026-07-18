@@ -1,3 +1,4 @@
+import AVFoundation
 import Flutter
 import SquareMobilePaymentsSDK
 import UIKit
@@ -50,10 +51,26 @@ import UIKit
           applicationId: arguments?["applicationId"] as? String,
           result: result
         )
+      case "getCameraFov":
+        Self.handleGetCameraFov(result: result)
       default:
         result(FlutterMethodNotImplemented)
       }
     }
+  }
+
+  // Horizontal field of view of the back wide camera in degrees, or nil when
+  // unavailable — the same camera mobile_scanner captures with. AR lot mode
+  // uses it to compute accurate QR bearings without a hardcoded FOV guess.
+  private static func handleGetCameraFov(result: FlutterResult) {
+    guard
+      let device = AVCaptureDevice.default(
+        .builtInWideAngleCamera, for: .video, position: .back)
+    else {
+      result(nil)
+      return
+    }
+    result(Double(device.activeFormat.videoFieldOfView))
   }
 
   private static func handleInitializeSquare(applicationId: String?, result: FlutterResult) {

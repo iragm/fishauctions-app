@@ -103,19 +103,10 @@ class ArLotMeta {
 
 /// The `auction` block of `GET ar/lots/`.
 class ArAuctionMeta {
-  const ArAuctionMeta({
-    required this.slug,
-    required this.title,
-    required this.qrEdgeMm,
-  });
+  const ArAuctionMeta({required this.slug, required this.title});
 
   final String slug;
   final String title;
-
-  /// Server-tunable nominal printed QR edge (mm) — the scale reference for
-  /// range estimates. Matches the solver's assumption so client and server
-  /// agree on units.
-  final double qrEdgeMm;
 
   static ArAuctionMeta? tryParse(Object? raw) {
     if (raw is! Map) {
@@ -124,31 +115,37 @@ class ArAuctionMeta {
     return ArAuctionMeta(
       slug: '${raw['slug'] ?? ''}',
       title: '${raw['title'] ?? ''}',
-      qrEdgeMm: (raw['qr_edge_mm'] as num?)?.toDouble() ?? 12.0,
     );
   }
 }
 
 /// One measured detection inside a frame, as POSTed to `ar/observations/`.
+///
+/// Angle-only by design: bearing and gravity-referenced depression are
+/// independent of how large anyone printed their labels, so the solver never
+/// touches QR size. Range is the server's problem (triangulation across
+/// frames + a phone-height prior on depression).
 class ArDetection {
   const ArDetection({
     required this.lotPk,
-    required this.rangeM,
     required this.bearingDeg,
+    required this.depressionDeg,
     required this.quality,
   });
 
   final int lotPk;
-  final double rangeM;
 
   /// Horizontal angle in the camera frame, positive to the right.
   final double bearingDeg;
+
+  /// Angle of the ray below horizontal (positive looking down at a label).
+  final double depressionDeg;
   final double quality; // 0..1
 
   Map<String, dynamic> toJson() => {
     'lot': lotPk,
-    'range_m': double.parse(rangeM.toStringAsFixed(3)),
     'bearing_deg': double.parse(bearingDeg.toStringAsFixed(2)),
+    'depression_deg': double.parse(depressionDeg.toStringAsFixed(2)),
     'quality': double.parse(quality.toStringAsFixed(2)),
   };
 }

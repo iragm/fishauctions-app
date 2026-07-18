@@ -71,11 +71,16 @@ class ArApi {
   /// Uploads a batch of observation frames. Fire-and-forget semantics: any
   /// failure is swallowed (a 404 disables further attempts) — scan overlays
   /// must never stall on telemetry.
+  ///
+  /// [fovHDeg] is the device-reported camera horizontal FOV the bearings were
+  /// computed against, or null when the assumed-FOV fallback was used — the
+  /// server widens its bearing noise model for uncalibrated sessions.
   Future<void> postObservations(
     String auctionSlug,
     String sessionId,
-    List<ArFrame> frames,
-  ) async {
+    List<ArFrame> frames, {
+    double? fovHDeg,
+  }) async {
     if (!_observationsAvailable || frames.isEmpty) {
       return;
     }
@@ -85,6 +90,8 @@ class ArApi {
         data: {
           'auction': auctionSlug,
           'session_id': sessionId,
+          if (fovHDeg != null)
+            'fov_hdeg': double.parse(fovHDeg.toStringAsFixed(1)),
           'frames': [for (final f in frames) f.toJson()],
         },
       );

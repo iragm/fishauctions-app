@@ -49,6 +49,30 @@ class PlatformBridge {
     }
   }
 
+  /// The back camera's horizontal field of view in degrees, or null when the
+  /// platform can't say (no camera, channel error, other platforms).
+  ///
+  /// Both platforms implement it: Android derives it from
+  /// `CameraCharacteristics` (focal length + physical sensor size), iOS reads
+  /// `AVCaptureDevice.videoFieldOfView`. AR lot mode uses it to turn QR pixel
+  /// offsets into accurate bearings instead of assuming a generic FOV; when
+  /// null, the assumed-FOV fallback still works, just ~±15% coarser.
+  static Future<double?> cameraHorizontalFovDeg() async {
+    if (!Platform.isAndroid && !Platform.isIOS) {
+      return null;
+    }
+    try {
+      final fov = await _channel.invokeMethod<double>('getCameraFov');
+      // Reject nonsense so a platform bug degrades to the fallback rather
+      // than poisoning every bearing.
+      return (fov != null && fov > 10 && fov < 160) ? fov : null;
+    } on PlatformException {
+      return null;
+    } on MissingPluginException {
+      return null;
+    }
+  }
+
   /// Initializes the Square Mobile Payments SDK with [applicationId] (the
   /// deployment's Square Application ID, from `/api/mobile/config/`). Must run
   /// once before any authorize()/charge() call — the Square Flutter plugin

@@ -12,6 +12,7 @@ import '../services/ar_api.dart';
 import '../services/ar_session.dart';
 import '../utils/ar_geometry.dart';
 import '../utils/lot_qr.dart';
+import '../utils/platform_bridge.dart';
 
 /// AR lot mode: a live camera view that recognizes lot-label QR codes and
 /// overlays what they are. Reached from the web's app-only buttons —
@@ -23,11 +24,14 @@ import '../utils/lot_qr.dart';
 ///  * One label centered and close → a card with the lot photo, the custom
 ///    fields its auction prints on labels, and an "open lot page" button
 ///    (pops back to the WebView with `?src=ar`, which records the scan).
-///  * Every sighting is measured (range/bearing from the QR's corner quad +
-///    gravity) and batched to the backend, which fuses everyone's scans into
-///    the per-auction lot map (BACKEND_SPEC.md Part 3).
-///  * Locate mode aims the user at a target lot once the phone has oriented
-///    itself off two mapped labels; until then it asks for more scans.
+///  * Every sighting is measured — angles only (bearing + gravity-referenced
+///    depression from the QR's corner quad; printed label size is deliberately
+///    irrelevant) — and batched to the backend, which triangulates everyone's
+///    scans into the per-auction lot map (BACKEND_SPEC.md Part 3).
+///  * Locate mode: once ≥3 mapped labels have been sighted the phone resects
+///    its own pose for a compass arrow, and whenever mapped labels are on
+///    screen the target is pinned directly in the camera view (ghost marker,
+///    projected off its visible neighbors); until then it asks for scans.
 ///
 /// Degrades gracefully against a backend without Part 3: chips fall back to
 /// `Lot <pk>` stubs, observation uploads switch off, locate mode reports the
@@ -74,6 +78,10 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
   MobileScannerController? _scanner;
   late final ArSessionController _session;
 
+  /// Device-reported camera horizontal FOV, or null on the assumed-FOV
+  /// fallback. Fetched once; bearings and the observation POST both carry it.
+  double? _deviceHFov;
+
   final Map<int, _VisibleLot> _visible = {};
   final Map<int, ArLotMeta> _meta = {};
   final Set<int> _metaPending = {};
@@ -103,6 +111,7 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
         widget.auctionSlug,
         sessionId,
         frames,
+        fovHDeg: _deviceHFov,
       ),
     );
     _initCamera();
@@ -124,13 +133,21 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
       );
       return;
     }
-    // Higher than the 640×480 Android default: a ~1–2 cm printed QR needs the
-    // pixels to decode beyond arm's length. (Android-only knob; iOS Vision
-    // picks its own buffer.)
+    // Real intrinsics when the device will say — turns QR pixel offsets into
+    // accurate bearings instead of the assumed-FOV guess.
+    _deviceHFov = await PlatformBridge.cameraHorizontalFovDeg();
+    if (!mounted) {
+      return;
+    }
+    // Well above the 640×480 Android default: decode range for a small
+    // printed QR scales linearly with resolution, and this is what limits
+    // how far away labels can be recognized. (Android-only knob; iOS Vision
+    // picks its own buffer.) Costs detection frame rate on older phones —
+    // acceptable at the ~4 Hz this screen needs.
     _scanner = MobileScannerController(
       formats: const [BarcodeFormat.qrCode],
       detectionSpeed: DetectionSpeed.unrestricted,
-      cameraResolution: const Size(1920, 1080),
+      cameraResolution: const Size(2560, 1440),
     );
     _accelSub =
         accelerometerEventStream(
@@ -213,8 +230,8 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
       final measurement = estimateMeasurement(
         sighting: sighting,
         imageSize: imageSize,
-        qrEdgeMm: _auction?.qrEdgeMm ?? 12.0,
         pitchDownRad: _session.pitchDownRad,
+        deviceHFovDeg: _deviceHFov,
       );
       measurements[pk] = measurement;
       seen[pk] = _VisibleLot(
@@ -406,6 +423,7 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
     builder: (context, constraints) {
       final widgetSize = constraints.biggest;
       final cardMeta = _cardPk == null ? null : _metaFor(_cardPk!);
+      final ghost = _buildGhost(widgetSize);
       return Stack(
         fit: StackFit.expand,
         children: [
@@ -421,6 +439,7 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
                 const ColoredBox(color: Colors.black),
           ),
           ..._buildMarkers(widgetSize),
+          ?ghost,
           if (_locate case final locate?)
             Positioned(
               top: 8,
@@ -431,6 +450,7 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
                 targetVisible:
                     widget.locateLotPk != null &&
                     _visible.containsKey(widget.locateLotPk),
+                ghostActive: ghost != null,
               ),
             ),
           if (cardMeta != null)
@@ -462,6 +482,75 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
       );
     },
   );
+
+  /// The locate-mode ghost marker: the target's map position projected
+  /// through a transform fitted from the mapped lots on screen right now
+  /// (`fitMapToImage`). This pins the target *relative to its visible
+  /// neighbors* — no pose solve, no ranges, centimeter-class when ≥3 mapped
+  /// labels are in frame. Off-screen projections become an edge arrow.
+  Widget? _buildGhost(Size widgetSize) {
+    final targetPk = widget.locateLotPk;
+    if (targetPk == null || _visible.containsKey(targetPk)) {
+      return null; // the real (highlighted) chip beats a projection
+    }
+    final target = _session.targetPosition;
+    if (target == null) {
+      return null;
+    }
+    final pairs = <(Offset, Offset)>[
+      for (final entry in _visible.entries)
+        if (_session.positionOf(entry.key) case final p?)
+          (
+            Offset(p.x, p.y),
+            mapImagePointToWidget(
+              entry.value.center,
+              entry.value.imageSize,
+              widgetSize,
+            ),
+          ),
+    ];
+    final projected = fitMapToImage(pairs)?.project(Offset(target.x, target.y));
+    if (projected == null) {
+      return null;
+    }
+    final inset = Rect.fromLTWH(
+      24,
+      24,
+      widgetSize.width - 48,
+      widgetSize.height - 48,
+    );
+    if (inset.contains(projected)) {
+      return Positioned(
+        left: projected.dx,
+        top: projected.dy,
+        child: FractionalTranslation(
+          translation: const Offset(-0.5, -1),
+          child: _GhostMarker(label: _metaFor(targetPk).displayName),
+        ),
+      );
+    }
+    // Projected outside the view: an edge arrow pointing the pan direction.
+    final clamped = Offset(
+      projected.dx.clamp(inset.left, inset.right),
+      projected.dy.clamp(inset.top, inset.bottom),
+    );
+    final dir = projected - clamped;
+    return Positioned(
+      left: clamped.dx,
+      top: clamped.dy,
+      child: FractionalTranslation(
+        translation: const Offset(-0.5, -0.5),
+        child: Transform.rotate(
+          angle: math.atan2(dir.dy, dir.dx),
+          child: const Icon(
+            Icons.arrow_circle_right,
+            color: Colors.lightBlueAccent,
+            size: 40,
+          ),
+        ),
+      ),
+    );
+  }
 
   List<Widget> _buildMarkers(Size widgetSize) {
     final compact = _visible.length > _maxNamedChips;
@@ -603,15 +692,56 @@ class _LotMarker extends StatelessWidget {
   }
 }
 
+/// The locate-mode target pin: where the target lot should be, projected
+/// from its mapped neighbors currently on screen.
+class _GhostMarker extends StatelessWidget {
+  const _GhostMarker({required this.label});
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        decoration: BoxDecoration(
+          color: Colors.lightBlueAccent.withValues(alpha: 0.9),
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: Text(
+          label,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(
+            color: Colors.black,
+            fontSize: 13,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      ),
+      const Icon(Icons.location_on, color: Colors.lightBlueAccent, size: 40),
+    ],
+  );
+}
+
 /// Locate-mode guidance banner.
 class _LocateBanner extends StatelessWidget {
-  const _LocateBanner({required this.state, required this.targetVisible});
+  const _LocateBanner({
+    required this.state,
+    required this.targetVisible,
+    required this.ghostActive,
+  });
 
   final LocateState state;
   final bool targetVisible;
 
-  /// Sub-meter precision would be a lie given the ±20% range scale; one
-  /// decimal close up, whole meters beyond.
+  /// True when the ghost marker (or its edge arrow) is being drawn — the
+  /// projection has taken over from the coarse compass guidance.
+  final bool ghostActive;
+
+  /// The map's scale is approximate (it comes from a phone-height prior, not
+  /// measured ranges), so: one decimal close up, whole meters beyond.
   static String _formatDistance(double distanceM) =>
       distanceM < 3 ? distanceM.toStringAsFixed(1) : '${distanceM.round()}';
 
@@ -625,8 +755,11 @@ class _LocateBanner extends StatelessWidget {
       ),
       LocateNeedScans(:final fixCount) => (
         const Icon(Icons.explore, color: Colors.white),
-        'Scan lot labels around you so I can figure out where you are '
-            '($fixCount/2).',
+        ghostActive
+            ? 'Follow the blue pin — it marks where your lot should be.'
+            : 'Scan lot labels around you — a few spread apart — so I can '
+                  'figure out where you are '
+                  '($fixCount/${LocateNeedScans.required}).',
       ),
       LocateAim(:final bearingRightRad, :final distanceM) => (
         Transform.rotate(
@@ -639,6 +772,8 @@ class _LocateBanner extends StatelessWidget {
         ),
         targetVisible
             ? "It's in view — look for the highlighted label!"
+            : ghostActive
+            ? 'The blue pin marks where your lot should be.'
             : 'About ${_formatDistance(distanceM)} m away. Keep scanning '
                   'labels as you go to stay oriented.',
       ),
