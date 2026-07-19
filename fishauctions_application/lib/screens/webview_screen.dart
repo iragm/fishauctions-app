@@ -27,6 +27,8 @@ import '../services/bluetooth_service.dart';
 import '../services/download_service.dart';
 import '../services/label_prefs_service.dart';
 import '../services/location_service.dart';
+import '../services/offline_store.dart';
+import '../services/offline_sync_service.dart';
 import '../services/push_service.dart';
 import '../services/shortcut_service.dart';
 import '../services/square_payment_service.dart';
@@ -113,6 +115,11 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     // Bring up push (FCM) once config is known — inert unless this deployment
     // configured push for this exact build. Off the critical path too.
     unawaited(_warmPush());
+    // Keep an offline copy of the operator's last admin auction warm
+    // (periodic snapshot pulls), and drain any changes queued while offline.
+    // Conflicts the server reports surface as a snackbar.
+    OfflineSyncService.instance.newConflicts.addListener(_onOfflineConflicts);
+    OfflineSyncService.instance.start();
   }
 
   /// Loads `/api/mobile/config/` and initializes the Square SDK with the
@@ -236,8 +243,36 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     ShortcutService.instance.pending.removeListener(_onShortcutTapped);
     PushService.instance.pendingRoute.removeListener(_onPushRoute);
     PushService.instance.foregroundMessage.removeListener(_onForegroundPush);
+    OfflineSyncService.instance.newConflicts.removeListener(
+      _onOfflineConflicts,
+    );
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
+  }
+
+  /// A sync push came back with rejected ops (lot sold to someone else on the
+  /// server, a conflicting user, a closed invoice…). Surface it immediately —
+  /// the whole point of conflict handling is that nothing goes out of sync
+  /// silently. Details live on the offline screen.
+  void _onOfflineConflicts() {
+    final conflicts = OfflineSyncService.instance.consumeNewConflicts();
+    if (conflicts.isEmpty || !mounted) {
+      return;
+    }
+    final n = conflicts.length;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        duration: const Duration(seconds: 8),
+        content: Text(
+          '$n offline change${n == 1 ? '' : 's'} couldn\'t sync — the '
+          'server\'s copy was kept',
+        ),
+        action: SnackBarAction(
+          label: 'View',
+          onPressed: () => context.push('/offline'),
+        ),
+      ),
+    );
   }
 
   /// A quick action fired while this screen exists. Before the WebView is
@@ -310,6 +345,9 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     // would be jarring mid-browse). Never prompts here.
     if (state == AppLifecycleState.resumed) {
       _applyLocation(prompt: false);
+      // The offline snapshot may be minutes stale — refresh it (and drain any
+      // queued changes) now that we're likely back on a network.
+      OfflineSyncService.instance.onAppResumed();
     }
   }
 
@@ -421,6 +459,52 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       ScaffoldMessenger.of(context).hideCurrentMaterialBanner();
       setState(() => _loading = true);
     }
+  }
+
+  /// A main-frame page failed to load — usually no connectivity. Offer the
+  /// native offline fallback when there's offline auction data to fall back
+  /// on; otherwise just offer a retry. This is the "connection lost mid-
+  /// auction" entry point into offline mode.
+  void _onLoadError(
+    InAppWebViewController controller,
+    WebResourceRequest request,
+    WebResourceError error,
+  ) {
+    if (!(request.isForMainFrame ?? true) || !mounted) {
+      return;
+    }
+    setState(() => _loading = false);
+    final hasOffline = OfflineStore.instance.hasData;
+    final messenger = ScaffoldMessenger.of(context)
+      ..hideCurrentMaterialBanner();
+    messenger.showMaterialBanner(
+      MaterialBanner(
+        leading: const Icon(Icons.cloud_off),
+        content: Text(
+          hasOffline
+              ? 'Can\'t reach the server. You can keep running your auction '
+                    'offline — changes sync back automatically.'
+              : 'Can\'t reach the server.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              messenger.hideCurrentMaterialBanner();
+              _controller?.reload();
+            },
+            child: const Text('Retry'),
+          ),
+          if (hasOffline)
+            TextButton(
+              onPressed: () {
+                messenger.hideCurrentMaterialBanner();
+                context.push('/offline');
+              },
+              child: const Text('Offline mode'),
+            ),
+        ],
+      ),
+    );
   }
 
   Future<void> _onLoadStop(
@@ -929,6 +1013,7 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
               children: [
                 _navTile(ctx, Icons.gavel, 'Auctions', '/auctions/'),
                 _navTile(ctx, Icons.grid_view, 'Lots', '/lots/all/'),
+                _offlineModeTile(ctx),
                 _clubsTile(ctx),
                 // The full account menu, mirroring the website navbar.
                 const Divider(),
@@ -1007,6 +1092,28 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
         ],
       ),
     ),
+  );
+
+  /// The drawer's "Offline mode" entry — the native users/lots/set-winners
+  /// screens that keep an in-person auction running with no connection.
+  /// Only shown once a snapshot of the operator's last admin auction exists
+  /// (non-admins never see it). Rebuilds live because the first snapshot can
+  /// land while the drawer is open.
+  Widget _offlineModeTile(BuildContext ctx) => ListenableBuilder(
+    listenable: OfflineStore.instance,
+    builder: (_, _) {
+      if (!OfflineStore.instance.hasData) {
+        return const SizedBox.shrink();
+      }
+      return ListTile(
+        leading: const Icon(Icons.cloud_off),
+        title: const Text('Offline mode'),
+        onTap: () {
+          Navigator.of(ctx).pop();
+          context.push('/offline');
+        },
+      );
+    },
   );
 
   /// The drawer's "Clubs" entry. Signed in with memberships → an expandable
@@ -1116,6 +1223,7 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
               onWebViewCreated: (c) => unawaited(_onWebViewCreated(c)),
               onLoadStart: _onLoadStart,
               onLoadStop: (c, url) => unawaited(_onLoadStop(c, url)),
+              onReceivedError: _onLoadError,
               shouldOverrideUrlLoading: _shouldOverrideUrlLoading,
               onCreateWindow: _onCreateWindow,
               onDownloadStarting: _onDownloadStart,

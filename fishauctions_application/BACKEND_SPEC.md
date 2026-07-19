@@ -1,4 +1,4 @@
-# Backend Spec — Web-Configurable Printing, Push Notifications & AR Lot Mapping
+# Backend Spec — Web-Configurable Printing, Push Notifications, AR Lot Mapping & Offline Sync
 
 Handoff spec for `iragm/fishauctions` (the Django backend). The Flutter app work is
 tracked separately in this repo; this document is everything the *backend* needs so
@@ -37,6 +37,10 @@ and the app ships real FCM tokens (see `PUSH.md`).
 
 **Part 3 (AR lot scanning & location mapping, below) is the largest
 outstanding work** — nothing from it exists on the backend yet.
+
+**Part 4 (offline auction management, below) is new and entirely
+unimplemented** — the app side ships first and degrades gracefully (offline
+mode simply reports "no offline data yet" until the snapshot endpoint exists).
 
 ---
 
@@ -994,3 +998,182 @@ shows, plus the caller's own watch/recommendation state.
   metric scale for a synthetic standing-height session.
 - Web: map page + data + clear are admin-only (403 for a buyer); clear wipes
   both tables; `number_of_lots_with_scanned_qr` counts `src=ar` PageViews.
+
+---
+
+# Part 4 — Offline Auction Management (offline lot selling)
+
+## Product requirements (recap)
+
+- When the app loses its connection mid-auction (or the server errors), an
+  auction admin must be able to **keep running the in-person sale**: see all
+  users with their total bought, add a user, add lots for a user, and set lot
+  winners — completely offline, as native Flutter screens that mirror the web
+  layout (`/auctions/<slug>/users/`, the add-user modal, bulk add lots, and
+  `/lots/set-winners/`).
+- Scope is deliberately tiny: **no invoice math** (the offline "total bought"
+  is just Σ winning_price of lots the user won), **no lot images**, no
+  offline auction creation, no edits/deletes of existing rows. Add-only plus
+  set-winner.
+- This only works for the caller's **last admin auction**. While online, the
+  app periodically pulls a compact snapshot of it. Offline changes queue
+  locally and push automatically when the connection returns, with a **clear
+  notification when something is out of sync** (lot already sold to a
+  different winner on the server, a conflicting user, an invoice already
+  paid server-side) — the server copy always wins; nothing is silently
+  overwritten.
+
+Division of labor, same as Parts 1–3: the app is a dumb queue + display. All
+validation, id assignment, and conflict rules are server-side; the app only
+re-implements the *minimum* validation needed to be useful with no network
+(lot exists, bidder exists, lot not already sold — against its local data).
+
+## 4.1 Endpoints
+
+Both under `/api/mobile/`, JWT auth, implemented in `auctions/mobile/`.
+
+### GET /api/mobile/offline/snapshot/
+
+Returns the caller's last admin auction and everything the offline screens
+need. "Last admin auction": `userdata.last_auction_used` if the caller passes
+`auction.permission_check(user)` for it, otherwise the most recent (by
+`date_start`) non-deleted auction the caller can administer; `None` when they
+administer nothing.
+
+```json
+200 {
+  "auction": {
+    "slug": "club-auction-2026",
+    "title": "Club Auction 2026",
+    "currency_symbol": "$",
+    "use_seller_dash_lot_numbering": false,
+    "only_whole_dollar_bids": true,
+    "date_start": "2026-07-18T14:00:00Z"
+  },
+  "users": [
+    {"pk": 12, "bidder_number": "14", "name": "Ada B", "email": "a@b.c",
+     "phone_number": "555-1234", "invoice_status": "DRAFT"}
+  ],
+  "lots": [
+    {"pk": 901, "lot_number": "55", "lot_name": "Apisto pair", "quantity": 1,
+     "donation": false, "seller_pk": 12, "winner_pk": null,
+     "winning_price": null, "active": true}
+  ],
+  "generated_at": "2026-07-18T15:04:05Z"
+}
+```
+
+- `"auction": null` (still 200) when the caller administers no auction — a
+  real 404 means the deployment doesn't have this endpoint yet, and the app
+  disables offline mode for the process (ArApi-style degradation).
+- `users`: every non-deleted `AuctionTOS` of the auction, ordered by name
+  (matches the web users page). `invoice_status` is the user's invoice status
+  (`DRAFT`/`UNPAID`/`PAID`) or `NONE` when they have no invoice yet.
+- `lots`: every lot in the auction except `is_deleted`/`banned` ones.
+  `lot_number` is the **display** number as a string (`lot_number_display` —
+  `custom_lot_number` in `use_seller_dash_lot_numbering` auctions,
+  `lot_number_int` otherwise). `winning_price` is a decimal string or null.
+- No pagination — this is a bounded per-auction payload with no images;
+  a few thousand lots is a few hundred KB of JSON.
+
+### POST /api/mobile/offline/sync/
+
+Applies a batch of queued offline operations **in order**, idempotently, and
+returns per-op results plus a fresh snapshot (so one round trip both drains
+the queue and refreshes the phone).
+
+```json
+{
+  "auction": "club-auction-2026",
+  "ops": [
+    {"op_id": "3fa8…", "type": "add_user", "bidder_number": "58",
+     "name": "New Guy", "email": "", "phone_number": ""},
+    {"op_id": "9bc1…", "type": "add_lot", "seller": "58",
+     "lot_number": "301", "lot_name": "Bag of plants", "quantity": 1,
+     "donation": false},
+    {"op_id": "77d2…", "type": "set_winner", "lot": "301", "winner": "14",
+     "winning_price": "12.00"},
+    {"op_id": "a1f0…", "type": "set_winner", "lot": "302", "unsold": true}
+  ]
+}
+```
+
+Referencing rules (no server pks exist for offline-created rows):
+
+- Users are referenced by `bidder_number`. The app assigns offline-created
+  users a concrete free bidder number immediately (max numeric + 1) so the
+  admin can tell the person their number and sell to it — that requested
+  number rides along in `add_user.bidder_number`.
+- Lots are referenced by display `lot_number`; same deal — the app assigns
+  offline-added lots the next free number and sends it as
+  `add_lot.lot_number`. A reference of the form `"op:<op_id>"` is also
+  accepted anywhere a bidder/lot number is, resolving to the row created by
+  an earlier op in the same or a previous batch.
+
+Response:
+
+```json
+200 {
+  "results": [
+    {"op_id": "3fa8…", "status": "applied", "bidder_number": "58"},
+    {"op_id": "9bc1…", "status": "applied", "lot_number": "301"},
+    {"op_id": "77d2…", "status": "conflict", "conflict": "winner_conflict",
+     "message": "Lot 301 was already sold to bidder 9 for $10.00 on the server"},
+    {"op_id": "a1f0…", "status": "already_applied"}
+  ],
+  "snapshot": { …same shape as GET snapshot… }
+}
+```
+
+- **Idempotency:** persist applied `op_id`s (a small `MobileOfflineOp` row:
+  `op_id` unique, auction, user, created_at, resulting pk). A retried op —
+  the phone resends the whole queue after a dropped response — returns
+  `already_applied` with the original result fields instead of duplicating.
+- **Per-op status**, never all-or-nothing: later ops still apply when an
+  earlier one conflicts (except ops that *reference* a conflicted op's row,
+  which return `conflict: "not_found"`).
+- `status: "applied"` echoes the final `bidder_number` / `lot_number` — the
+  server honors the requested number when free, otherwise assigns the next
+  free one and the echo tells the app the remap.
+
+Op semantics + conflict rules (server-authoritative; the server copy always
+wins — a conflicted op is **not** applied, and the admin resolves it on the
+website):
+
+- `add_user` → creates an `AuctionTOS` (`manually_added=True`, the auction's
+  default pickup location, same as the web add-user modal). If the requested
+  `bidder_number` already exists with the **same** name (case-insensitive) it
+  is the same person double-entered → `already_applied`. Same number,
+  **different** name → `conflict: "user_conflict"` ("conflicting users" —
+  someone claimed that number on the server meanwhile).
+- `add_lot` → creates a `Lot` for the seller (mirrors `BulkAddLots.post`:
+  sets `auctiontos_seller`, `auction`, `user`/`added_by`, then
+  `invoice.recalculate()`). Seller not resolvable → `conflict: "not_found"`.
+  Seller's invoice not `DRAFT` → `conflict: "invoice_not_open"` (the
+  "invoice already paid on the server but different locally" case).
+- `set_winner` → mirrors `DynamicSetLotWinner.set_winner` / `end_unsold`
+  including `LotHistory`, websocket message, and check-in side effects.
+  Validation mirrors the web view: lot not found / winner not found →
+  `conflict: "not_found"`; seller or winner invoice not `DRAFT` →
+  `conflict: "invoice_not_open"`; lot already has a winner+price on the
+  server → `already_applied` when it's the **same** winner and price,
+  `conflict: "winner_conflict"` when different (message must name the server
+  winner and price so the notification is actionable). `unsold: true` on a
+  lot the server sold meanwhile → `winner_conflict` too.
+- Every applied op writes the same `AuctionHistory` entries the web
+  equivalents write, attributed to the syncing admin.
+
+Permission: caller must pass `auction.permission_check(user)` for the named
+auction; 403 otherwise. Cap `ops` at 500 per call (the app chunks).
+
+## 4.2 Tests to ship with the backend changes
+
+- snapshot: JWT required; non-admin → `auction: null`; admin gets users
+  ordered by name, banned/deleted lots excluded, display lot numbers in both
+  numbering modes, invoice statuses right.
+- sync: idempotent replay returns `already_applied` with original numbers;
+  requested bidder/lot number honored when free, remapped + echoed when
+  taken; `op:<id>` references resolve across batches; the four conflict
+  rules above each produce their status + message and do **not** mutate the
+  server row; per-op independence (op 2 conflicts, op 3 still applies);
+  non-admin → 403; >500 ops → 400.

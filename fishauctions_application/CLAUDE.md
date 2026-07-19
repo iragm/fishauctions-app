@@ -153,6 +153,33 @@ Part 3 (models, scipy solver, endpoints, web buttons, admin map). The app
 degrades gracefully meanwhile: pk-only overlay chips, observation upload
 disables itself on 404, locate mode reports lots as unmapped.
 
+### Offline Auction Management
+
+Native mirrors of the web users / bulk-add-lots / set-winners pages
+(`offline_users_screen.dart` + add-user/add-lots/set-winners screens) that
+keep an **in-person auction running with no connection**, for the operator's
+**last admin auction only** (no offline auction creation, no invoice math, no
+images). While online, `OfflineSyncService` periodically pulls a compact
+snapshot (users + lots) into `OfflineStore` (two JSON files in the app
+documents dir); changes made offline queue as idempotent ops (client UUIDs;
+offline-created rows are referenced `op:<uuid>` so server renumbering can't
+misroute later ops) and push automatically when the connection returns.
+Conflicts (lot sold to a different winner on the server, duplicate user,
+invoice already closed) are **never silently overwritten — the server copy
+wins** and the rejected op surfaces as a notification (shell snackbar + red
+banner on the offline screens). Entry points: drawer "Offline mode" tile
+(shown once a snapshot exists) and the WebView's page-load-failure banner;
+sign-out wipes the offline files.
+
+```
+GET  /api/mobile/offline/snapshot/   # last admin auction: users + lots
+POST /api/mobile/offline/sync/       # replay queued ops, per-op results + fresh snapshot
+```
+
+**Backend status: NOT implemented yet** — full contract in `BACKEND_SPEC.md`
+Part 4. Until it lands the app degrades gracefully: a 404 disables sync for
+the process and offline mode just reports "no offline data yet".
+
 ### Payments (Square Tap to Pay)
 
 Uses the official **`square_mobile_payments_sdk`** Flutter plugin (the Mobile
@@ -251,6 +278,10 @@ verifies the app compiles and links.
 - ~~Printing backend endpoints~~ — landed (`printers/profiles/`, `labels/prefs/`, `labels/<pk>/?fmt=pdf`, `UserLabelPrefs.print_method`, the `/printing/` page's dropdown + BT card are live on staging). The app still degrades gracefully when offline: bundled printer profiles, print method defaults to PDF, prefs fetch returns null.
 - **Push notifications:** the backend side of `BACKEND_SPEC.md` Part 2 is **implemented** (`auctions/notifications.py` notify_user choke point, `send_push_to_user` + `promo_push_notifications` tasks, `UserData.push_notifications_instead_of_email`, `PushNotificationSent`, firebase-admin) but inert by design until (a) `FIREBASE_CREDENTIALS_JSON` is set on the deployment and (b) devices report real FCM tokens. App plumbing exists (`fcm_token` sent on device registration when present, `devices/unregister/` called on sign-out) but `PushService.currentToken()` is a stub returning null until a Firebase project + `firebase_messaging` are wired (the plan delivers the public Firebase client config via `/api/mobile/config/`, not a bundled `google-services.json`). Until both land, every notification falls back to email (`user_prefers_push()` is false for everyone). **Full setup checklist + config-endpoint decision: `PUSH.md`.**
 - **Square Tap to Pay (runtime):** Backend endpoints are done; charging still needs a real NFC device on API 31+ and Square production approval (sandbox works for the full flow). Not exercisable in CI.
+- **Offline sync backend:** the app side (store, sync service, offline
+  screens) is implemented; the two `/api/mobile/offline/*` endpoints and their
+  conflict/idempotency rules are specced in `BACKEND_SPEC.md` Part 4 and not
+  yet implemented. Until then offline mode shows "no offline data yet".
 - **AR lot mode backend:** the app side is implemented; the entire backend half — `LotObservation`/`LotPosition` models, the scipy position solver + Celery task, the three `/api/mobile/ar/*` endpoints, the app-only "AR Lots"/"Locate with AR" template buttons, the `src=ar` scan-count tweak, and the admin lot-map page — is specced in `BACKEND_SPEC.md` Part 3 and not yet implemented. Until it lands, AR mode runs in degraded pk-only overlay mode and no positions accumulate.
 - **Release signing:** wired in CI (keystore from repo secrets; the release workflow refuses to build unsigned). *Local* `flutter build --release` still falls back to debug signing unless you create `android/key.properties` yourself.
 

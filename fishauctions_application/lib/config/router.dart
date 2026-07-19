@@ -6,6 +6,10 @@ import '../providers/auth_provider.dart';
 import '../screens/allauth_web_screen.dart';
 import '../screens/ar_lots_screen.dart';
 import '../screens/login_screen.dart';
+import '../screens/offline_add_lots_screen.dart';
+import '../screens/offline_add_user_screen.dart';
+import '../screens/offline_set_winners_screen.dart';
+import '../screens/offline_users_screen.dart';
 import '../screens/print_label_screen.dart';
 import '../screens/splash_screen.dart';
 import '../screens/webview_screen.dart';
@@ -92,6 +96,28 @@ final routerProvider = Provider<GoRouter>((ref) {
           auctionSlug: state.pathParameters['auctionSlug']!,
           locateLotPk: int.tryParse(state.uri.queryParameters['locate'] ?? ''),
         ),
+      ),
+      // Offline auction management — native mirrors of the web users /
+      // add-lots / set-winners pages, running entirely from the local
+      // snapshot of the operator's last admin auction (BACKEND_SPEC.md
+      // Part 4). Reached from the drawer and the WebView's can't-reach-
+      // the-server banner.
+      GoRoute(
+        path: '/offline',
+        builder: (context, state) => const OfflineUsersScreen(),
+      ),
+      GoRoute(
+        path: '/offline/add-user',
+        builder: (context, state) => const OfflineAddUserScreen(),
+      ),
+      GoRoute(
+        path: '/offline/add-lots/:userKey',
+        builder: (context, state) =>
+            OfflineAddLotsScreen(userKey: state.pathParameters['userKey']!),
+      ),
+      GoRoute(
+        path: '/offline/set-winners',
+        builder: (context, state) => const OfflineSetWinnersScreen(),
       ),
     ],
   );

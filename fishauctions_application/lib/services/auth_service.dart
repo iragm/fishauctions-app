@@ -7,6 +7,7 @@ import '../models/auth_models.dart';
 import '../utils/device_identity.dart';
 import '../utils/secure_storage.dart';
 import 'api_service.dart';
+import 'offline_sync_service.dart';
 import 'push_service.dart';
 import 'social_auth_service.dart';
 import 'square_payment_service.dart';
@@ -92,6 +93,9 @@ class AuthService {
     // showing the previous user's "invoice ready" is a privacy bug. Must run
     // while the JWT still exists; best-effort beyond that.
     await unregisterThisDevice();
+    // Offline auction data (and any still-unsynced changes) belong to this
+    // account — the next sign-in must not inherit them.
+    await OfflineSyncService.instance.stopAndClear();
     await _api.clearTokens();
     await _storage.delete(key: _keyCachedUser);
   }
