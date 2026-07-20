@@ -18,8 +18,8 @@ dependencies:
   # runtime via /api/mobile/config/ and passed to Firebase.initializeApp — no
   # bundled google-services.json, so one binary still serves any deployment
   # (see PushService + PUSH.md). No google-services Gradle plugin is applied.
-  firebase_core: ^3.8.0
-  firebase_messaging: ^15.1.6
+  firebase_core: ^4.12.1
+  firebase_messaging: ^16.4.3
   flutter:
     sdk: flutter
   # Bluetooth Low Energy — thermal label printing on iOS + Android. BLE (not
