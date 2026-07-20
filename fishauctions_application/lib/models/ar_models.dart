@@ -157,15 +157,26 @@ class ArFrame {
     required this.frameId,
     required this.capturedAt,
     required this.detections,
+    this.yawDeg,
   });
 
   final String frameId;
   final DateTime capturedAt;
   final List<ArDetection> detections;
 
+  /// Integrated gyro heading at capture, degrees ccw-positive about gravity,
+  /// zero at session start. Lets the solver chain frames that saw only one
+  /// label each (walking a room scanning one QR at a time) into real
+  /// geometry: without it each frame's heading is a free unknown and
+  /// single-detection frames constrain nothing but a range circle. Null when
+  /// the device delivered no gyro data — absence must mean "unknown", never
+  /// "didn't turn". Drift handling is the server's problem (it knows Δt).
+  final double? yawDeg;
+
   Map<String, dynamic> toJson() => {
     'frame_id': frameId,
     'captured_at': capturedAt.toUtc().toIso8601String(),
+    if (yawDeg case final yaw?) 'yaw_deg': double.parse(yaw.toStringAsFixed(2)),
     'detections': [for (final d in detections) d.toJson()],
   };
 }
@@ -178,12 +189,20 @@ class ArLotPosition {
     required this.x,
     required this.y,
     required this.confidence,
+    this.component,
   });
 
   final int lotPk;
   final double x;
   final double y;
   final double confidence;
+
+  /// Connectivity-island id from the solver. Positions in different
+  /// components share no observations, so their coordinates are *not* in a
+  /// common frame — locate mode must never mix them (aiming at a component-B
+  /// target from component-A landmarks gives a confident wrong arrow). Null
+  /// on backends that predate island labeling (treated as one component).
+  final int? component;
 
   static ArLotPosition? tryParse(Object? raw) {
     if (raw is! Map) {
@@ -200,6 +219,7 @@ class ArLotPosition {
       x: x,
       y: y,
       confidence: (raw['confidence'] as num?)?.toDouble() ?? 0,
+      component: (raw['component'] as num?)?.toInt(),
     );
   }
 }

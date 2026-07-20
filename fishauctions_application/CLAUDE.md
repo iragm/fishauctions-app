@@ -148,10 +148,17 @@ POST /api/mobile/ar/observations/                     # measured sightings
 GET  /api/mobile/ar/positions/?auction=<slug>         # solved lot positions
 ```
 
-**Backend status: NOT implemented yet** — full contract in `BACKEND_SPEC.md`
-Part 3 (models, scipy solver, endpoints, web buttons, admin map). The app
-degrades gracefully meanwhile: pk-only overlay chips, observation upload
-disables itself on 404, locate mode reports lots as unmapped.
+**Backend status: v1 implemented** on `iragm/fishauctions` (models, scipy
+solver in `auctions/ar_mapping.py`, the three endpoints, 60 s beat task). The
+app still degrades gracefully on deployments without it: pk-only overlay
+chips, observation upload disables itself on 404, locate mode reports lots as
+unmapped. **v2 is specced in `BACKEND_SPEC.md` Part 5** and not yet
+implemented: per-frame gyro `yaw_deg` (the app already sends it) as heading
+odometry so single-QR-at-a-time sweeps chain across tables, plus island
+(connected-component) detection/labeling/merging — v1 cannot relate lots that
+were never co-visible in a frame, and overlaps unconnected islands at the
+origin. The app already parses `component` on positions rows and refuses
+cross-island locate fixes/ghost anchors.
 
 ### Offline Auction Management
 
@@ -176,9 +183,31 @@ GET  /api/mobile/offline/snapshot/   # last admin auction: users + lots
 POST /api/mobile/offline/sync/       # replay queued ops, per-op results + fresh snapshot
 ```
 
+**Backend status: implemented** on `iragm/fishauctions` (both endpoints live
+in `auctions/mobile/`). The app still degrades gracefully on deployments
+without them: a 404 disables sync for the process and offline mode reports
+"no offline data yet".
+
+### Proximity Check-in ("welcome to the auction")
+
+While the shell is up, `CheckinService` POSTs the phone's position (only when
+location permission already exists — it never prompts) at mount/resume and
+every 10 min; the server decides whether the user just arrived at an
+in-person auction and returns display-ready actions the shell surfaces:
+join offer (bottom sheet: Join without rules-scrolling → lands on rules
+page), auto-check-in confirmation (snackbar), and the admin "set location for
+this auction from my phone" dialog (auctions with `exact_location_set`
+false). All copy comes from the server; unknown action types are ignored.
+
+```
+POST /api/mobile/checkin/ping/           # {latitude, longitude} → {actions: [...]}
+POST /api/mobile/checkin/join/           # join + auto-checkin, returns rules_url
+POST /api/mobile/checkin/set-location/   # admin: pin auction location to phone position
+```
+
 **Backend status: NOT implemented yet** — full contract in `BACKEND_SPEC.md`
-Part 4. Until it lands the app degrades gracefully: a 404 disables sync for
-the process and offline mode just reports "no offline data yet".
+Part 6. Until it lands the first ping 404s and disables the feature for the
+process (zero behavior change).
 
 ### Payments (Square Tap to Pay)
 
@@ -278,11 +307,10 @@ verifies the app compiles and links.
 - ~~Printing backend endpoints~~ — landed (`printers/profiles/`, `labels/prefs/`, `labels/<pk>/?fmt=pdf`, `UserLabelPrefs.print_method`, the `/printing/` page's dropdown + BT card are live on staging). The app still degrades gracefully when offline: bundled printer profiles, print method defaults to PDF, prefs fetch returns null.
 - **Push notifications:** the backend side of `BACKEND_SPEC.md` Part 2 is **implemented** (`auctions/notifications.py` notify_user choke point, `send_push_to_user` + `promo_push_notifications` tasks, `UserData.push_notifications_instead_of_email`, `PushNotificationSent`, firebase-admin) but inert by design until (a) `FIREBASE_CREDENTIALS_JSON` is set on the deployment and (b) devices report real FCM tokens. App plumbing exists (`fcm_token` sent on device registration when present, `devices/unregister/` called on sign-out) but `PushService.currentToken()` is a stub returning null until a Firebase project + `firebase_messaging` are wired (the plan delivers the public Firebase client config via `/api/mobile/config/`, not a bundled `google-services.json`). Until both land, every notification falls back to email (`user_prefers_push()` is false for everyone). **Full setup checklist + config-endpoint decision: `PUSH.md`.**
 - **Square Tap to Pay (runtime):** Backend endpoints are done; charging still needs a real NFC device on API 31+ and Square production approval (sandbox works for the full flow). Not exercisable in CI.
-- **Offline sync backend:** the app side (store, sync service, offline
-  screens) is implemented; the two `/api/mobile/offline/*` endpoints and their
-  conflict/idempotency rules are specced in `BACKEND_SPEC.md` Part 4 and not
-  yet implemented. Until then offline mode shows "no offline data yet".
-- **AR lot mode backend:** the app side is implemented; the entire backend half — `LotObservation`/`LotPosition` models, the scipy position solver + Celery task, the three `/api/mobile/ar/*` endpoints, the app-only "AR Lots"/"Locate with AR" template buttons, the `src=ar` scan-count tweak, and the admin lot-map page — is specced in `BACKEND_SPEC.md` Part 3 and not yet implemented. Until it lands, AR mode runs in degraded pk-only overlay mode and no positions accumulate.
+- ~~Offline sync backend~~ — landed (`offline/snapshot/` + `offline/sync/` in `auctions/mobile/`).
+- **AR lot mode backend v2:** v1 (models, solver, endpoints) landed on the backend. What's missing is `BACKEND_SPEC.md` Part 5 — gyro heading odometry (`yaw_deg`, which the app now uploads per frame) and island detection/labeling/merging (`component` on positions rows, which the app already consumes). Until it lands, lots that were never co-visible in one camera frame don't get reliable relative positions, and unconnected scanned islands overlap on the admin map.
+- **Proximity check-in backend:** app side (ping service + shell UI) is implemented; `BACKEND_SPEC.md` Part 6 (`exact_location_set`, the three `checkin/*` endpoints, nudge dedupe, history) is not. Feature self-disables on 404 until then.
+- **Recruit volunteers:** entirely web/backend — `BACKEND_SPEC.md` Part 7. No app work at all (notifications ride the Part 2 push pipeline; the accept flow is a web page).
 - **Release signing:** wired in CI (keystore from repo secrets; the release workflow refuses to build unsigned). *Local* `flutter build --release` still falls back to debug signing unless you create `android/key.properties` yourself.
 
 ## CI/CD

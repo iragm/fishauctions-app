@@ -81,6 +81,7 @@ class ArSessionController {
   Map<int, ArLotPosition> _positions = const {};
   int? _targetPk;
   double _yawRad = 0; // integrated rotation about gravity, ccw-positive
+  bool _gyroLive = false; // any real gyro reading integrated yet?
   double _pitchDownRad = 0;
   final List<_TimedFix> _fixes = [];
   PoseEstimate? _pose;
@@ -122,6 +123,7 @@ class ArSessionController {
     // device coordinates, giving the up-axis directly; ω·û is then
     // counterclockwise-positive heading rate seen from above.
     _yawRad += (wx * gx + wy * gy + wz * gz) / g * dtSeconds;
+    _gyroLive = true;
   }
 
   /// Record one camera frame's detections. [measurements] holds every parsed
@@ -154,6 +156,9 @@ class ArSessionController {
         ArFrame(
           frameId: 'f${(_frameCounter++).toString().padLeft(6, '0')}',
           capturedAt: now,
+          // Session-cumulative heading so the solver can chain frames that
+          // saw only one label each; omitted (not zero) without gyro data.
+          yawDeg: _gyroLive ? _yawRad * 180 / math.pi : null,
           detections: detections,
         ),
       );
@@ -223,7 +228,7 @@ class ArSessionController {
     _positions = positions?.byLot ?? const {};
     final rebased = <_TimedFix>[
       for (final f in _fixes)
-        if (_positions[f.lotPk] case final p?)
+        if (_positions[f.lotPk] case final p? when _inTargetFrame(p))
           _TimedFix(
             lotPk: f.lotPk,
             at: f.at,
@@ -238,6 +243,15 @@ class ArSessionController {
     _solve();
   }
 
+  /// Whether [p] shares the target's solver island. Positions from different
+  /// connectivity components are in unrelated coordinate frames, so they must
+  /// never serve as fixes or ghost anchors for this target. With no target
+  /// position (or a backend that doesn't label components) everything passes.
+  bool _inTargetFrame(ArLotPosition p) {
+    final target = _targetPk == null ? null : _positions[_targetPk];
+    return target == null || p.component == target.component;
+  }
+
   void _updateFixes(Map<int, ArMeasurement> measurements, DateTime now) {
     if (_targetPk == null || _positions.isEmpty) {
       return;
@@ -245,7 +259,7 @@ class ArSessionController {
     var changed = false;
     for (final entry in measurements.entries) {
       final position = _positions[entry.key];
-      if (position == null) {
+      if (position == null || !_inTargetFrame(position)) {
         continue;
       }
       // Keep only the freshest fix per landmark — the window exists to span
@@ -295,8 +309,13 @@ class ArSessionController {
   ArLotPosition? get targetPosition =>
       _targetPk == null ? null : _positions[_targetPk];
 
-  /// Any mapped lot's solved position (ghost-marker anchor lookup).
-  ArLotPosition? positionOf(int lotPk) => _positions[lotPk];
+  /// Any mapped lot's solved position (ghost-marker anchor lookup). Lots
+  /// mapped in a different island than the target read as unmapped — their
+  /// coordinates would anchor the ghost in the wrong frame.
+  ArLotPosition? positionOf(int lotPk) {
+    final p = _positions[lotPk];
+    return p != null && _inTargetFrame(p) ? p : null;
+  }
 
   /// Current guidance for locate mode; null when locate mode is off.
   LocateState? get locateState {

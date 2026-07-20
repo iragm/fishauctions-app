@@ -15,6 +15,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../config/environment.dart';
 import '../config/theme.dart';
 import '../constants/app_constants.dart';
+import '../models/checkin_models.dart';
 import '../models/club_menu_item.dart';
 import '../models/label_prefs.dart';
 import '../providers/auth_provider.dart';
@@ -24,6 +25,7 @@ import '../providers/printer_provider.dart';
 import '../services/api_service.dart';
 import '../services/auth_service.dart';
 import '../services/bluetooth_service.dart';
+import '../services/checkin_service.dart';
 import '../services/download_service.dart';
 import '../services/label_prefs_service.dart';
 import '../services/location_service.dart';
@@ -120,6 +122,11 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     // Conflicts the server reports surface as a snackbar.
     OfflineSyncService.instance.newConflicts.addListener(_onOfflineConflicts);
     OfflineSyncService.instance.start();
+    // Proximity check-in: report position (only if permission already
+    // exists — never prompts) and surface whatever welcome/join/check-in
+    // nudges the server decides apply.
+    CheckinService.instance.newActions.addListener(_onCheckinActions);
+    CheckinService.instance.start();
   }
 
   /// Loads `/api/mobile/config/` and initializes the Square SDK with the
@@ -246,6 +253,8 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     OfflineSyncService.instance.newConflicts.removeListener(
       _onOfflineConflicts,
     );
+    CheckinService.instance.newActions.removeListener(_onCheckinActions);
+    CheckinService.instance.stop();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -273,6 +282,140 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
         ),
       ),
     );
+  }
+
+  /// The check-in ping came back with nudges. Surface them one at a time —
+  /// realistically there is one (the auction the user just walked into), but
+  /// an admin who also hasn't joined could get two.
+  void _onCheckinActions() {
+    final actions = CheckinService.instance.consumeNewActions();
+    if (actions.isEmpty || !mounted) {
+      return;
+    }
+    unawaited(_handleCheckinActions(actions));
+  }
+
+  Future<void> _handleCheckinActions(List<CheckinAction> actions) async {
+    for (final action in actions) {
+      if (!mounted) {
+        return;
+      }
+      switch (action.type) {
+        case CheckinActionType.checkedIn:
+          // The server already checked the user in — just confirm it.
+          _showSnack(action.message);
+        case CheckinActionType.joinOffer:
+          await _showJoinOffer(action);
+        case CheckinActionType.setLocationOffer:
+          await _showSetLocationOffer(action);
+      }
+    }
+  }
+
+  /// `Welcome to the <auction>` bottom sheet: Join (joins server-side — no
+  /// scroll-through-the-rules — then lands on the rules page) or Read rules
+  /// (just opens the rules page; joining stays available there).
+  Future<void> _showJoinOffer(CheckinAction action) async {
+    final rulesPath = action.rulesUrl ?? '/auctions/${action.auctionSlug}/';
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      builder: (context) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                action.message.isNotEmpty
+                    ? action.message
+                    : 'Welcome to ${action.title}.',
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+              const SizedBox(height: 16),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, 'join'),
+                child: const Text('Join'),
+              ),
+              const SizedBox(height: 8),
+              OutlinedButton(
+                onPressed: () => Navigator.pop(context, 'rules'),
+                child: const Text('Read rules'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (!mounted) {
+      return;
+    }
+    switch (choice) {
+      case 'join':
+        final result = await CheckinService.instance.join(action.auctionSlug);
+        if (!mounted) {
+          return;
+        }
+        if (result == null || !result.joined) {
+          _showSnack(
+            'Couldn\'t join ${action.title} — try again from the '
+            'auction page.',
+          );
+          _loadPath(rulesPath);
+          return;
+        }
+        _showSnack(
+          result.checkedIn
+              ? 'You\'ve joined ${action.title} and you\'re checked in!'
+              : 'You\'ve joined ${action.title}!',
+        );
+        _loadPath(result.rulesUrl ?? rulesPath);
+      case 'rules':
+        _loadPath(rulesPath);
+    }
+  }
+
+  /// Admin nudge: the auction has no exact location pinned and this phone is
+  /// at (or near) the venue — offer to use its position as the auction's
+  /// location.
+  Future<void> _showSetLocationOffer(CheckinAction action) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Set location for ${action.title}?'),
+        content: Text(
+          action.message.isNotEmpty
+              ? action.message
+              : 'Use this phone\'s current position as the auction\'s '
+                    'location so attendees get accurate directions and '
+                    'welcome check-in.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Not now'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Set location'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) {
+      return;
+    }
+    final ok = await CheckinService.instance.setAuctionLocation(
+      action.auctionSlug,
+    );
+    if (mounted) {
+      _showSnack(
+        ok
+            ? 'Location set for ${action.title}.'
+            : 'Couldn\'t set the location — check that location is still '
+                  'available and try again.',
+      );
+    }
   }
 
   /// A quick action fired while this screen exists. Before the WebView is
@@ -348,6 +491,8 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       // The offline snapshot may be minutes stale — refresh it (and drain any
       // queued changes) now that we're likely back on a network.
       OfflineSyncService.instance.onAppResumed();
+      // The user may have just walked into the auction hall.
+      CheckinService.instance.onAppResumed();
     }
   }
 

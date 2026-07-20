@@ -84,6 +84,21 @@ void main() {
       expect(sent, hasLength(1));
     });
 
+    test('frames record the integrated gyro heading at capture', () {
+      // No gyro data yet before the first frame: yaw must be absent, not
+      // zero. Then turn left 90° (ccw about gravity, phone upright) and
+      // sight lot 2.
+      session
+        ..addFrame({1: _m()})
+        ..integrateGyro(0, math.pi / 2, 0, 1, gx: 0, gy: 9.8, gz: 0)
+        ..addFrame({2: _m()});
+      clock.advance(ArSessionController.flushInterval);
+      session.flushIfDue();
+      final frames = sent.single;
+      expect(frames.first.yawDeg, isNull);
+      expect(frames.last.yawDeg, closeTo(90, 0.01));
+    });
+
     test('frame ids are unique and payload survives the round trip', () {
       session.addFrame({1: _m(bearing: -12.5, depression: 31.2)});
       clock.advance(ArSessionController.perLotInterval);
@@ -203,6 +218,34 @@ void main() {
         ..addFrame({1: measureFrom(0, 0)})
         ..updatePositions(positions({2: (4, 0), 9: (2, 1)}));
       expect((session.locateState! as LocateNeedScans).fixCount, 0);
+    });
+
+    test('lots mapped in a different island are neither fixes nor anchors', () {
+      ArPositions islands(Map<int, (double, double, int)> byLot) => ArPositions(
+        byLot: {
+          for (final e in byLot.entries)
+            e.key: ArLotPosition(
+              lotPk: e.key,
+              x: e.value.$1,
+              y: e.value.$2,
+              confidence: 0.9,
+              component: e.value.$3,
+            ),
+        },
+        unsoldTotal: byLot.length,
+        unsoldWithPosition: byLot.length,
+      );
+      // Lot 3's coordinates live in island 1 — an unrelated frame from the
+      // target's island 0, so sighting it must not count toward the fix.
+      session
+        ..setLocateTarget(
+          9,
+          islands({1: (0, 0, 0), 3: (1, 3, 1), 9: (2, 1, 0)}),
+        )
+        ..addFrame({1: measureFrom(0, 0), 3: measureFrom(1, 3)});
+      expect((session.locateState! as LocateNeedScans).fixCount, 1);
+      expect(session.positionOf(3), isNull);
+      expect(session.positionOf(1), isNotNull);
     });
   });
 }

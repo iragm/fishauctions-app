@@ -98,6 +98,17 @@ void main() {
       expect(positions.byLot, isEmpty);
       expect(positions.unsoldTotal, 0);
     });
+
+    test('parses the island component id, null when the server omits it', () {
+      final positions = ArPositions.fromJson(const {
+        'positions': [
+          {'lot': 1, 'x': 0, 'y': 0, 'component': 2},
+          {'lot': 2, 'x': 1, 'y': 1},
+        ],
+      });
+      expect(positions.byLot[1]!.component, 2);
+      expect(positions.byLot[2]!.component, isNull);
+    });
   });
 
   group('ArFrame', () {
@@ -124,6 +135,18 @@ void main() {
       expect(d['quality'], 0.88);
       // No size-derived range — the whole point of the angle-only design.
       expect(d.containsKey('range_m'), isFalse);
+      // No gyro data ⇒ yaw omitted entirely, never sent as a fake 0.
+      expect(json.containsKey('yaw_deg'), isFalse);
+    });
+
+    test('carries the session-cumulative gyro heading when available', () {
+      final frame = ArFrame(
+        frameId: 'f000002',
+        capturedAt: DateTime.utc(2026, 7, 17, 12, 31),
+        yawDeg: -93.4567,
+        detections: const [],
+      );
+      expect(frame.toJson()['yaw_deg'], -93.46);
     });
   });
 }
