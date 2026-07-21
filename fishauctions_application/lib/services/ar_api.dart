@@ -124,6 +124,24 @@ class ArApi {
     }
   }
 
+  /// Sets (not toggles) the caller's watch state on a lot via
+  /// `POST /api/mobile/lots/<pk>/watch/`, so the AR card's star works without
+  /// opening the web lot page. The endpoint is idempotent. Returns the
+  /// server's resulting `watched` state, or null on any failure so the caller
+  /// can revert its optimistic toggle.
+  Future<bool?> setWatch(int lotPk, {required bool watch}) async {
+    try {
+      final res = await ApiService.instance.dio.post<Map<String, dynamic>>(
+        'lots/$lotPk/watch/',
+        data: {'watch': watch},
+      );
+      final watched = res.data?['watched'];
+      return watched is bool ? watched : watch;
+    } on DioException {
+      return null;
+    }
+  }
+
   @visibleForTesting
   void resetAvailability() {
     _lotsAvailable = true;

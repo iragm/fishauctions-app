@@ -147,6 +147,57 @@ Offset mapImagePointToWidget(Offset p, Size imageSize, Size widgetSize) {
   return Offset(p.dx * scale + dx, p.dy * scale + dy);
 }
 
+/// Tilt-compensated magnetic heading of the camera axis, in degrees clockwise
+/// from magnetic north (0 = N, 90 = E), or null when the geometry is
+/// degenerate (camera pointing near-vertical, or the magnetic field has no
+/// usable horizontal component — near a magnet or the poles).
+///
+/// [gravity] is the accelerometer reading (its reaction points *up* at rest,
+/// the same convention `ArSessionController` uses) and [mag] the magnetometer
+/// reading, both in the device axis frame. The camera looks along −z. This is
+/// an *absolute* reference (unlike the integrated gyro yaw), so the backend
+/// can one day fix each island's orientation from it — see BACKEND_SPEC Part 5.
+double? magneticHeadingDeg(
+  (double, double, double) gravity,
+  (double, double, double) mag,
+) {
+  final (ax, ay, az) = gravity;
+  final (mx, my, mz) = mag;
+  final gNorm = math.sqrt(ax * ax + ay * ay + az * az);
+  if (gNorm < 1e-6) {
+    return null;
+  }
+  // Up unit vector (accelerometer reaction ≈ +up at rest).
+  final ux = ax / gNorm, uy = ay / gNorm, uz = az / gNorm;
+  // Horizontal magnetic north = mag with its vertical component removed.
+  final mDotU = mx * ux + my * uy + mz * uz;
+  var nx = mx - mDotU * ux, ny = my - mDotU * uy, nz = mz - mDotU * uz;
+  final nNorm = math.sqrt(nx * nx + ny * ny + nz * nz);
+  if (nNorm < 1e-6) {
+    return null;
+  }
+  nx /= nNorm;
+  ny /= nNorm;
+  nz /= nNorm;
+  // East = north × up (clockwise-from-north seen from above is +east).
+  final ex = ny * uz - nz * uy;
+  final ey = nz * ux - nx * uz;
+  final ez = nx * uy - ny * ux;
+  // Camera forward (−z), projected onto the horizontal plane.
+  const fx = 0.0, fy = 0.0, fz = -1.0;
+  final fDotU = fx * ux + fy * uy + fz * uz;
+  final hx = fx - fDotU * ux, hy = fy - fDotU * uy, hz = fz - fDotU * uz;
+  if (math.sqrt(hx * hx + hy * hy + hz * hz) < 1e-3) {
+    return null; // camera near-vertical: horizontal heading is meaningless
+  }
+  final headingRad = math.atan2(
+    hx * ex + hy * ey + hz * ez,
+    hx * nx + hy * ny + hz * nz,
+  );
+  final deg = headingRad * 180 / math.pi;
+  return deg < 0 ? deg + 360 : deg;
+}
+
 /// Wraps an angle to (−π, π].
 double wrapRad(double a) {
   var r = a % (2 * math.pi);

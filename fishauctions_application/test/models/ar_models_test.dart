@@ -61,6 +61,33 @@ void main() {
       });
       expect(meta.displayName, 'Lot 45');
     });
+
+    test('parses the full-res image_url alongside the thumbnail', () {
+      final meta = ArLotMeta.fromJson(const {
+        'pk': 1,
+        'in_auction': true,
+        'thumbnail_url': 'https://cdn.example/thumb.jpg',
+        'image_url': 'https://cdn.example/full.jpg',
+      });
+      expect(meta.thumbnailUrl, 'https://cdn.example/thumb.jpg');
+      expect(meta.imageUrl, 'https://cdn.example/full.jpg');
+    });
+
+    test('copyWith flips only the watched flag', () {
+      final meta = ArLotMeta.fromJson(const {
+        'pk': 1,
+        'in_auction': true,
+        'name': 'Betta',
+        'image_url': 'https://cdn.example/full.jpg',
+        'watched': false,
+      });
+      final watched = meta.copyWith(watched: true);
+      expect(watched.watched, isTrue);
+      expect(watched.name, 'Betta');
+      expect(watched.imageUrl, 'https://cdn.example/full.jpg');
+      // Original untouched.
+      expect(meta.watched, isFalse);
+    });
   });
 
   group('ArAuctionMeta', () {
@@ -147,6 +174,45 @@ void main() {
         detections: const [],
       );
       expect(frame.toJson()['yaw_deg'], -93.46);
+    });
+
+    test('emits the GPS fix (rounded) and heading when present', () {
+      final frame = ArFrame(
+        frameId: 'f000003',
+        capturedAt: DateTime.utc(2026, 7, 17, 12, 32),
+        latitude: 40.4418234,
+        longitude: -79.9959121,
+        headingDeg: 137.42,
+        detections: const [],
+      );
+      final json = frame.toJson();
+      expect(json['latitude'], 40.441823);
+      expect(json['longitude'], -79.995912);
+      expect(json['heading_deg'], 137.4);
+    });
+
+    test('omits the GPS pair entirely when there is no fix', () {
+      final frame = ArFrame(
+        frameId: 'f000004',
+        capturedAt: DateTime.utc(2026, 7, 17, 12, 33),
+        detections: const [],
+      );
+      final json = frame.toJson();
+      expect(json.containsKey('latitude'), isFalse);
+      expect(json.containsKey('longitude'), isFalse);
+      expect(json.containsKey('heading_deg'), isFalse);
+    });
+
+    test('sends both coordinates or neither — never a half fix', () {
+      final frame = ArFrame(
+        frameId: 'f000005',
+        capturedAt: DateTime.utc(2026, 7, 17, 12, 34),
+        latitude: 40.44, // longitude missing
+        detections: const [],
+      );
+      final json = frame.toJson();
+      expect(json.containsKey('latitude'), isFalse);
+      expect(json.containsKey('longitude'), isFalse);
     });
   });
 }

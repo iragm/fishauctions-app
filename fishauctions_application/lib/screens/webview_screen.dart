@@ -97,6 +97,13 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   // link) opening overlapping sheets.
   int? _activePaymentPk;
 
+  // When a lot page was opened *from* AR mode (the card's "open lot page"),
+  // this remembers the AR origin so the next back press returns to AR and
+  // re-beacons the lot — the same intent as the page's "Back to AR" bar. It's
+  // consumed on that first back (so a second back does normal web history and
+  // there's no AR⇄lot loop) and dropped once the user navigates elsewhere.
+  ({String slug, int lotPk})? _arReturn;
+
   @override
   void initState() {
     super.initState();
@@ -689,6 +696,18 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   /// the site root, so exit the task rather than sitting on a dead root page.
   Future<void> _handleBack() async {
     final controller = _controller;
+    // Backing out of an AR-opened lot returns to AR (once), mirroring the
+    // page's "Back to AR" bar, as long as we're still on that src=ar page.
+    final arReturn = _arReturn;
+    if (arReturn != null) {
+      final current = await controller?.getUrl();
+      if (current != null && current.queryParameters['src'] == 'ar') {
+        _arReturn = null; // consume: a second back is normal web history
+        await _launchAr(arReturn.slug, '${arReturn.lotPk}');
+        return;
+      }
+      _arReturn = null; // navigated away from the AR lot page — drop it
+    }
     if (controller != null && await controller.canGoBack()) {
       await controller.goBack();
     } else {
@@ -1130,8 +1149,19 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       '/ar/${Uri.encodeComponent(auctionSlug)}$query',
     );
     if (result is String && mounted) {
+      // Remember the AR origin so a hardware/web back from this lot page
+      // returns to AR (the deep link's `?src=ar` already tells the backend to
+      // render its own "Back to AR" bar too).
+      final lotPk = _lotPkFromPath(result);
+      _arReturn = lotPk == null ? null : (slug: auctionSlug, lotPk: lotPk);
       _loadPath(result);
     }
+  }
+
+  /// The lot pk in a `/lots/<pk>/…` path, or null if it isn't a lot page.
+  static int? _lotPkFromPath(String path) {
+    final match = RegExp(r'/lots/(\d+)/').firstMatch(path);
+    return match == null ? null : int.tryParse(match.group(1)!);
   }
 
   // The router only mounts this screen for a signed-in session, so the drawer
@@ -1359,20 +1389,29 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
           children: [
             // Dark backstop so the pre-paint window doesn't flash white over
             // the otherwise-dark UI (the WebView is transparent until paint).
+            // It fills the whole area — including behind the system nav bar —
+            // so the reserved-inset strip below the web content is dark, not
+            // blank.
             const ColoredBox(
               color: AppTheme.scaffoldBackground,
               child: SizedBox.expand(),
             ),
-            InAppWebView(
-              initialSettings: _webViewSettings,
-              onWebViewCreated: (c) => unawaited(_onWebViewCreated(c)),
-              onLoadStart: _onLoadStart,
-              onLoadStop: (c, url) => unawaited(_onLoadStop(c, url)),
-              onReceivedError: _onLoadError,
-              shouldOverrideUrlLoading: _shouldOverrideUrlLoading,
-              onCreateWindow: _onCreateWindow,
-              onDownloadStarting: _onDownloadStart,
-              onPermissionRequest: _onPermissionRequest,
+            // Reserve the (edge-to-edge) system nav-bar inset so web page
+            // content — bottom action bars especially — never sits under the
+            // translucent nav buttons. The AppBar already handles the top.
+            SafeArea(
+              top: false,
+              child: InAppWebView(
+                initialSettings: _webViewSettings,
+                onWebViewCreated: (c) => unawaited(_onWebViewCreated(c)),
+                onLoadStart: _onLoadStart,
+                onLoadStop: (c, url) => unawaited(_onLoadStop(c, url)),
+                onReceivedError: _onLoadError,
+                shouldOverrideUrlLoading: _shouldOverrideUrlLoading,
+                onCreateWindow: _onCreateWindow,
+                onDownloadStarting: _onDownloadStart,
+                onPermissionRequest: _onPermissionRequest,
+              ),
             ),
             if (_loading) const LinearProgressIndicator(minHeight: 3),
           ],

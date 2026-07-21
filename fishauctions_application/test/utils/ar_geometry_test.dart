@@ -348,4 +348,33 @@ void main() {
       expect(fitMapToImage(pairs), isNull);
     });
   });
+
+  group('magneticHeadingDeg', () {
+    // Device axes: +x right, +y up (portrait), camera looks along −z. Held
+    // upright, gravity's reaction points along +y. Magnetic field (N
+    // hemisphere) points toward north and down.
+    const upright = (0.0, 9.8, 0.0);
+
+    test('camera aimed at magnetic north reads ~0°', () {
+      // North horizontally = −z (camera forward), plus a downward (−y)
+      // component. (closeTo also fails on a null result.)
+      expect(magneticHeadingDeg(upright, (0, -30, -20)), closeTo(0, 1));
+    });
+
+    test('camera aimed east reads ~90°', () {
+      // Turned to face east: north is now to the phone's left (−x).
+      expect(magneticHeadingDeg(upright, (-20, -30, 0)), closeTo(90, 1));
+    });
+
+    test('near-vertical camera has no usable heading', () {
+      // Phone flat, screen up: gravity along +z, camera (−z) points at the
+      // floor — the horizontal projection collapses.
+      expect(magneticHeadingDeg((0, 0, 9.8), (1, 0, -30)), isNull);
+    });
+
+    test('a field with no horizontal component is rejected', () {
+      // Magnetometer parallel to gravity: no north direction to resolve.
+      expect(magneticHeadingDeg(upright, (0, -30, 0)), isNull);
+    });
+  });
 }

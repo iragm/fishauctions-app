@@ -83,6 +83,13 @@ class ArSessionController {
   double _yawRad = 0; // integrated rotation about gravity, ccw-positive
   bool _gyroLive = false; // any real gyro reading integrated yet?
   double _pitchDownRad = 0;
+
+  // Freshest phone fix + absolute compass heading, stamped onto each frame.
+  // Null until a real value arrives (a fix/heading is never faked — absence
+  // means "unknown", and the server drops half-supplied or (0,0) fixes).
+  double? _lat;
+  double? _lon;
+  double? _headingDeg;
   final List<_TimedFix> _fixes = [];
   PoseEstimate? _pose;
   double _yawAtSolve = 0;
@@ -101,6 +108,28 @@ class ArSessionController {
   /// looks along −z, so its depression below horizontal is atan2(z, y).
   void updateGravity(double x, double y, double z) {
     _pitchDownRad = math.atan2(z, y);
+  }
+
+  /// Feed the freshest phone GPS fix (or clear it with nulls). Send both or
+  /// neither — a half-supplied fix is treated as "no fix" and never stamped.
+  /// Reused between updates, so passing a coarse last-known fix is fine.
+  void updateLocation(double? latitude, double? longitude) {
+    if (latitude == null || longitude == null) {
+      _lat = null;
+      _lon = null;
+      return;
+    }
+    _lat = latitude;
+    _lon = longitude;
+  }
+
+  /// Feed the freshest absolute compass heading (deg cw from magnetic north),
+  /// or null to clear it. Stamped onto subsequent frames. Out-of-range values
+  /// are rejected (cleared) so a bad sensor reading is never sent as a heading.
+  void updateHeading(double? headingDeg) {
+    _headingDeg = (headingDeg != null && headingDeg >= 0 && headingDeg < 360)
+        ? headingDeg
+        : null;
   }
 
   /// Integrate a gyroscope reading (rad/s, device axes) over [dtSeconds].
@@ -159,6 +188,10 @@ class ArSessionController {
           // Session-cumulative heading so the solver can chain frames that
           // saw only one label each; omitted (not zero) without gyro data.
           yawDeg: _gyroLive ? _yawRad * 180 / math.pi : null,
+          // Freshest GPS fix / absolute heading, when the device reported one.
+          latitude: _lat,
+          longitude: _lon,
+          headingDeg: _headingDeg,
           detections: detections,
         ),
       );

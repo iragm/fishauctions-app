@@ -36,6 +36,7 @@ class ArLotMeta {
     this.lotNumber,
     this.name,
     this.thumbnailUrl,
+    this.imageUrl,
     this.watched = false,
     this.recommended = false,
     this.sold = false,
@@ -52,6 +53,7 @@ class ArLotMeta {
     lotNumber: json['lot_number'] as String?,
     name: json['name'] as String?,
     thumbnailUrl: json['thumbnail_url'] as String?,
+    imageUrl: json['image_url'] as String?,
     watched: json['watched'] == true,
     recommended: json['recommended'] == true,
     sold: json['sold'] == true,
@@ -80,6 +82,10 @@ class ArLotMeta {
   final String? lotNumber; // Lot.lot_number_display — NOT the pk
   final String? name;
   final String? thumbnailUrl;
+
+  /// Full-size primary image (not the 250×150 thumbnail), for the single-lot
+  /// card's fit-to-width photo. Null when the lot has no image or on a stub.
+  final String? imageUrl;
   final bool watched;
   final bool recommended;
   final bool sold;
@@ -99,6 +105,25 @@ class ArLotMeta {
     final number = lotNumber;
     return number != null && number.isNotEmpty ? 'Lot $number' : 'Lot $pk';
   }
+
+  /// Copy with an overridden [watched] flag — for the card's watch star's
+  /// optimistic toggle before/around the server round trip.
+  ArLotMeta copyWith({bool? watched}) => ArLotMeta(
+    pk: pk,
+    inAuction: inAuction,
+    lotNumber: lotNumber,
+    name: name,
+    thumbnailUrl: thumbnailUrl,
+    imageUrl: imageUrl,
+    watched: watched ?? this.watched,
+    recommended: recommended,
+    sold: sold,
+    removed: removed,
+    lotUrl: lotUrl,
+    labelFields: labelFields,
+    hasPosition: hasPosition,
+    isStub: isStub,
+  );
 }
 
 /// The `auction` block of `GET ar/lots/`.
@@ -158,6 +183,9 @@ class ArFrame {
     required this.capturedAt,
     required this.detections,
     this.yawDeg,
+    this.latitude,
+    this.longitude,
+    this.headingDeg,
   });
 
   final String frameId;
@@ -173,10 +201,35 @@ class ArFrame {
   /// "didn't turn". Drift handling is the server's problem (it knows Δt).
   final double? yawDeg;
 
+  /// Phone GPS fix at capture (WGS84 degrees). Sent as a pair or not at all —
+  /// both null unless a real fix was available (no location permission / no
+  /// lock ⇒ omitted, never (0, 0)). The server uses it only to anchor whole
+  /// disconnected islands relative to each other, so a coarse last-known fix
+  /// is fine; it never positions an individual lot.
+  final double? latitude;
+  final double? longitude;
+
+  /// Absolute compass heading of the camera at capture — degrees clockwise
+  /// from **magnetic** north (0 = N, 90 = E), tilt-compensated. Unlike
+  /// [yawDeg] (relative, arbitrary zero) this is an absolute reference, so the
+  /// solver can fix each island's *orientation*, not just its GPS position.
+  /// Null when no magnetometer reading is available. Backend-side use is a
+  /// future extension (BACKEND_SPEC.md Part 5); the app sends it now so the
+  /// data is already flowing, exactly as it did for [yawDeg].
+  final double? headingDeg;
+
   Map<String, dynamic> toJson() => {
     'frame_id': frameId,
     'captured_at': capturedAt.toUtc().toIso8601String(),
     if (yawDeg case final yaw?) 'yaw_deg': double.parse(yaw.toStringAsFixed(2)),
+    // GPS is all-or-nothing: only emit the pair when both are present.
+    if (latitude case final lat?)
+      if (longitude case final lon?) ...{
+        'latitude': double.parse(lat.toStringAsFixed(6)),
+        'longitude': double.parse(lon.toStringAsFixed(6)),
+      },
+    if (headingDeg case final h?)
+      'heading_deg': double.parse(h.toStringAsFixed(1)),
     'detections': [for (final d in detections) d.toJson()],
   };
 }

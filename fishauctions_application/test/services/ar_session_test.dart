@@ -99,6 +99,39 @@ void main() {
       expect(frames.last.yawDeg, closeTo(90, 0.01));
     });
 
+    test('stamps frames with the latest GPS fix and absolute heading', () {
+      session
+        ..updateLocation(40.5, -79.9)
+        ..updateHeading(123.4)
+        ..addFrame({1: _m()});
+      clock.advance(ArSessionController.flushInterval);
+      session.flushIfDue();
+      final frame = sent.single.single;
+      expect(frame.latitude, 40.5);
+      expect(frame.longitude, -79.9);
+      expect(frame.headingDeg, 123.4);
+    });
+
+    test('a half GPS fix is dropped to null (both or neither)', () {
+      session
+        ..updateLocation(40.5, null)
+        ..addFrame({1: _m()});
+      clock.advance(ArSessionController.flushInterval);
+      session.flushIfDue();
+      final frame = sent.single.single;
+      expect(frame.latitude, isNull);
+      expect(frame.longitude, isNull);
+    });
+
+    test('an out-of-range heading is rejected', () {
+      session
+        ..updateHeading(999)
+        ..addFrame({1: _m()});
+      clock.advance(ArSessionController.flushInterval);
+      session.flushIfDue();
+      expect(sent.single.single.headingDeg, isNull);
+    });
+
     test('frame ids are unique and payload survives the round trip', () {
       session.addFrame({1: _m(bearing: -12.5, depression: 31.2)});
       clock.advance(ArSessionController.perLotInterval);

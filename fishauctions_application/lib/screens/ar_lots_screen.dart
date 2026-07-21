@@ -10,6 +10,7 @@ import 'package:sensors_plus/sensors_plus.dart';
 import '../models/ar_models.dart';
 import '../services/ar_api.dart';
 import '../services/ar_session.dart';
+import '../services/location_service.dart';
 import '../utils/ar_geometry.dart';
 import '../utils/lot_qr.dart';
 import '../utils/platform_bridge.dart';
@@ -90,8 +91,10 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
 
   Timer? _sweepTimer;
   Timer? _positionsTimer;
+  Timer? _locationTimer;
   StreamSubscription<AccelerometerEvent>? _accelSub;
   StreamSubscription<GyroscopeEvent>? _gyroSub;
+  StreamSubscription<MagnetometerEvent>? _magSub;
   (double, double, double) _gravity = (0, 9.8, 0); // assume upright until read
   DateTime? _lastGyroAt;
 
@@ -170,11 +173,37 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
           final (gx, gy, gz) = _gravity;
           _session.integrateGyro(e.x, e.y, e.z, dt, gx: gx, gy: gy, gz: gz);
         }, onError: (Object _) {});
+    // Magnetometer → absolute (magnetic) camera heading, tilt-compensated with
+    // the gravity vector. Stamped on each frame so the backend can one day fix
+    // island orientation, not just GPS position (BACKEND_SPEC Part 5). Absent
+    // hardware just leaves the heading null.
+    _magSub = magnetometerEventStream(samplingPeriod: SensorInterval.uiInterval)
+        .listen((e) {
+          _session.updateHeading(magneticHeadingDeg(_gravity, (e.x, e.y, e.z)));
+        }, onError: (Object _) {});
     _sweepTimer = Timer.periodic(
       const Duration(milliseconds: 250),
       (_) => _sweep(),
     );
+    // Stamp frames with the phone's GPS fix (island anchoring). Never prompts
+    // and never blocks scanning: a coarse last-known fix is plenty, so we grab
+    // it instantly and refresh periodically. No permission ⇒ stays null.
+    unawaited(_refreshLocation());
+    _locationTimer = Timer.periodic(
+      const Duration(seconds: 20),
+      (_) => unawaited(_refreshLocation()),
+    );
     setState(() => _access = _CameraAccess.granted);
+  }
+
+  /// Pulls the freshest last-known GPS fix (instant, non-blocking, no prompt)
+  /// into the session so subsequent frames carry it. Sends both or neither —
+  /// no fix leaves the session's location null.
+  Future<void> _refreshLocation() async {
+    final position = await LocationService.instance.positionIfPermitted(
+      fresh: false,
+    );
+    _session.updateLocation(position?.latitude, position?.longitude);
   }
 
   Future<void> _initLocate() async {
@@ -201,8 +230,10 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
   void dispose() {
     _sweepTimer?.cancel();
     _positionsTimer?.cancel();
+    _locationTimer?.cancel();
     _accelSub?.cancel();
     _gyroSub?.cancel();
+    _magSub?.cancel();
     unawaited(_session.flush());
     _scanner?.dispose();
     super.dispose();
@@ -366,6 +397,34 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
     }
   }
 
+  /// Toggle the caller's watch state on [pk] from the card's star. Optimistic:
+  /// flip locally, POST it, and revert with a snackbar if the server call
+  /// fails (the endpoint sets, not toggles, so it's safe to retry).
+  Future<void> _toggleWatch(int pk) async {
+    final current = _meta[pk];
+    if (current == null) {
+      return;
+    }
+    final next = !current.watched;
+    setState(() => _meta[pk] = current.copyWith(watched: next));
+    final result = await ArApi.instance.setWatch(pk, watch: next);
+    if (!mounted) {
+      return;
+    }
+    final latest = _meta[pk];
+    if (latest == null) {
+      return;
+    }
+    if (result == null) {
+      setState(() => _meta[pk] = latest.copyWith(watched: current.watched));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Couldn't update watch — try again.")),
+      );
+    } else if (result != latest.watched) {
+      setState(() => _meta[pk] = latest.copyWith(watched: result));
+    }
+  }
+
   // ── Build ─────────────────────────────────────────────────────────────────
 
   ArLotMeta _metaFor(int pk) => _meta[pk] ?? ArLotMeta.stub(pk);
@@ -424,6 +483,10 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
       final widgetSize = constraints.biggest;
       final cardMeta = _cardPk == null ? null : _metaFor(_cardPk!);
       final ghost = _buildGhost(widgetSize);
+      // The camera preview is full-bleed, but interactive overlays must clear
+      // the (edge-to-edge) system navigation bar — otherwise the card and its
+      // buttons sit under the translucent nav buttons and get cut off.
+      final bottomInset = MediaQuery.viewPaddingOf(context).bottom;
       return Stack(
         fit: StackFit.expand,
         children: [
@@ -457,18 +520,19 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
             Positioned(
               left: 12,
               right: 12,
-              bottom: 12,
+              bottom: 12 + bottomInset,
               child: _LotCard(
                 meta: cardMeta,
                 onOpen: () => _openLotPage(cardMeta),
+                onToggleWatch: () => unawaited(_toggleWatch(cardMeta.pk)),
               ),
             ),
           if (_visible.isEmpty && cardMeta == null)
-            const Positioned(
+            Positioned(
               left: 24,
               right: 24,
-              bottom: 48,
-              child: Text(
+              bottom: 48 + bottomInset,
+              child: const Text(
                 'Point the camera at lot labels',
                 textAlign: TextAlign.center,
                 style: TextStyle(
@@ -554,6 +618,10 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
 
   List<Widget> _buildMarkers(Size widgetSize) {
     final compact = _visible.length > _maxNamedChips;
+    // Show the thumbnail inside a named chip only when scanning *several* lots
+    // (2–3 named chips) — with a single lot the detail card already carries the
+    // full-width image, so a chip thumbnail there is redundant.
+    final showChipThumbnail = !compact && _visible.length >= 2;
     final target = widget.locateLotPk;
     return [
       for (final entry in _visible.entries)
@@ -572,6 +640,7 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
               child: _LotMarker(
                 meta: meta,
                 compact: compact,
+                showThumbnail: showChipThumbnail,
                 highlighted: entry.key == target,
               ),
             ),
@@ -623,11 +692,15 @@ class _LotMarker extends StatelessWidget {
     required this.meta,
     required this.compact,
     required this.highlighted,
+    this.showThumbnail = false,
   });
 
   final ArLotMeta meta;
   final bool compact;
   final bool highlighted;
+
+  /// Whether the named chip should include the lot's thumbnail below its name.
+  final bool showThumbnail;
 
   Color get _accent => meta.watched
       ? Colors.amber
@@ -639,57 +712,89 @@ class _LotMarker extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final Widget icon = meta.watched
-        ? Icon(Icons.star, size: compact ? 22 : 16, color: Colors.amber)
-        : Container(
-            width: compact ? 16 : 10,
-            height: compact ? 16 : 10,
-            decoration: BoxDecoration(
-              color: _accent,
-              shape: BoxShape.circle,
-              border: Border.all(color: Colors.black45),
-            ),
-          );
-    final marker = compact
-        ? icon
-        : Container(
-            constraints: const BoxConstraints(maxWidth: 180),
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-            decoration: BoxDecoration(
-              color: Colors.black.withValues(alpha: 0.7),
-              borderRadius: BorderRadius.circular(16),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                icon,
-                const SizedBox(width: 6),
-                Flexible(
-                  child: Text(
-                    meta.sold ? '${meta.displayName} · sold' : meta.displayName,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: meta.sold ? Colors.white54 : Colors.white,
-                      fontSize: 13,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          );
+    // Until the server metadata lands, a lot is just a neutral gray dot — no
+    // "Lot <pk>" guess (the pk is not a name and only confuses).
+    final asDot = meta.isStub || compact;
+    final marker = meta.isStub
+        ? _dot(Colors.grey.shade400, size: compact ? 16 : 12)
+        : asDot
+        ? _icon(size: compact ? 22 : 16, dotSize: compact ? 16 : 10)
+        : _chip();
     if (!highlighted) {
       return marker;
     }
     return DecoratedBox(
       decoration: BoxDecoration(
-        shape: compact ? BoxShape.circle : BoxShape.rectangle,
-        borderRadius: compact ? null : BorderRadius.circular(20),
+        shape: asDot ? BoxShape.circle : BoxShape.rectangle,
+        borderRadius: asDot ? null : BorderRadius.circular(20),
         border: Border.all(color: Colors.lightBlueAccent, width: 3),
       ),
       child: Padding(padding: const EdgeInsets.all(3), child: marker),
     );
   }
+
+  Widget _dot(Color color, {required double size}) => Container(
+    width: size,
+    height: size,
+    decoration: BoxDecoration(
+      color: color,
+      shape: BoxShape.circle,
+      border: Border.all(color: Colors.black45),
+    ),
+  );
+
+  Widget _icon({required double size, required double dotSize}) => meta.watched
+      ? Icon(Icons.star, size: size, color: Colors.amber)
+      : _dot(_accent, size: dotSize);
+
+  /// The named chip: lot name, plus — for the ≤3-lots view — the thumbnail
+  /// tucked below the name so the picture is visible without opening the card.
+  Widget _chip() => Container(
+    constraints: const BoxConstraints(maxWidth: 160),
+    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+    decoration: BoxDecoration(
+      color: Colors.black.withValues(alpha: 0.7),
+      borderRadius: BorderRadius.circular(16),
+    ),
+    child: Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _icon(size: 16, dotSize: 10),
+            const SizedBox(width: 6),
+            Flexible(
+              child: Text(
+                meta.sold ? '${meta.displayName} · sold' : meta.displayName,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: meta.sold ? Colors.white54 : Colors.white,
+                  fontSize: 13,
+                ),
+              ),
+            ),
+          ],
+        ),
+        if (showThumbnail)
+          if (meta.thumbnailUrl case final url?) ...[
+            const SizedBox(height: 6),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: Image.network(
+                url,
+                width: 140,
+                height: 90,
+                fit: BoxFit.cover,
+                errorBuilder: (_, _, _) => const SizedBox.shrink(),
+              ),
+            ),
+          ],
+      ],
+    ),
+  );
 }
 
 /// The locate-mode target pin: where the target lot should be, projected
@@ -797,113 +902,136 @@ class _LocateBanner extends StatelessWidget {
   }
 }
 
-/// The single-lot detail card: photo, custom label fields, lot-page button.
+/// The single-lot detail card: a fit-to-width photo, the auction's custom
+/// label fields, a watch star, and the lot-page button.
 class _LotCard extends StatelessWidget {
-  const _LotCard({required this.meta, required this.onOpen});
+  const _LotCard({
+    required this.meta,
+    required this.onOpen,
+    required this.onToggleWatch,
+  });
 
   final ArLotMeta meta;
   final void Function() onOpen;
+  final void Function() onToggleWatch;
 
   @override
-  Widget build(BuildContext context) => Material(
-    color: Colors.black.withValues(alpha: 0.85),
-    borderRadius: BorderRadius.circular(16),
-    child: Padding(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              if (meta.thumbnailUrl case final url?) ...[
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(8),
+  Widget build(BuildContext context) {
+    // Full-res image when the server has it, otherwise the thumbnail. Fit to
+    // the card width; cap the height so the card never grows past ~the bottom
+    // half of the screen.
+    final imageUrl = meta.imageUrl ?? meta.thumbnailUrl;
+    final maxImageHeight = MediaQuery.sizeOf(context).height * 0.4;
+    return Material(
+      color: Colors.black.withValues(alpha: 0.85),
+      borderRadius: BorderRadius.circular(16),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (imageUrl != null) ...[
+              ConstrainedBox(
+                constraints: BoxConstraints(maxHeight: maxImageHeight),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(10),
                   child: Image.network(
-                    url,
-                    width: 72,
-                    height: 72,
+                    imageUrl,
+                    width: double.infinity,
                     fit: BoxFit.cover,
                     errorBuilder: (_, _, _) => const SizedBox.shrink(),
                   ),
                 ),
-                const SizedBox(width: 12),
+              ),
+              const SizedBox(height: 12),
+            ],
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        meta.displayName,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 17,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Row(
+                        children: [
+                          if (meta.lotNumber case final n?)
+                            Text(
+                              'Lot $n',
+                              style: const TextStyle(color: Colors.white70),
+                            ),
+                          if (meta.sold || meta.removed) ...[
+                            const SizedBox(width: 8),
+                            Text(
+                              meta.sold ? 'SOLD' : 'REMOVED',
+                              style: const TextStyle(
+                                color: Colors.redAccent,
+                                fontWeight: FontWeight.w600,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                // Watch star — sets watch state via the mobile API without
+                // opening the web lot page. Hidden until real metadata is in
+                // (a stub doesn't know the current watch state).
+                if (!meta.isStub)
+                  IconButton(
+                    onPressed: onToggleWatch,
+                    tooltip: meta.watched ? 'Unwatch' : 'Watch',
+                    icon: Icon(
+                      meta.watched ? Icons.star : Icons.star_border,
+                      color: meta.watched ? Colors.amber : Colors.white70,
+                    ),
+                  ),
               ],
-              Expanded(
-                child: Column(
+            ),
+            for (final field in meta.labelFields)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      meta.displayName,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
+                      '${field.label}: ',
                       style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 17,
+                        color: Colors.white70,
                         fontWeight: FontWeight.w600,
                       ),
                     ),
-                    const SizedBox(height: 2),
-                    Row(
-                      children: [
-                        if (meta.lotNumber case final n?)
-                          Text(
-                            'Lot $n',
-                            style: const TextStyle(color: Colors.white70),
-                          ),
-                        if (meta.watched) ...[
-                          const SizedBox(width: 8),
-                          const Icon(Icons.star, size: 16, color: Colors.amber),
-                        ],
-                        if (meta.sold || meta.removed) ...[
-                          const SizedBox(width: 8),
-                          Text(
-                            meta.sold ? 'SOLD' : 'REMOVED',
-                            style: const TextStyle(
-                              color: Colors.redAccent,
-                              fontWeight: FontWeight.w600,
-                              fontSize: 12,
-                            ),
-                          ),
-                        ],
-                      ],
+                    Expanded(
+                      child: Text(
+                        field.value,
+                        style: const TextStyle(color: Colors.white),
+                      ),
                     ),
                   ],
                 ),
               ),
-            ],
-          ),
-          for (final field in meta.labelFields)
-            Padding(
-              padding: const EdgeInsets.only(top: 6),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    '${field.label}: ',
-                    style: const TextStyle(
-                      color: Colors.white70,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  Expanded(
-                    child: Text(
-                      field.value,
-                      style: const TextStyle(color: Colors.white),
-                    ),
-                  ),
-                ],
-              ),
+            const SizedBox(height: 12),
+            FilledButton.icon(
+              onPressed: onOpen,
+              icon: const Icon(Icons.open_in_new),
+              label: const Text('Open lot page'),
             ),
-          const SizedBox(height: 12),
-          FilledButton.icon(
-            onPressed: onOpen,
-            icon: const Icon(Icons.open_in_new),
-            label: const Text('Open lot page'),
-          ),
-        ],
+          ],
+        ),
       ),
-    ),
-  );
+    );
+  }
 }
