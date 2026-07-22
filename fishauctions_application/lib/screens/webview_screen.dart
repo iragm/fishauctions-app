@@ -781,7 +781,7 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   /// printer itself reported (profiles that can read it); the page offers to
   /// adopt it into the user's label prefs.
   Map<String, dynamic> _printerState() {
-    final printer = ref.read(printerProvider).valueOrNull;
+    final printer = ref.read(printerProvider).value;
     final hasSize =
         printer?.labelWidthMm != null && printer?.labelHeightMm != null;
     return {
@@ -816,7 +816,7 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     if (uri.path != '/login/' || uri.host != webHost) {
       return;
     }
-    if (ref.read(authProvider).valueOrNull != null) {
+    if (ref.read(authProvider).value != null) {
       await _ensureWebSession(next: uri.queryParameters['next']);
     }
     // Natively signed out only during the brief window before the router
@@ -934,7 +934,7 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   /// forks whose config omits it — falls back to the compile-time
   /// [AppConstants.appName]. Watched, so the title updates once config loads.
   String get _brandName {
-    final b = ref.watch(configProvider).valueOrNull?.brandName;
+    final b = ref.watch(configProvider).value?.brandName;
     return (b == null || b.isEmpty) ? AppConstants.appName : b;
   }
 
@@ -984,7 +984,7 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     // sign-out (which also POSTs the web logout and wipes cookies) instead of
     // letting the page navigate. Skip if already signed out so our own menu
     // logout doesn't double-fire.
-    if (uri.path == '/logout/' && ref.read(authProvider).valueOrNull != null) {
+    if (uri.path == '/logout/' && ref.read(authProvider).value != null) {
       unawaited(_signOut());
       return NavigationActionPolicy.CANCEL;
     }
@@ -1297,8 +1297,7 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   /// or the fetch failed) → the plain browse link, matching the web navbar's
   /// bare "Clubs" link for users with no clubs.
   Widget _clubsTile(BuildContext ctx) {
-    final clubs =
-        ref.watch(myClubsProvider).valueOrNull ?? const <ClubMenuItem>[];
+    final clubs = ref.watch(myClubsProvider).value ?? const <ClubMenuItem>[];
     if (clubs.isEmpty) {
       return _navTile(ctx, Icons.groups, 'Clubs', '/clubs/');
     }

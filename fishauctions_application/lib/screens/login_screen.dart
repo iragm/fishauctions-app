@@ -129,7 +129,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final config = ref.watch(configProvider).valueOrNull;
+    final config = ref.watch(configProvider).value;
     final brand = (config?.brandName.isNotEmpty ?? false)
         ? config!.brandName
         : AppConstants.appName;

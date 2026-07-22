@@ -4,7 +4,7 @@ part 'printer_model.freezed.dart';
 part 'printer_model.g.dart';
 
 @freezed
-class BluetoothPrinter with _$BluetoothPrinter {
+abstract class BluetoothPrinter with _$BluetoothPrinter {
   const factory BluetoothPrinter({
     // The BLE remote identifier (Android MAC, iOS OS-assigned UUID). Used to
     // reconnect without a fresh scan via `BluetoothDevice.fromId`.

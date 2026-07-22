@@ -96,7 +96,7 @@ class _PrintLabelScreenState extends ConsumerState<PrintLabelScreen> {
 
   /// The saved printer's profile (pre-profile saves resolve to the D11s).
   Future<PrinterProfile?> _profile() async {
-    final saved = ref.read(printerProvider).valueOrNull;
+    final saved = ref.read(printerProvider).value;
     if (saved == null) {
       return null;
     }
@@ -108,7 +108,7 @@ class _PrintLabelScreenState extends ConsumerState<PrintLabelScreen> {
     if (png == null) {
       return;
     }
-    if (ref.read(printerProvider).valueOrNull == null) {
+    if (ref.read(printerProvider).value == null) {
       setState(() => _phase = _Phase.noPrinter);
       return;
     }

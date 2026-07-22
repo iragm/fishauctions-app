@@ -4,7 +4,7 @@ part 'auth_models.freezed.dart';
 part 'auth_models.g.dart';
 
 @freezed
-class TokenPair with _$TokenPair {
+abstract class TokenPair with _$TokenPair {
   const factory TokenPair({required String access, required String refresh}) =
       _TokenPair;
 
@@ -13,7 +13,7 @@ class TokenPair with _$TokenPair {
 }
 
 @freezed
-class AppUser with _$AppUser {
+abstract class AppUser with _$AppUser {
   const factory AppUser({
     required int id,
     required String username,
@@ -29,7 +29,7 @@ class AppUser with _$AppUser {
 }
 
 @freezed
-class LoginCredentials with _$LoginCredentials {
+abstract class LoginCredentials with _$LoginCredentials {
   const factory LoginCredentials({
     required String credential,
     required String password,

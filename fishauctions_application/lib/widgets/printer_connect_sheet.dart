@@ -274,7 +274,7 @@ class _PrinterConnectSheetState extends ConsumerState<PrinterConnectSheet> {
 
   @override
   Widget build(BuildContext context) {
-    final saved = ref.watch(printerProvider).valueOrNull;
+    final saved = ref.watch(printerProvider).value;
     final height = MediaQuery.of(context).size.height * 0.72;
 
     return SizedBox(

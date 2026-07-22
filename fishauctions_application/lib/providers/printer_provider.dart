@@ -74,7 +74,7 @@ class PrinterNotifier extends AsyncNotifier<BluetoothPrinter?> {
   /// dropped (e.g. after an app restart). Returns the connected printer.
   /// Throws [StateError] if no printer has been set up.
   Future<BluetoothPrinter> ensureConnected() async {
-    final saved = state.valueOrNull;
+    final saved = state.value;
     if (saved == null) {
       throw StateError('No printer configured');
     }
@@ -93,7 +93,7 @@ class PrinterNotifier extends AsyncNotifier<BluetoothPrinter?> {
 
   Future<void> disconnect() async {
     await BluetoothService.instance.disconnect();
-    final current = state.valueOrNull;
+    final current = state.value;
     if (current != null) {
       final updated = current.copyWith(connected: false);
       state = AsyncData(updated);

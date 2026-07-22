@@ -46,7 +46,7 @@ final routerProvider = Provider<GoRouter>((ref) {
       if (auth.isLoading) {
         return location == '/splash' ? null : '/splash';
       }
-      final signedIn = auth.valueOrNull != null;
+      final signedIn = auth.value != null;
       final onGate = _gateLocations.contains(location);
       if (!signedIn) {
         if (onGate) {
