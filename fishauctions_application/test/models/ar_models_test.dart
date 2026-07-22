@@ -214,5 +214,54 @@ void main() {
       expect(json.containsKey('latitude'), isFalse);
       expect(json.containsKey('longitude'), isFalse);
     });
+
+    test('emits rounded odometry when both components are present', () {
+      final frame = ArFrame(
+        frameId: 'f000006',
+        capturedAt: DateTime.utc(2026, 7, 17, 12, 35),
+        odoXM: 1.23456,
+        odoYM: -0.98765,
+        detections: const [],
+      );
+      final json = frame.toJson();
+      expect(json['odo_x_m'], 1.235);
+      expect(json['odo_y_m'], -0.988);
+    });
+
+    test('the session origin (0, 0) survives — never treated as absent', () {
+      final frame = ArFrame(
+        frameId: 'f000007',
+        capturedAt: DateTime.utc(2026, 7, 17, 12, 36),
+        odoXM: 0,
+        odoYM: 0,
+        detections: const [],
+      );
+      final json = frame.toJson();
+      expect(json['odo_x_m'], 0.0);
+      expect(json['odo_y_m'], 0.0);
+    });
+
+    test('omits odometry entirely when there is no tracker reading', () {
+      final frame = ArFrame(
+        frameId: 'f000008',
+        capturedAt: DateTime.utc(2026, 7, 17, 12, 37),
+        detections: const [],
+      );
+      final json = frame.toJson();
+      expect(json.containsKey('odo_x_m'), isFalse);
+      expect(json.containsKey('odo_y_m'), isFalse);
+    });
+
+    test('sends both odometry components or neither — never a half pair', () {
+      final frame = ArFrame(
+        frameId: 'f000009',
+        capturedAt: DateTime.utc(2026, 7, 17, 12, 38),
+        odoXM: 3.5, // odoYM missing
+        detections: const [],
+      );
+      final json = frame.toJson();
+      expect(json.containsKey('odo_x_m'), isFalse);
+      expect(json.containsKey('odo_y_m'), isFalse);
+    });
   });
 }

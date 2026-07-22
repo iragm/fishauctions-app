@@ -123,6 +123,108 @@ void main() {
       expect(frame.longitude, isNull);
     });
 
+    test('odometry is omitted until a tracker reading starts it', () {
+      session.addFrame({1: _m()});
+      clock.advance(ArSessionController.flushInterval);
+      session.flushIfDue();
+      final frame = sent.single.single;
+      expect(frame.odoXM, isNull);
+      expect(frame.odoYM, isNull);
+    });
+
+    test('startOdometry reports the session origin as (0, 0), not absent', () {
+      session
+        ..startOdometry()
+        ..addFrame({1: _m()});
+      clock.advance(ArSessionController.flushInterval);
+      session.flushIfDue();
+      final frame = sent.single.single;
+      expect(frame.odoXM, 0);
+      expect(frame.odoYM, 0);
+    });
+
+    test(
+      'recordSteps advances odometry along the current yaw direction',
+      () async {
+        session
+          ..startOdometry()
+          ..recordSteps(2) // straight ahead at yaw 0
+          ..addFrame({1: _m()});
+        clock.advance(ArSessionController.flushInterval);
+        session.flushIfDue();
+        final straight = sent.single.single;
+        expect(
+          straight.odoXM,
+          closeTo(2 * ArSessionController.strideLengthM, 1e-9),
+        );
+        expect(straight.odoYM, closeTo(0, 1e-9));
+
+        // Let flush()'s fire-and-forget `finally` (which resets the in-flight
+        // guard) settle before triggering a second cycle — it only needs a
+        // microtask in real usage because the event loop pumps between the
+        // screen's timer ticks, which a synchronous test body doesn't do.
+        await Future<void>.value();
+
+        // Turn left 90° (ccw about gravity) and take one more stride: it should
+        // land almost entirely on the +y axis, matching yaw's convention.
+        session
+          ..integrateGyro(0, math.pi / 2, 0, 1, gx: 0, gy: 9.8, gz: 0)
+          ..recordSteps(1)
+          ..addFrame({2: _m()});
+        clock.advance(ArSessionController.flushInterval);
+        session.flushIfDue();
+        final turned = sent[1].single;
+        expect(
+          turned.odoXM,
+          closeTo(2 * ArSessionController.strideLengthM, 1e-6),
+        );
+        expect(turned.odoYM, closeTo(ArSessionController.strideLengthM, 1e-6));
+      },
+    );
+
+    test('recordSteps before startOdometry is a no-op — no fake tracker', () {
+      session
+        ..recordSteps(5)
+        ..addFrame({1: _m()});
+      clock.advance(ArSessionController.flushInterval);
+      session.flushIfDue();
+      final frame = sent.single.single;
+      expect(frame.odoXM, isNull);
+      expect(frame.odoYM, isNull);
+    });
+
+    test(
+      'invalidateOdometry stops the channel for good (tracker reset)',
+      () async {
+        session
+          ..startOdometry()
+          ..recordSteps(3)
+          ..invalidateOdometry()
+          ..addFrame({1: _m()});
+        clock.advance(ArSessionController.flushInterval);
+        session.flushIfDue();
+        final afterReset = sent.single.single;
+        expect(afterReset.odoXM, isNull);
+        expect(afterReset.odoYM, isNull);
+
+        // See the previous test: yield a microtask so flush()'s fire-and-forget
+        // `finally` settles before a second cycle in the same test body.
+        await Future<void>.value();
+
+        // Further calls — even a fresh startOdometry — must not resurrect it;
+        // the session must never mix two different tracker origins.
+        session
+          ..startOdometry()
+          ..recordSteps(1)
+          ..addFrame({2: _m()});
+        clock.advance(ArSessionController.flushInterval);
+        session.flushIfDue();
+        final stillNull = sent[1].single;
+        expect(stillNull.odoXM, isNull);
+        expect(stillNull.odoYM, isNull);
+      },
+    );
+
     test('an out-of-range heading is rejected', () {
       session
         ..updateHeading(999)

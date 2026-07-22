@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:pedometer/pedometer.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 
@@ -95,8 +96,10 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
   StreamSubscription<AccelerometerEvent>? _accelSub;
   StreamSubscription<GyroscopeEvent>? _gyroSub;
   StreamSubscription<MagnetometerEvent>? _magSub;
+  StreamSubscription<StepCount>? _stepSub;
   (double, double, double) _gravity = (0, 9.8, 0); // assume upright until read
   DateTime? _lastGyroAt;
+  int? _lastStepCount;
 
   int? _cardPk;
   int? _cardCandidatePk;
@@ -193,7 +196,45 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
       const Duration(seconds: 20),
       (_) => unawaited(_refreshLocation()),
     );
+    // Pedometer → planar odometry (BACKEND_SPEC.md Part 5). Best-effort and
+    // fully non-blocking: a denial or a device with no step counter just
+    // leaves the channel omitted, exactly like a missing gyro leaves yaw null.
+    unawaited(_initPedometer());
     setState(() => _access = _CameraAccess.granted);
+  }
+
+  /// Requests the step-counter permission and, if granted, starts turning
+  /// pedometer callbacks into tracked displacement. Android needs
+  /// `ACTIVITY_RECOGNITION` (API 29+); iOS resolves the same request through
+  /// the Motion & Fitness prompt `CMPedometer` itself would trigger.
+  Future<void> _initPedometer() async {
+    final status = await Permission.activityRecognition.request();
+    if (!mounted || !status.isGranted) {
+      return;
+    }
+    _stepSub = Pedometer.stepCountStream.listen((event) {
+      final steps = event.steps;
+      final last = _lastStepCount;
+      _lastStepCount = steps;
+      if (last == null) {
+        // The first callback is only the tracker's cumulative baseline — no
+        // step delta to integrate yet — but it confirms the tracker is live,
+        // so the session starts reporting (0, 0) instead of omitting odo.
+        _session.startOdometry();
+        return;
+      }
+      final delta = steps - last;
+      if (delta < 0) {
+        // The cumulative counter went backwards — a device reboot mid-session
+        // rebased its origin. Resuming would mix two different frames, so
+        // odometry stops for the rest of this session.
+        _session.invalidateOdometry();
+        return;
+      }
+      if (delta > 0) {
+        _session.recordSteps(delta);
+      }
+    }, onError: (Object _) {});
   }
 
   /// Pulls the freshest last-known GPS fix (instant, non-blocking, no prompt)
@@ -234,6 +275,7 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
     _accelSub?.cancel();
     _gyroSub?.cancel();
     _magSub?.cancel();
+    _stepSub?.cancel();
     unawaited(_session.flush());
     _scanner?.dispose();
     super.dispose();

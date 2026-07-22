@@ -186,6 +186,8 @@ class ArFrame {
     this.latitude,
     this.longitude,
     this.headingDeg,
+    this.odoXM,
+    this.odoYM,
   });
 
   final String frameId;
@@ -218,6 +220,16 @@ class ArFrame {
   /// data is already flowing, exactly as it did for [yawDeg].
   final double? headingDeg;
 
+  /// Cumulative planar displacement since session start (meters), in the
+  /// same session-fixed frame as [yawDeg]: +x is the camera's forward
+  /// direction at yaw 0 (session start), +y is 90° counterclockwise (the
+  /// camera's left). Unlike [latitude]/[longitude], `(0, 0)` is a legitimate
+  /// value — it's what the first tracked frame reports — so null means "no
+  /// tracker", never "didn't move". Sent as a pair or not at all (both null
+  /// unless a real tracker reading backs them). BACKEND_SPEC.md Part 5.
+  final double? odoXM;
+  final double? odoYM;
+
   Map<String, dynamic> toJson() => {
     'frame_id': frameId,
     'captured_at': capturedAt.toUtc().toIso8601String(),
@@ -230,6 +242,13 @@ class ArFrame {
       },
     if (headingDeg case final h?)
       'heading_deg': double.parse(h.toStringAsFixed(1)),
+    // Odometry is all-or-nothing too, and (0, 0) must survive — the pair is
+    // gated on non-null, not on truthiness.
+    if (odoXM case final ox?)
+      if (odoYM case final oy?) ...{
+        'odo_x_m': double.parse(ox.toStringAsFixed(3)),
+        'odo_y_m': double.parse(oy.toStringAsFixed(3)),
+      },
     'detections': [for (final d in detections) d.toJson()],
   };
 }

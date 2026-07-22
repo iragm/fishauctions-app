@@ -28,6 +28,13 @@
     <uses-feature android:name="android.hardware.nfc" android:required="false"/>
     <uses-permission android:name="android.permission.NFC"/>
 
+    <!-- Step counter — AR lot mode's odometry channel (BACKEND_SPEC.md
+         Part 5, odo_x_m/odo_y_m). Android 10+ gates TYPE_STEP_COUNTER /
+         TYPE_STEP_DETECTOR behind this runtime permission; optional feature
+         so the app still installs on hardware without the sensor. -->
+    <uses-feature android:name="android.hardware.sensor.stepcounter" android:required="false"/>
+    <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION"/>
+
     <!-- Camera — the web check-in screen scans barcodes via the browser camera
          (getUserMedia) inside the WebView. The system WebView denies that
          request unless we both hold this runtime permission and grant the

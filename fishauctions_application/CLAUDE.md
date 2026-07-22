@@ -152,13 +152,17 @@ GET  /api/mobile/ar/positions/?auction=<slug>         # solved lot positions
 solver in `auctions/ar_mapping.py`, the three endpoints, 60 s beat task). The
 app still degrades gracefully on deployments without it: pk-only overlay
 chips, observation upload disables itself on 404, locate mode reports lots as
-unmapped. **v2 is specced in `BACKEND_SPEC.md` Part 5** and not yet
-implemented: per-frame gyro `yaw_deg` (the app already sends it) as heading
-odometry so single-QR-at-a-time sweeps chain across tables, plus island
-(connected-component) detection/labeling/merging — v1 cannot relate lots that
-were never co-visible in a frame, and overlaps unconnected islands at the
-origin. The app already parses `component` on positions rows and refuses
-cross-island locate fixes/ghost anchors.
+unmapped. Every per-frame sensor channel beyond angle-only detections is now
+implemented app + backend: gyro `yaw_deg` heading odometry (so
+single-QR-at-a-time sweeps chain across tables), GPS `latitude`/`longitude`
+island anchoring, absolute compass `heading_deg` island orientation, and
+`odo_x_m`/`odo_y_m` planar dead-reckoning from the device's step counter
+(pedometer, `ar_lots_screen.dart`'s `_initPedometer` → `ArSessionController`'s
+`recordSteps`/`invalidateOdometry`) — the last one as of 2026-07-21. **Still
+open:** island (connected-component) detection/labeling/merging — v1 cannot
+relate lots that were never co-visible in a frame, and overlaps unconnected
+islands at the origin. The app already parses `component` on positions rows
+and refuses cross-island locate fixes/ghost anchors.
 
 ### Offline Auction Management
 
@@ -308,7 +312,7 @@ verifies the app compiles and links.
 - **Push notifications:** the backend side of `BACKEND_SPEC.md` Part 2 is **implemented** (`auctions/notifications.py` notify_user choke point, `send_push_to_user` + `promo_push_notifications` tasks, `UserData.push_notifications_instead_of_email`, `PushNotificationSent`, firebase-admin) but inert by design until (a) `FIREBASE_CREDENTIALS_JSON` is set on the deployment and (b) devices report real FCM tokens. App plumbing exists (`fcm_token` sent on device registration when present, `devices/unregister/` called on sign-out) but `PushService.currentToken()` is a stub returning null until a Firebase project + `firebase_messaging` are wired (the plan delivers the public Firebase client config via `/api/mobile/config/`, not a bundled `google-services.json`). Until both land, every notification falls back to email (`user_prefers_push()` is false for everyone). **Full setup checklist + config-endpoint decision: `PUSH.md`.**
 - **Square Tap to Pay (runtime):** Backend endpoints are done; charging still needs a real NFC device on API 31+ and Square production approval (sandbox works for the full flow). Not exercisable in CI.
 - ~~Offline sync backend~~ — landed (`offline/snapshot/` + `offline/sync/` in `auctions/mobile/`).
-- **AR lot mode backend v2:** v1 (models, solver, endpoints) landed on the backend. What's missing is `BACKEND_SPEC.md` Part 5 — gyro heading odometry (`yaw_deg`, which the app now uploads per frame) and island detection/labeling/merging (`component` on positions rows, which the app already consumes). Until it lands, lots that were never co-visible in one camera frame don't get reliable relative positions, and unconnected scanned islands overlap on the admin map.
+- **AR lot mode backend v2:** v1 (models, solver, endpoints) landed on the backend, and so has every per-frame sensor channel `BACKEND_SPEC.md` Part 5 specced — gyro `yaw_deg` heading odometry, GPS + absolute-heading island anchoring, and pedometer-driven `odo_x_m`/`odo_y_m` planar dead-reckoning. What's left is island (connected-component) detection/labeling/merging (`component` on positions rows, which the app already consumes). Until it lands, lots that were never co-visible in one camera frame don't get reliable relative positions, and unconnected scanned islands overlap on the admin map.
 - **Proximity check-in backend:** app side (ping service + shell UI) is implemented; `BACKEND_SPEC.md` Part 6 (`exact_location_set`, the three `checkin/*` endpoints, nudge dedupe, history) is not. Feature self-disables on 404 until then.
 - **Recruit volunteers:** entirely web/backend — `BACKEND_SPEC.md` Part 7. No app work at all (notifications ride the Part 2 push pipeline; the accept flow is a web page).
 - **Release signing:** wired in CI (keystore from repo secrets; the release workflow refuses to build unsigned). *Local* `flutter build --release` still falls back to debug signing unless you create `android/key.properties` yourself.

@@ -71,6 +71,14 @@ dependencies:
   package_info_plus: ^9.0.1
   # Temp directory to stage downloaded bytes before share/open.
   path_provider: ^2.1.6
+  # Step counter (Android TYPE_STEP_COUNTER / iOS CMPedometer) — AR lot mode's
+  # odometry channel (BACKEND_SPEC.md Part 5, odo_x_m/odo_y_m): each step
+  # advances the session's tracked displacement by a stride length in the
+  # current gyro-yaw direction. Gated behind Permission.activityRecognition
+  # (Android 10+; iOS shares the Motion & Fitness authorization with
+  # NSMotionUsageDescription, already declared for the AR screen's other
+  # sensors).
+  pedometer: ^4.2.0
   # Runtime permissions (Bluetooth, NFC, camera)
   permission_handler: ^12.0.3
   # OS print dialog (Android print framework / AirPrint) + PdfPreview widget.

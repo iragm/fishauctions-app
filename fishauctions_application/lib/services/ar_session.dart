@@ -66,6 +66,12 @@ class ArSessionController {
   static const int maxBufferedFrames = 25;
   static const Duration fixWindow = Duration(seconds: 15);
 
+  /// Assumed forward stride length applied per detected pedometer step. The
+  /// solver only uses odometry to sharpen its own noise model (σ = 0.3 m +
+  /// 5%·distance, BACKEND_SPEC.md Part 5), so a generic average stride is
+  /// adequate — no per-user calibration.
+  static const double strideLengthM = 0.75;
+
   final String auctionSlug;
   final String sessionId;
   final Future<void> Function(String sessionId, List<ArFrame> frames) _send;
@@ -90,6 +96,17 @@ class ArSessionController {
   double? _lat;
   double? _lon;
   double? _headingDeg;
+
+  // Odometry (BACKEND_SPEC.md Part 5): cumulative planar displacement since
+  // session start, in the same frame as yaw — +x forward at yaw 0 (session
+  // start), +y 90° ccw (left). Null until a real tracker reading arrives
+  // ("unknown", never "didn't move"); frozen null forever once invalidated
+  // (the underlying counter rebased, e.g. a device reboot mid-session) so
+  // the app never mixes two different origins in one session.
+  double? _odoX;
+  double? _odoY;
+  bool _odoInvalidated = false;
+
   final List<_TimedFix> _fixes = [];
   PoseEstimate? _pose;
   double _yawAtSolve = 0;
@@ -130,6 +147,45 @@ class ArSessionController {
     _headingDeg = (headingDeg != null && headingDeg >= 0 && headingDeg < 360)
         ? headingDeg
         : null;
+  }
+
+  /// Marks the odometry channel live as of now — the session's origin — so
+  /// frames from this point on carry `(0, 0)` instead of omitting the
+  /// channel. Call once, when the first real pedometer/tracker reading
+  /// arrives (a baseline with no step delta yet). No-op if already started
+  /// or invalidated.
+  void startOdometry() {
+    if (_odoInvalidated || _odoX != null) {
+      return;
+    }
+    _odoX = 0;
+    _odoY = 0;
+  }
+
+  /// Advances the tracked odometry by [count] strides in the current
+  /// (session-fixed) forward direction — call once per pedometer callback
+  /// with however many new steps it reported. Uses the same integrated yaw
+  /// as [ArFrame.yawDeg] so the two channels describe one consistent frame,
+  /// per the backend's `φ = θ − yaw` recovery. No-op before [startOdometry]
+  /// or after [invalidateOdometry].
+  void recordSteps(int count) {
+    if (_odoInvalidated || count <= 0 || _odoX == null) {
+      return;
+    }
+    final distanceM = strideLengthM * count;
+    _odoX = _odoX! + distanceM * math.cos(_yawRad);
+    _odoY = _odoY! + distanceM * math.sin(_yawRad);
+  }
+
+  /// Stops odometry for the rest of this session — the underlying tracker
+  /// rebased its origin (e.g. the step counter went backwards after a device
+  /// reboot mid-session). Resuming with values in a new frame would silently
+  /// corrupt the solver's displacement residuals, so the channel goes null
+  /// for good instead (BACKEND_SPEC.md Part 5's tracker-reset rule).
+  void invalidateOdometry() {
+    _odoInvalidated = true;
+    _odoX = null;
+    _odoY = null;
   }
 
   /// Integrate a gyroscope reading (rad/s, device axes) over [dtSeconds].
@@ -192,6 +248,11 @@ class ArSessionController {
           latitude: _lat,
           longitude: _lon,
           headingDeg: _headingDeg,
+          // Tracked odometry, when a pedometer/tracker reading has started
+          // the channel — (0, 0) is a legitimate value, so this is gated on
+          // null, not truthiness.
+          odoXM: _odoX,
+          odoYM: _odoY,
           detections: detections,
         ),
       );
