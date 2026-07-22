@@ -41,11 +41,17 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # Android Gradle Plugin 9 requires JDK 17.
+      # AGP 9's own compile/lint tooling needs JDK 21 to *run* (its bundled
+      # lint crashes under JDK 17 — NoSuchMethodError on java.util.List's
+      # JDK-21-only removeLast(), reproduced locally against url_launcher_android
+      # and fixed by bumping this JDK). This is independent of the app's own
+      # bytecode target: build.gradle.kts pins sourceCompatibility/
+      # targetCompatibility/kotlin jvmTarget to 17, so the app still compiles
+      # and runs against API 28+ as before.
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '21'
 
       - uses: subosito/flutter-action@v2
         with:

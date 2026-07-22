@@ -325,7 +325,16 @@ GitHub Actions live in `.github/workflows/` (repo root, above `fishauctions_appl
 - **ios-release.yml** — **manual** (`workflow_dispatch`) on a `macos-latest` runner, same CI gate. Default run is an unsigned `flutter build ios --no-codesign` (works today, no secrets — the macOS equivalent of the Android compile gate; it's what verifies `AppDelegate.swift`/plugins actually build on Apple toolchain). The `distribute: true` path (signed `.ipa` → TestFlight via an App Store Connect API key) is scaffolded and fails fast until the signing secrets exist (see `IOS.md`).
 - **dependabot.yml** — weekly grouped minor/patch PRs (pub, gradle, actions); majors arrive individually.
 
-Builds require **JDK 17** (AGP 9). `minSdk` is **28** (Square SDK floor).
+The app's own bytecode target is Java 17 (`sourceCompatibility`/`targetCompatibility`/Kotlin
+`jvmTarget` in `android/app/build.gradle.kts`) — unrelated to the JDK actually
+*running* Gradle. `android-release.yml` runs Gradle under **JDK 21**: AGP 9's
+bundled lint tool crashes under JDK 17 (`NoSuchMethodError` on
+`java.util.List.removeLast()`, a JDK-21-only default method — reproduced
+locally against `url_launcher_android`'s `lintVitalAnalyzeRelease` and fixed by
+bumping the runner JDK, not by touching the app's Java 17 target). `ci.yml`
+doesn't invoke Gradle at all (`flutter analyze`/`test`/build_runner are pure
+Dart), so it has no JDK setup step and isn't affected. `minSdk` is **28**
+(Square SDK floor).
 
 ## Auth Model — Account Required
 
