@@ -183,8 +183,6 @@ class ArFrame {
     required this.capturedAt,
     required this.detections,
     this.yawDeg,
-    this.latitude,
-    this.longitude,
     this.headingDeg,
     this.odoXM,
     this.odoYM,
@@ -203,30 +201,20 @@ class ArFrame {
   /// "didn't turn". Drift handling is the server's problem (it knows Δt).
   final double? yawDeg;
 
-  /// Phone GPS fix at capture (WGS84 degrees). Sent as a pair or not at all —
-  /// both null unless a real fix was available (no location permission / no
-  /// lock ⇒ omitted, never (0, 0)). The server uses it only to anchor whole
-  /// disconnected islands relative to each other, so a coarse last-known fix
-  /// is fine; it never positions an individual lot.
-  final double? latitude;
-  final double? longitude;
-
   /// Absolute compass heading of the camera at capture — degrees clockwise
   /// from **magnetic** north (0 = N, 90 = E), tilt-compensated. Unlike
   /// [yawDeg] (relative, arbitrary zero) this is an absolute reference, so the
-  /// solver can fix each island's *orientation*, not just its GPS position.
-  /// Null when no magnetometer reading is available. Backend-side use is a
-  /// future extension (BACKEND_SPEC.md Part 5); the app sends it now so the
-  /// data is already flowing, exactly as it did for [yawDeg].
+  /// solver can fix each disconnected island's *orientation* as a soft prior.
+  /// Null when no magnetometer reading is available. BACKEND_SPEC.md Part 5.
   final double? headingDeg;
 
   /// Cumulative planar displacement since session start (meters), in the
   /// same session-fixed frame as [yawDeg]: +x is the camera's forward
   /// direction at yaw 0 (session start), +y is 90° counterclockwise (the
-  /// camera's left). Unlike [latitude]/[longitude], `(0, 0)` is a legitimate
-  /// value — it's what the first tracked frame reports — so null means "no
-  /// tracker", never "didn't move". Sent as a pair or not at all (both null
-  /// unless a real tracker reading backs them). BACKEND_SPEC.md Part 5.
+  /// camera's left). `(0, 0)` is a legitimate value — it's what the first
+  /// tracked frame reports — so null means "no tracker", never "didn't
+  /// move". Sent as a pair or not at all (both null unless a real tracker
+  /// reading backs them). BACKEND_SPEC.md Part 5.
   final double? odoXM;
   final double? odoYM;
 
@@ -234,12 +222,6 @@ class ArFrame {
     'frame_id': frameId,
     'captured_at': capturedAt.toUtc().toIso8601String(),
     if (yawDeg case final yaw?) 'yaw_deg': double.parse(yaw.toStringAsFixed(2)),
-    // GPS is all-or-nothing: only emit the pair when both are present.
-    if (latitude case final lat?)
-      if (longitude case final lon?) ...{
-        'latitude': double.parse(lat.toStringAsFixed(6)),
-        'longitude': double.parse(lon.toStringAsFixed(6)),
-      },
     if (headingDeg case final h?)
       'heading_deg': double.parse(h.toStringAsFixed(1)),
     // Odometry is all-or-nothing too, and (0, 0) must survive — the pair is

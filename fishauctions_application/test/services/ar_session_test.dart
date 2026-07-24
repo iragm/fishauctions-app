@@ -84,13 +84,12 @@ void main() {
       expect(sent, hasLength(1));
     });
 
-    test('frames record the integrated gyro heading at capture', () {
-      // No gyro data yet before the first frame: yaw must be absent, not
-      // zero. Then turn left 90° (ccw about gravity, phone upright) and
-      // sight lot 2.
+    test('frames record the AR-tracked yaw at capture', () {
+      // No pose data yet before the first frame: yaw must be absent, not
+      // zero. Then turn left 90° (ccw about gravity) and sight lot 2.
       session
         ..addFrame({1: _m()})
-        ..integrateGyro(0, math.pi / 2, 0, 1, gx: 0, gy: 9.8, gz: 0)
+        ..updateOdometryFromPose(yawRad: math.pi / 2, odoX: 0, odoY: 0)
         ..addFrame({2: _m()});
       clock.advance(ArSessionController.flushInterval);
       session.flushIfDue();
@@ -99,31 +98,17 @@ void main() {
       expect(frames.last.yawDeg, closeTo(90, 0.01));
     });
 
-    test('stamps frames with the latest GPS fix and absolute heading', () {
+    test('stamps frames with the latest absolute heading', () {
       session
-        ..updateLocation(40.5, -79.9)
         ..updateHeading(123.4)
         ..addFrame({1: _m()});
       clock.advance(ArSessionController.flushInterval);
       session.flushIfDue();
       final frame = sent.single.single;
-      expect(frame.latitude, 40.5);
-      expect(frame.longitude, -79.9);
       expect(frame.headingDeg, 123.4);
     });
 
-    test('a half GPS fix is dropped to null (both or neither)', () {
-      session
-        ..updateLocation(40.5, null)
-        ..addFrame({1: _m()});
-      clock.advance(ArSessionController.flushInterval);
-      session.flushIfDue();
-      final frame = sent.single.single;
-      expect(frame.latitude, isNull);
-      expect(frame.longitude, isNull);
-    });
-
-    test('odometry is omitted until a tracker reading starts it', () {
+    test('odometry is omitted until a tracked pose arrives', () {
       session.addFrame({1: _m()});
       clock.advance(ArSessionController.flushInterval);
       session.flushIfDue();
@@ -132,9 +117,9 @@ void main() {
       expect(frame.odoYM, isNull);
     });
 
-    test('startOdometry reports the session origin as (0, 0), not absent', () {
+    test('a tracked pose reports the session origin as (0, 0), not absent', () {
       session
-        ..startOdometry()
+        ..updateOdometryFromPose(yawRad: 0, odoX: 0, odoY: 0)
         ..addFrame({1: _m()});
       clock.advance(ArSessionController.flushInterval);
       session.flushIfDue();
@@ -143,87 +128,47 @@ void main() {
       expect(frame.odoYM, 0);
     });
 
-    test(
-      'recordSteps advances odometry along the current yaw direction',
-      () async {
-        session
-          ..startOdometry()
-          ..recordSteps(2) // straight ahead at yaw 0
-          ..addFrame({1: _m()});
-        clock.advance(ArSessionController.flushInterval);
-        session.flushIfDue();
-        final straight = sent.single.single;
-        expect(
-          straight.odoXM,
-          closeTo(2 * ArSessionController.strideLengthM, 1e-9),
-        );
-        expect(straight.odoYM, closeTo(0, 1e-9));
-
-        // Let flush()'s fire-and-forget `finally` (which resets the in-flight
-        // guard) settle before triggering a second cycle — it only needs a
-        // microtask in real usage because the event loop pumps between the
-        // screen's timer ticks, which a synchronous test body doesn't do.
-        await Future<void>.value();
-
-        // Turn left 90° (ccw about gravity) and take one more stride: it should
-        // land almost entirely on the +y axis, matching yaw's convention.
-        session
-          ..integrateGyro(0, math.pi / 2, 0, 1, gx: 0, gy: 9.8, gz: 0)
-          ..recordSteps(1)
-          ..addFrame({2: _m()});
-        clock.advance(ArSessionController.flushInterval);
-        session.flushIfDue();
-        final turned = sent[1].single;
-        expect(
-          turned.odoXM,
-          closeTo(2 * ArSessionController.strideLengthM, 1e-6),
-        );
-        expect(turned.odoYM, closeTo(ArSessionController.strideLengthM, 1e-6));
-      },
-    );
-
-    test('recordSteps before startOdometry is a no-op — no fake tracker', () {
+    test('odometry tracks the AR pose directly, no stride math', () async {
       session
-        ..recordSteps(5)
+        ..updateOdometryFromPose(yawRad: 0, odoX: 1.5, odoY: 0)
+        ..addFrame({1: _m()});
+      clock.advance(ArSessionController.flushInterval);
+      session.flushIfDue();
+      final straight = sent.single.single;
+      expect(straight.odoXM, closeTo(1.5, 1e-9));
+      expect(straight.odoYM, closeTo(0, 1e-9));
+
+      // Let flush()'s fire-and-forget `finally` (which resets the in-flight
+      // guard) settle before triggering a second cycle — it only needs a
+      // microtask in real usage because the event loop pumps between the
+      // screen's timer ticks, which a synchronous test body doesn't do.
+      await Future<void>.value();
+
+      // A later pose update simply replaces the value — the whole point of
+      // pose-based odometry is that it's absolute, not accumulated.
+      session
+        ..updateOdometryFromPose(yawRad: math.pi / 2, odoX: 1.5, odoY: 0.75)
+        ..addFrame({2: _m()});
+      clock.advance(ArSessionController.flushInterval);
+      session.flushIfDue();
+      final turned = sent[1].single;
+      expect(turned.yawDeg, closeTo(90, 1e-6));
+      expect(turned.odoXM, closeTo(1.5, 1e-9));
+      expect(turned.odoYM, closeTo(0.75, 1e-9));
+    });
+
+    test('a null yawRad leaves yaw as-is but still updates odometry', () {
+      session
+        ..updateOdometryFromPose(yawRad: math.pi / 4, odoX: 0, odoY: 0)
+        ..updateOdometryFromPose(yawRad: null, odoX: 2, odoY: 3)
         ..addFrame({1: _m()});
       clock.advance(ArSessionController.flushInterval);
       session.flushIfDue();
       final frame = sent.single.single;
-      expect(frame.odoXM, isNull);
-      expect(frame.odoYM, isNull);
+      expect(frame.yawDeg, closeTo(45, 1e-6));
+      expect(frame.odoXM, closeTo(2, 1e-9));
+      expect(frame.odoYM, closeTo(3, 1e-9));
     });
-
-    test(
-      'invalidateOdometry stops the channel for good (tracker reset)',
-      () async {
-        session
-          ..startOdometry()
-          ..recordSteps(3)
-          ..invalidateOdometry()
-          ..addFrame({1: _m()});
-        clock.advance(ArSessionController.flushInterval);
-        session.flushIfDue();
-        final afterReset = sent.single.single;
-        expect(afterReset.odoXM, isNull);
-        expect(afterReset.odoYM, isNull);
-
-        // See the previous test: yield a microtask so flush()'s fire-and-forget
-        // `finally` settles before a second cycle in the same test body.
-        await Future<void>.value();
-
-        // Further calls — even a fresh startOdometry — must not resurrect it;
-        // the session must never mix two different tracker origins.
-        session
-          ..startOdometry()
-          ..recordSteps(1)
-          ..addFrame({2: _m()});
-        clock.advance(ArSessionController.flushInterval);
-        session.flushIfDue();
-        final stillNull = sent[1].single;
-        expect(stillNull.odoXM, isNull);
-        expect(stillNull.odoYM, isNull);
-      },
-    );
 
     test('an out-of-range heading is rejected', () {
       session
@@ -310,7 +255,7 @@ void main() {
       expect(located.bearingRightRad.abs(), lessThan(0.05));
     });
 
-    test('turning after the solve swings the arrow by the gyro yaw', () {
+    test('turning after the solve swings the arrow by the tracked yaw', () {
       session
         ..setLocateTarget(
           9,
@@ -322,9 +267,10 @@ void main() {
           3: measureFrom(1, 3),
         });
       expect(session.locateState, isA<LocateAim>());
-      // Turn left 0.5 rad (ccw about gravity, phone upright): the target,
-      // previously dead ahead, should now read 0.5 rad to the right.
-      session.integrateGyro(0, 0.5, 0, 1, gx: 0, gy: 9.8, gz: 0);
+      // Turn left 0.5 rad (ccw about gravity, phone upright, starting from
+      // yaw 0): the target, previously dead ahead, should now read 0.5 rad
+      // to the right.
+      session.updateOdometryFromPose(yawRad: 0.5, odoX: 0, odoY: 0);
       final aim = session.locateState! as LocateAim;
       expect(aim.bearingRightRad, closeTo(0.5, 0.05));
     });

@@ -28,12 +28,13 @@
     <uses-feature android:name="android.hardware.nfc" android:required="false"/>
     <uses-permission android:name="android.permission.NFC"/>
 
-    <!-- Step counter — AR lot mode's odometry channel (BACKEND_SPEC.md
-         Part 5, odo_x_m/odo_y_m). Android 10+ gates TYPE_STEP_COUNTER /
-         TYPE_STEP_DETECTOR behind this runtime permission; optional feature
-         so the app still installs on hardware without the sensor. -->
-    <uses-feature android:name="android.hardware.sensor.stepcounter" android:required="false"/>
-    <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION"/>
+    <!-- ARCore — AR lot mode's camera pipeline (BACKEND_SPEC.md Part 5,
+         odo_x_m/odo_y_m): visual-inertial pose tracking replaces the old
+         pedometer-based stride counting. "optional" (not "required") so the
+         app still installs on devices without Play Services for AR — AR lot
+         mode itself degrades to an explainer screen there (ar/ArSessionManager.kt). -->
+    <uses-feature android:name="android.hardware.camera.ar" android:required="false"/>
+    <meta-data android:name="com.google.ar.core" android:value="optional"/>
 
     <!-- Camera — the web check-in screen scans barcodes via the browser camera
          (getUserMedia) inside the WebView. The system WebView denies that
@@ -93,6 +94,23 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
+
+        <!-- Required by flutter_inappwebview's WebChromeClient for the
+             <input type="file"> camera-capture path: it saves the photo via
+             FileProvider.getUriForFile(context, "${applicationId}.flutter_inappwebview_android.fileprovider", file)
+             before handing the browser a Uri. Without this provider declared,
+             that call throws (swallowed by the plugin), so the photo is taken
+             but never returned to the form's file callback. Authority string
+             and file layout must match InAppWebViewFileProvider exactly. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.flutter_inappwebview_android.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/provider_paths" />
+        </provider>
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and

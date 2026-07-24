@@ -103,25 +103,76 @@ double focalPxFor(
   return (diag / 2) / math.tan(assumedDiagonalFovDeg * math.pi / 360);
 }
 
+/// Inverts a camera's Brown-Conrady radial+tangential lens distortion model
+/// to recover the undistorted normalized coordinate for a detected
+/// (distorted) point. [xc]/[yc] are the *distorted* normalized coordinates —
+/// pixel offset from the optical center divided by focal length in pixels,
+/// i.e. what a QR corner's pixel position becomes once expressed in the same
+/// "tan of the ray angle" units [estimateMeasurement] already works in.
+/// [k] is `[k0, k1, k2, k3, k4]` (Android `CameraCharacteristics.
+/// LENS_DISTORTION` convention — radial terms k0-k2, tangential k3-k4).
+///
+/// The forward model (undistorted → distorted) has no closed-form inverse,
+/// so this is the standard fixed-point iteration (the same approach
+/// OpenCV's `undistortPoints` uses): starting from the distorted point
+/// itself as an initial guess, each pass re-applies the forward model at the
+/// current estimate and corrects toward the target. Phone-camera distortion
+/// is moderate enough that a fixed 5 iterations converges well past any
+/// accuracy this pipeline needs elsewhere.
+(double, double) undistortNormalized(double xc, double yc, List<double> k) {
+  final k0 = k[0], k1 = k[1], k2 = k[2], k3 = k[3], k4 = k[4];
+  var xi = xc;
+  var yi = yc;
+  for (var i = 0; i < 5; i++) {
+    final r2 = xi * xi + yi * yi;
+    final radial = 1 + k0 * r2 + k1 * r2 * r2 + k2 * r2 * r2 * r2;
+    final dxTang = k3 * (r2 + 2 * xi * xi) + 2 * k4 * xi * yi;
+    final dyTang = k4 * (r2 + 2 * yi * yi) + 2 * k3 * xi * yi;
+    // A near-zero radial term means the coefficients are degenerate for this
+    // point (or garbage) — clamp rather than let the divide blow up.
+    final safeRadial = radial.abs() < 1e-3
+        ? (radial.isNegative ? -1e-3 : 1e-3)
+        : radial;
+    xi = (xc - dxTang) / safeRadial;
+    yi = (yc - dyTang) / safeRadial;
+  }
+  return (xi, yi);
+}
+
 /// Estimates bearing and depression to a sighted QR. [pitchDownRad] is how
 /// far the camera axis points below horizontal (from the gravity vector).
+///
+/// [lensDistortion], when the device reports it (Android only —
+/// `PlatformBridge.cameraLensDistortion`'s sibling channel call), corrects
+/// the detected pixel for the camera's real lens distortion before
+/// computing the angle.
+/// Wide rear/ultra-wide lenses have real radial distortion that biases a
+/// naive pinhole bearing more the further a detection sits from frame
+/// center; assumes a centered optical center (standard for a rear main
+/// camera), matching the same assumption the undistorted formula already
+/// made implicitly. Null (no data, or a malformed 5-element list) leaves the
+/// bearing exactly as before — this only ever *adds* a correction, never
+/// changes behavior when distortion data is unavailable.
 ArMeasurement estimateMeasurement({
   required QrSighting sighting,
   required Size imageSize,
   required double pitchDownRad,
   double? deviceHFovDeg,
+  List<double>? lensDistortion,
 }) {
   final focal = focalPxFor(imageSize, deviceHFovDeg: deviceHFovDeg);
-  final bearingRad = math.atan2(
-    sighting.center.dx - imageSize.width / 2,
-    focal,
-  );
+  var xNorm = (sighting.center.dx - imageSize.width / 2) / focal;
+  var yNorm = (sighting.center.dy - imageSize.height / 2) / focal;
+  if (lensDistortion != null && lensDistortion.length == 5) {
+    (xNorm, yNorm) = undistortNormalized(xNorm, yNorm, lensDistortion);
+  }
+  final bearingRad = math.atan(xNorm);
   // Ray depression below the camera axis (image y grows downward), plus the
   // camera's own pitch.
-  final depressionRad =
-      (pitchDownRad +
-              math.atan2(sighting.center.dy - imageSize.height / 2, focal))
-          .clamp(-math.pi / 2, math.pi / 2);
+  final depressionRad = (pitchDownRad + math.atan(yNorm)).clamp(
+    -math.pi / 2,
+    math.pi / 2,
+  );
   // Bigger on-screen codes localize better; ~60 px is a comfortably sharp
   // detection at typical resolutions.
   final quality = (sighting.edgePx / 60).clamp(0.1, 1.0);
@@ -145,6 +196,46 @@ Offset mapImagePointToWidget(Offset p, Size imageSize, Size widgetSize) {
   final dx = (widgetSize.width - imageSize.width * scale) / 2;
   final dy = (widgetSize.height - imageSize.height * scale) / 2;
   return Offset(p.dx * scale + dx, p.dy * scale + dy);
+}
+
+/// Converts a raw AR world-tracking pose (ARCore/ARKit) into this app's yaw +
+/// BACKEND_SPEC.md Part 5 odometry frame ("+x = forward at yaw 0 / session
+/// start, +y = 90° ccw from +x"), replacing the pedometer's coarse
+/// stride-counted odometry with real metric VIO tracking.
+///
+/// [px]/[pz] are the pose's horizontal world translation in meters; [fx]/[fz]
+/// the horizontal components of the camera's forward direction — both taken
+/// straight from the native side with no trig applied there (ARCore's
+/// `Pose.getTranslation()` / `-Pose.getZAxis()`, or ARKit's
+/// `transform.columns.3` / `-transform.columns.2`; both platforms use the
+/// same right-handed, Y-up, camera-looks-down-−Z convention, so one formula
+/// covers both natively).
+///
+/// Derivation: this app's yaw is ccw-positive as seen from above (see
+/// `ArSessionController`'s yaw docs). For a right-handed Y-up world, that's
+/// exactly the standard positive rotation about +Y, whose matrix sends a
+/// yaw-0 forward vector (0, −1) to (−sin(yaw), −cos(yaw)) — inverting gives
+/// `yawRad = atan2(-fx, -fz)`. Odometry's "+x" is *defined* as that same
+/// yaw-0 forward direction and "+y" its 90° ccw rotation, i.e. (−1, 0) in the
+/// pose's raw (x, z); projecting (px, pz) onto those two axes gives
+/// `odoX = -pz`, `odoY = -px`. Cross-checked in ar_geometry_test.dart against
+/// the pre-existing pedometer-style incremental formula (walk a sequence of
+/// yaw/step pairs and sum `cos`/`sin` steps) landing on the same point this
+/// direct, pose-based formula gives from the endpoint alone.
+///
+/// `yawRad` is null when the camera points too near-vertical for a
+/// horizontal heading to mean anything (mirrors [magneticHeadingDeg]'s
+/// degenerate guard) — odometry is still returned, since a momentarily
+/// unusable heading doesn't make the position wrong.
+({double? yawRad, double odoX, double odoY}) arPoseToYawAndOdometry({
+  required double px,
+  required double pz,
+  required double fx,
+  required double fz,
+}) {
+  final horizontalMag = math.sqrt(fx * fx + fz * fz);
+  final yawRad = horizontalMag < 1e-3 ? null : math.atan2(-fx, -fz);
+  return (yawRad: yawRad, odoX: -pz, odoY: -px);
 }
 
 /// Tilt-compensated magnetic heading of the camera axis, in degrees clockwise

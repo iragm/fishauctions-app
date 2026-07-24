@@ -3,18 +3,18 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
-import 'package:mobile_scanner/mobile_scanner.dart';
-import 'package:pedometer/pedometer.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 
+import '../models/ar_camera_event.dart';
 import '../models/ar_models.dart';
 import '../services/ar_api.dart';
+import '../services/ar_camera_service.dart';
 import '../services/ar_session.dart';
-import '../services/location_service.dart';
 import '../utils/ar_geometry.dart';
 import '../utils/lot_qr.dart';
 import '../utils/platform_bridge.dart';
+import '../widgets/ar_camera_view.dart';
 
 /// AR lot mode: a live camera view that recognizes lot-label QR codes and
 /// overlays what they are. Reached from the web's app-only buttons —
@@ -77,12 +77,24 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
   static const int _maxNamedChips = 3;
 
   _CameraAccess _access = _CameraAccess.checking;
-  MobileScannerController? _scanner;
+
+  /// The native AR session's own lifecycle, from `ArCameraService`'s pose
+  /// stream: `checking` | `unsupported` | `installing` | `ready` | `error`.
+  /// Only meaningful once [_access] is `granted` and `ArCameraView` has
+  /// mounted (that's what starts the native session in the first place).
+  String _arStatus = 'checking';
+  String? _arStatusMessage;
+
   late final ArSessionController _session;
 
   /// Device-reported camera horizontal FOV, or null on the assumed-FOV
   /// fallback. Fetched once; bearings and the observation POST both carry it.
   double? _deviceHFov;
+
+  /// Back camera Brown-Conrady lens distortion coefficients, or null when
+  /// unavailable (iOS, or an Android device/HAL that doesn't report them).
+  /// Fetched once; every bearing/depression estimate corrects for it.
+  List<double>? _lensDistortion;
 
   final Map<int, _VisibleLot> _visible = {};
   final Map<int, ArLotMeta> _meta = {};
@@ -92,21 +104,17 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
 
   Timer? _sweepTimer;
   Timer? _positionsTimer;
-  Timer? _locationTimer;
   StreamSubscription<AccelerometerEvent>? _accelSub;
-  StreamSubscription<GyroscopeEvent>? _gyroSub;
   StreamSubscription<MagnetometerEvent>? _magSub;
-  StreamSubscription<StepCount>? _stepSub;
+  StreamSubscription<ArCameraEvent>? _arPoseSub;
+  StreamSubscription<ArDetectionBatch>? _arDetectionSub;
   (double, double, double) _gravity = (0, 9.8, 0); // assume upright until read
-  DateTime? _lastGyroAt;
-  int? _lastStepCount;
 
   int? _cardPk;
   int? _cardCandidatePk;
   DateTime _cardCandidateSince = DateTime.fromMillisecondsSinceEpoch(0);
   DateTime? _cardBrokenAt;
   LocateState? _locate;
-  bool _torchOn = false;
 
   @override
   void initState() {
@@ -140,20 +148,21 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
       return;
     }
     // Real intrinsics when the device will say — turns QR pixel offsets into
-    // accurate bearings instead of the assumed-FOV guess.
+    // accurate bearings instead of the assumed-FOV guess. Independent of who
+    // currently owns the camera stream (a plain CameraCharacteristics query),
+    // so this is unaffected by ARCore/ARKit owning the capture session below.
     _deviceHFov = await PlatformBridge.cameraHorizontalFovDeg();
+    _lensDistortion = await PlatformBridge.cameraLensDistortion();
     if (!mounted) {
       return;
     }
-    // Well above the 640×480 Android default: decode range for a small
-    // printed QR scales linearly with resolution, and this is what limits
-    // how far away labels can be recognized. (Android-only knob; iOS Vision
-    // picks its own buffer.) Costs detection frame rate on older phones —
-    // acceptable at the ~4 Hz this screen needs.
-    _scanner = MobileScannerController(
-      formats: const [BarcodeFormat.qrCode],
-      detectionSpeed: DetectionSpeed.unrestricted,
-      cameraResolution: const Size(2560, 1440),
+    _arPoseSub = ArCameraService.instance.poseEvents().listen(
+      _onArCameraEvent,
+      onError: (Object _) {},
+    );
+    _arDetectionSub = ArCameraService.instance.detectionEvents().listen(
+      _onDetections,
+      onError: (Object _) {},
     );
     _accelSub =
         accelerometerEventStream(
@@ -161,20 +170,6 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
         ).listen((e) {
           _gravity = (e.x, e.y, e.z);
           _session.updateGravity(e.x, e.y, e.z);
-        }, onError: (Object _) {});
-    _gyroSub = gyroscopeEventStream(samplingPeriod: SensorInterval.gameInterval)
-        .listen((e) {
-          final last = _lastGyroAt;
-          _lastGyroAt = e.timestamp;
-          if (last == null) {
-            return;
-          }
-          final dt = e.timestamp.difference(last).inMicroseconds / 1e6;
-          if (dt <= 0 || dt > 0.5) {
-            return; // stream hiccup; integrating over it would smear yaw
-          }
-          final (gx, gy, gz) = _gravity;
-          _session.integrateGyro(e.x, e.y, e.z, dt, gx: gx, gy: gy, gz: gz);
         }, onError: (Object _) {});
     // Magnetometer → absolute (magnetic) camera heading, tilt-compensated with
     // the gravity vector. Stamped on each frame so the backend can one day fix
@@ -188,63 +183,47 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
       const Duration(milliseconds: 250),
       (_) => _sweep(),
     );
-    // Stamp frames with the phone's GPS fix (island anchoring). Never prompts
-    // and never blocks scanning: a coarse last-known fix is plenty, so we grab
-    // it instantly and refresh periodically. No permission ⇒ stays null.
-    unawaited(_refreshLocation());
-    _locationTimer = Timer.periodic(
-      const Duration(seconds: 20),
-      (_) => unawaited(_refreshLocation()),
-    );
-    // Pedometer → planar odometry (BACKEND_SPEC.md Part 5). Best-effort and
-    // fully non-blocking: a denial or a device with no step counter just
-    // leaves the channel omitted, exactly like a missing gyro leaves yaw null.
-    unawaited(_initPedometer());
     setState(() => _access = _CameraAccess.granted);
   }
 
-  /// Requests the step-counter permission and, if granted, starts turning
-  /// pedometer callbacks into tracked displacement. Android needs
-  /// `ACTIVITY_RECOGNITION` (API 29+); iOS resolves the same request through
-  /// the Motion & Fitness prompt `CMPedometer` itself would trigger.
-  Future<void> _initPedometer() async {
-    final status = await Permission.activityRecognition.request();
-    if (!mounted || !status.isGranted) {
-      return;
+  /// Handles one event from `ArCameraService.poseEvents()`: either a session
+  /// status change (drives the checking/unsupported/installing/ready/error
+  /// explainer alongside [_access]) or a tracked pose, converted via
+  /// `arPoseToYawAndOdometry` (ar_geometry.dart) and fed straight into the
+  /// session. A pose reported while *not* tracking is dropped rather than
+  /// forwarded — same "no update leaves the last known value" contract as a
+  /// momentarily-missing magnetometer reading.
+  void _onArCameraEvent(ArCameraEvent event) {
+    switch (event) {
+      case ArStatusUpdate(:final status, :final message):
+        if (mounted) {
+          setState(() {
+            _arStatus = status;
+            _arStatusMessage = message;
+          });
+        }
+      case ArPoseUpdate(
+        :final tracking,
+        :final px,
+        :final pz,
+        :final fx,
+        :final fz,
+      ):
+        if (!tracking) {
+          return;
+        }
+        final converted = arPoseToYawAndOdometry(
+          px: px,
+          pz: pz,
+          fx: fx,
+          fz: fz,
+        );
+        _session.updateOdometryFromPose(
+          yawRad: converted.yawRad,
+          odoX: converted.odoX,
+          odoY: converted.odoY,
+        );
     }
-    _stepSub = Pedometer.stepCountStream.listen((event) {
-      final steps = event.steps;
-      final last = _lastStepCount;
-      _lastStepCount = steps;
-      if (last == null) {
-        // The first callback is only the tracker's cumulative baseline — no
-        // step delta to integrate yet — but it confirms the tracker is live,
-        // so the session starts reporting (0, 0) instead of omitting odo.
-        _session.startOdometry();
-        return;
-      }
-      final delta = steps - last;
-      if (delta < 0) {
-        // The cumulative counter went backwards — a device reboot mid-session
-        // rebased its origin. Resuming would mix two different frames, so
-        // odometry stops for the rest of this session.
-        _session.invalidateOdometry();
-        return;
-      }
-      if (delta > 0) {
-        _session.recordSteps(delta);
-      }
-    }, onError: (Object _) {});
-  }
-
-  /// Pulls the freshest last-known GPS fix (instant, non-blocking, no prompt)
-  /// into the session so subsequent frames carry it. Sends both or neither —
-  /// no fix leaves the session's location null.
-  Future<void> _refreshLocation() async {
-    final position = await LocationService.instance.positionIfPermitted(
-      fresh: false,
-    );
-    _session.updateLocation(position?.latitude, position?.longitude);
   }
 
   Future<void> _initLocate() async {
@@ -271,27 +250,25 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
   void dispose() {
     _sweepTimer?.cancel();
     _positionsTimer?.cancel();
-    _locationTimer?.cancel();
     _accelSub?.cancel();
-    _gyroSub?.cancel();
     _magSub?.cancel();
-    _stepSub?.cancel();
+    _arPoseSub?.cancel();
+    _arDetectionSub?.cancel();
     unawaited(_session.flush());
-    _scanner?.dispose();
     super.dispose();
   }
 
   // ── Detection ─────────────────────────────────────────────────────────────
 
-  void _onDetect(BarcodeCapture capture) {
-    if (!mounted || capture.size.isEmpty) {
+  void _onDetections(ArDetectionBatch batch) {
+    if (!mounted || batch.imageSize.isEmpty) {
       return;
     }
-    final imageSize = capture.size;
+    final imageSize = batch.imageSize;
     final now = DateTime.now();
     final measurements = <int, ArMeasurement>{};
     final seen = <int, _VisibleLot>{};
-    for (final barcode in capture.barcodes) {
+    for (final barcode in batch.barcodes) {
       final pk = parseLotQr(barcode.rawValue);
       if (pk == null) {
         continue;
@@ -305,6 +282,7 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
         imageSize: imageSize,
         pitchDownRad: _session.pitchDownRad,
         deviceHFovDeg: _deviceHFov,
+        lensDistortion: _lensDistortion,
       );
       measurements[pk] = measurement;
       seen[pk] = _VisibleLot(
@@ -432,13 +410,6 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
     context.pop('$base${sep}src=ar');
   }
 
-  Future<void> _toggleTorch() async {
-    await _scanner?.toggleTorch();
-    if (mounted) {
-      setState(() => _torchOn = !_torchOn);
-    }
-  }
-
   /// Toggle the caller's watch state on [pk] from the card's star. Optimistic:
   /// flip locally, POST it, and revert with a snackbar if the server call
   /// fails (the endpoint sets, not toggles, so it's safe to retry).
@@ -489,14 +460,10 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
       backgroundColor: Colors.black.withValues(alpha: 0.6),
       foregroundColor: Colors.white,
       title: Text(_title, overflow: TextOverflow.ellipsis),
-      actions: [
-        if (_access == _CameraAccess.granted)
-          IconButton(
-            onPressed: _toggleTorch,
-            tooltip: 'Flashlight',
-            icon: Icon(_torchOn ? Icons.flash_on : Icons.flash_off),
-          ),
-      ],
+      // No flashlight toggle: ARCore/ARKit own the camera exclusively while
+      // tracking, and neither exposes torch control through its public API
+      // (unlike the old mobile_scanner/CameraX path, which could toggle the
+      // flash directly) — a real, minor capability loss from this rewrite.
     ),
     body: switch (_access) {
       _CameraAccess.checking => const Center(
@@ -520,74 +487,85 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
     },
   );
 
-  Widget _buildScanner() => LayoutBuilder(
-    builder: (context, constraints) {
-      final widgetSize = constraints.biggest;
-      final cardMeta = _cardPk == null ? null : _metaFor(_cardPk!);
-      final ghost = _buildGhost(widgetSize);
-      // The camera preview is full-bleed, but interactive overlays must clear
-      // the (edge-to-edge) system navigation bar — otherwise the card and its
-      // buttons sit under the translucent nav buttons and get cut off.
-      final bottomInset = MediaQuery.viewPaddingOf(context).bottom;
-      return Stack(
-        fit: StackFit.expand,
-        children: [
-          MobileScanner(
-            controller: _scanner,
-            onDetect: _onDetect,
-            errorBuilder: (context, error) => _PermissionExplainer(
-              message: 'The camera failed to start (${error.errorCode.name}).',
-              buttonLabel: 'Try again',
-              onPressed: () => _scanner?.start(),
-            ),
-            placeholderBuilder: (context) =>
-                const ColoredBox(color: Colors.black),
-          ),
-          ..._buildMarkers(widgetSize),
-          ?ghost,
-          if (_locate case final locate?)
-            Positioned(
-              top: 8,
-              left: 12,
-              right: 12,
-              child: _LocateBanner(
-                state: locate,
-                targetVisible:
-                    widget.locateLotPk != null &&
-                    _visible.containsKey(widget.locateLotPk),
-                ghostActive: ghost != null,
+  Widget _buildScanner() {
+    // ARCore/ARKit reported this device/build can't do AR tracking at all —
+    // nothing useful to show behind the camera view in that case.
+    if (_arStatus == 'unsupported' || _arStatus == 'error') {
+      return _PermissionExplainer(
+        message:
+            _arStatusMessage ??
+            "AR mode couldn't start on this device. Please try again.",
+        buttonLabel: 'Go back',
+        onPressed: () => context.pop(),
+      );
+    }
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final widgetSize = constraints.biggest;
+        final cardMeta = _cardPk == null ? null : _metaFor(_cardPk!);
+        final ghost = _buildGhost(widgetSize);
+        // The camera preview is full-bleed, but interactive overlays must clear
+        // the (edge-to-edge) system navigation bar — otherwise the card and its
+        // buttons sit under the translucent nav buttons and get cut off.
+        final bottomInset = MediaQuery.viewPaddingOf(context).bottom;
+        return Stack(
+          fit: StackFit.expand,
+          children: [
+            const ArCameraView(),
+            // Session still starting up (checking availability, or Google
+            // Play Services for AR / an ARKit warm-up is installing) — the
+            // camera view is mounted but has nothing to show yet.
+            if (_arStatus != 'ready')
+              const ColoredBox(
+                color: Colors.black54,
+                child: Center(child: CircularProgressIndicator()),
               ),
-            ),
-          if (cardMeta != null)
-            Positioned(
-              left: 12,
-              right: 12,
-              bottom: 12 + bottomInset,
-              child: _LotCard(
-                meta: cardMeta,
-                onOpen: () => _openLotPage(cardMeta),
-                onToggleWatch: () => unawaited(_toggleWatch(cardMeta.pk)),
-              ),
-            ),
-          if (_visible.isEmpty && cardMeta == null)
-            Positioned(
-              left: 24,
-              right: 24,
-              bottom: 48 + bottomInset,
-              child: const Text(
-                'Point the camera at lot labels',
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  color: Colors.white70,
-                  fontSize: 16,
-                  shadows: [Shadow(blurRadius: 8)],
+            ..._buildMarkers(widgetSize),
+            ?ghost,
+            if (_locate case final locate?)
+              Positioned(
+                top: 8,
+                left: 12,
+                right: 12,
+                child: _LocateBanner(
+                  state: locate,
+                  targetVisible:
+                      widget.locateLotPk != null &&
+                      _visible.containsKey(widget.locateLotPk),
+                  ghostActive: ghost != null,
                 ),
               ),
-            ),
-        ],
-      );
-    },
-  );
+            if (cardMeta != null)
+              Positioned(
+                left: 12,
+                right: 12,
+                bottom: 12 + bottomInset,
+                child: _LotCard(
+                  meta: cardMeta,
+                  onOpen: () => _openLotPage(cardMeta),
+                  onToggleWatch: () => unawaited(_toggleWatch(cardMeta.pk)),
+                ),
+              ),
+            if (_visible.isEmpty && cardMeta == null)
+              Positioned(
+                left: 24,
+                right: 24,
+                bottom: 48 + bottomInset,
+                child: const Text(
+                  'Point the camera at lot labels',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: Colors.white70,
+                    fontSize: 16,
+                    shadows: [Shadow(blurRadius: 8)],
+                  ),
+                ),
+              ),
+          ],
+        );
+      },
+    );
+  }
 
   /// The locate-mode ghost marker: the target's map position projected
   /// through a transform fitted from the mapped lots on screen right now

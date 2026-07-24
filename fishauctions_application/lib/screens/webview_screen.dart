@@ -938,7 +938,13 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     return (b == null || b.isEmpty) ? AppConstants.appName : b;
   }
 
-  void _onTitleTap() => showCommandPalette(context, _loadPath);
+  void _onTitleTap() => showCommandPalette(
+    context,
+    _loadPath,
+    // AR is a native screen, not a web path — the palette's locally injected
+    // AR entry routes through the same push+return flow as the deep link.
+    onOpenAr: (slug) => unawaited(_launchAr(slug, null)),
+  );
 
   // ── Navigation, downloads, permissions, bridges ───────────────────────────
 

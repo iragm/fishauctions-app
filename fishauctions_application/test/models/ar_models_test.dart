@@ -176,43 +176,25 @@ void main() {
       expect(frame.toJson()['yaw_deg'], -93.46);
     });
 
-    test('emits the GPS fix (rounded) and heading when present', () {
+    test('emits the absolute heading when present', () {
       final frame = ArFrame(
         frameId: 'f000003',
         capturedAt: DateTime.utc(2026, 7, 17, 12, 32),
-        latitude: 40.4418234,
-        longitude: -79.9959121,
         headingDeg: 137.42,
         detections: const [],
       );
       final json = frame.toJson();
-      expect(json['latitude'], 40.441823);
-      expect(json['longitude'], -79.995912);
       expect(json['heading_deg'], 137.4);
     });
 
-    test('omits the GPS pair entirely when there is no fix', () {
+    test('omits the heading entirely when there is no reading', () {
       final frame = ArFrame(
         frameId: 'f000004',
         capturedAt: DateTime.utc(2026, 7, 17, 12, 33),
         detections: const [],
       );
       final json = frame.toJson();
-      expect(json.containsKey('latitude'), isFalse);
-      expect(json.containsKey('longitude'), isFalse);
       expect(json.containsKey('heading_deg'), isFalse);
-    });
-
-    test('sends both coordinates or neither — never a half fix', () {
-      final frame = ArFrame(
-        frameId: 'f000005',
-        capturedAt: DateTime.utc(2026, 7, 17, 12, 34),
-        latitude: 40.44, // longitude missing
-        detections: const [],
-      );
-      final json = frame.toJson();
-      expect(json.containsKey('latitude'), isFalse);
-      expect(json.containsKey('longitude'), isFalse);
     });
 
     test('emits rounded odometry when both components are present', () {

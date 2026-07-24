@@ -82,10 +82,11 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
   int _confirmAttempts = 0;
   static const _maxConfirmAttempts = 3;
 
-  /// Location permission is permanently denied, so the error view offers "Open
-  /// Settings" (a re-request can no longer prompt) instead of a "Try Again"
-  /// that would silently no-op.
-  bool _needsSettings = false;
+  /// Set when the error view should offer "Open Settings" instead of "Try
+  /// Again" — a fix that lives outside this sheet (permanently-denied
+  /// location permission, or NFC toggled off) so a plain retry would either
+  /// silently no-op or just hit the same dead end again.
+  VoidCallback? _settingsAction;
 
   /// What the processing spinner says. The same [_Phase.processing] covers two
   /// different network waits — starting the reader (pre-tap) and confirming the
@@ -111,7 +112,7 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
     _capturedPaymentId = null;
     _captureOutstanding = false;
     _stranded = false;
-    _needsSettings = false;
+    _settingsAction = null;
     _confirmAttempts = 0;
     setState(() {
       _phase = _Phase.loading;
@@ -178,6 +179,20 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
         locationId: ctx.locationId,
       );
 
+      // A location that hasn't finished Square's card-processing activation
+      // is a separate prerequisite from having a production application id —
+      // without it a charge never prompts for a tap (Square shows the same
+      // opaque "connect hardware" screen as an unapproved/incapable device).
+      // `false` is a definite answer; null (unknown) doesn't block, since
+      // some SDK versions/locations may not report the flag at all.
+      if (await square.cardProcessingActivated == false) {
+        _fail(
+          'This Square location hasn\'t been activated for card processing '
+          'yet. Finish that step in your Square Dashboard, then try again.',
+        );
+        return;
+      }
+
       if (!await square.isDeviceCapable()) {
         _fail(
           Platform.isIOS
@@ -186,6 +201,16 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
               : 'This device can\'t take Tap to Pay payments. It needs NFC '
                     'and Android 12 or newer.',
         );
+        return;
+      }
+
+      // The device *has* NFC hardware (just checked above) but it may be
+      // toggled off — Square can't tell the app that directly (no reader is
+      // "present" to it either way), so it shows the same opaque "connect
+      // hardware" prompt as an incapable device. Checking the toggle state
+      // ourselves turns that into an actionable message.
+      if (!await square.isNfcEnabled()) {
+        _failNeedsNfc();
         return;
       }
 
@@ -211,15 +236,48 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
         return;
       }
 
-      final result = await square.charge(
-        amountCents: ctx.amountCents,
-        currencyCode: ctx.currency,
-        paymentAttemptId: ctx.idempotencyKey,
-        note: 'Invoice #${widget.invoicePk}',
-        // Must be the backend-issued reference_id verbatim — confirm rejects
-        // the charge if Square's reference_id doesn't match.
-        referenceId: ctx.referenceId,
-      );
+      // Square's Sandbox environment can't simulate a real NFC tap — there's
+      // no way to PCI-certify a software card read, so `charge()` in sandbox
+      // always surfaces the native "connect hardware to take card payments"
+      // prompt unless the Mock Reader overlay is showing to simulate the tap
+      // instead. (Real Tap to Pay also needs Square's production approval —
+      // see CLAUDE.md — so a not-yet-approved production account hits the
+      // same prompt; the overlay only helps in sandbox.)
+      var isSandbox = false;
+      try {
+        isSandbox = await square.environment() == Environment.sandbox;
+      } on Exception {
+        isSandbox = false;
+      }
+      if (isSandbox) {
+        setState(() {
+          _processingMessage =
+              'Sandbox: tap the mock reader overlay to simulate a card…';
+        });
+        try {
+          await square.showMockReaderUI();
+        } on Exception {
+          // Non-fatal — fall through to charge() regardless; its native
+          // prompt still explains what's missing if the overlay didn't show.
+        }
+      }
+
+      final SquareChargeResult result;
+      try {
+        result = await square.charge(
+          amountCents: ctx.amountCents,
+          currencyCode: ctx.currency,
+          paymentAttemptId: ctx.idempotencyKey,
+          note: 'Invoice #${widget.invoicePk}',
+          // Must be the backend-issued reference_id verbatim — confirm rejects
+          // the charge if Square's reference_id doesn't match.
+          referenceId: ctx.referenceId,
+        );
+      } finally {
+        if (isSandbox) {
+          unawaited(square.hideMockReaderUI());
+        }
+      }
 
       // The card has now been charged on-device. From here on, recovery means
       // re-confirming this payment — we must never start a second charge.
@@ -260,8 +318,33 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
         );
         return;
       }
+      if (e.code == PaymentErrorCode.paymentAlreadyInProgress) {
+        // Square keeps this paymentAttemptId "in progress" for a few minutes
+        // after an interrupted attempt (e.g. the app was closed mid-tap) —
+        // there is no SDK call to cancel it from here, and no card was
+        // charged. It clears itself; the only fix is to wait it out.
+        _fail(
+          'A previous payment attempt for this invoice is still finishing on '
+          "Square's side — this can happen if the app was closed mid-payment. "
+          'Wait a couple of minutes, then try again. No card has been '
+          'charged for this attempt.',
+        );
+        return;
+      }
       _fail('Payment failed: ${e.message}');
     } on AuthorizeError catch (e) {
+      if (e.code ==
+          AuthorizationErrorCode.locationNotActivatedForCardProcessing) {
+        // Same underlying cause as the pre-flight cardProcessingActivated
+        // check above — this is the SDK catching it at authorize() time
+        // instead, on builds/locations where the flag isn't proactively
+        // reported.
+        _fail(
+          'This Square location hasn\'t been activated for card processing '
+          'yet. Finish that step in your Square Dashboard, then try again.',
+        );
+        return;
+      }
       _fail('Could not start the card reader: ${e.message}');
     } on Exception catch (e) {
       // Any other SDK/platform failure — never leave the spinner hanging.
@@ -367,7 +450,9 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
   /// ask again"), a re-request can't prompt, so the error view surfaces "Open
   /// Settings"; otherwise a plain "Try Again" re-prompts.
   void _failNeedsLocation(bool permanent) {
-    _needsSettings = permanent;
+    _settingsAction = permanent
+        ? SquarePaymentService.instance.openSettings
+        : null;
     _fail(
       permanent
           ? 'Tap to Pay needs location permission, which is turned off for '
@@ -377,8 +462,14 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
     );
   }
 
-  Future<void> _openLocationSettings() =>
-      SquarePaymentService.instance.openSettings();
+  /// NFC hardware is present (device is otherwise capable) but turned off.
+  /// Square shows this as an opaque "connect hardware" prompt with no
+  /// catchable error, so this check runs before the tap to give it a
+  /// specific, actionable message instead.
+  void _failNeedsNfc() {
+    _settingsAction = SquarePaymentService.instance.openNfcSettings;
+    _fail('Turn on NFC in your phone\'s settings to use Tap to Pay.');
+  }
 
   void _popCancelled() {
     if (mounted) {
@@ -415,18 +506,17 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
           _Phase.success => _SuccessView(receipt: _error),
           _Phase.error => _ErrorView(
             message: _error ?? 'Something went wrong.',
-            // Stranded (terminal) or permanently-denied location: no retry.
+            // Stranded (terminal) or fixable-only-in-settings: no retry.
             // Otherwise, while a capture is outstanding, retry must re-confirm
             // the same payment, not start a new charge — and there's no "close"
             // out.
-            onRetry: (_stranded || _needsSettings)
+            onRetry: (_stranded || _settingsAction != null)
                 ? null
                 : (_captureOutstanding ? _confirmCaptured : _createPayment),
-            retryLabel: (_stranded || _needsSettings)
+            retryLabel: (_stranded || _settingsAction != null)
                 ? null
                 : (_captureOutstanding ? 'Finish Payment' : 'Try Again'),
-            // Permanent location denial can only be fixed in OS settings.
-            onOpenSettings: _needsSettings ? _openLocationSettings : null,
+            onOpenSettings: _settingsAction,
             onClose: (_stranded || !_captureOutstanding) ? _popCancelled : null,
           ),
         },

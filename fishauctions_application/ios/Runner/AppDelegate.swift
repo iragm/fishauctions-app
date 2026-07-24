@@ -57,6 +57,16 @@ import UIKit
         result(FlutterMethodNotImplemented)
       }
     }
+
+    // AR lot mode's camera view (Ar/ArCameraPlatformView.swift): ARKit owns the camera for
+    // visual-inertial pose tracking + feeds Vision for QR detection, replacing the
+    // mobile_scanner/AVFoundation pipeline that screen used to use. Mirrors MainActivity.kt's
+    // registration; getLensDistortion/isNfcEnabled etc. above stay Android-only, this is the one
+    // platform-view registration both sides share.
+    registrar.register(
+      ArCameraViewFactory(messenger: registrar.messenger()),
+      withId: "com.fishauctions.app/ar_camera"
+    )
   }
 
   // Horizontal field of view of the back wide camera in degrees, or nil when

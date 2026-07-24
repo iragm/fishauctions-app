@@ -49,6 +49,40 @@ class PlatformBridge {
     }
   }
 
+  /// Whether NFC is currently turned ON, as opposed to [isTapToPayCapable]
+  /// which only checks the device *has* NFC hardware. Android-only (returns
+  /// true on other platforms — iOS Tap to Pay has no separate "NFC toggle"
+  /// the user must enable). Returns true on any channel error so a missing
+  /// gate never wrongly blocks a charge that would otherwise work.
+  static Future<bool> isNfcEnabled() async {
+    if (!Platform.isAndroid) {
+      return true;
+    }
+    try {
+      return await _channel.invokeMethod<bool>('isNfcEnabled') ?? true;
+    } on PlatformException {
+      return true;
+    } on MissingPluginException {
+      return true;
+    }
+  }
+
+  /// Opens the system NFC settings screen (Android only) so the user can turn
+  /// NFC on. No-op on other platforms.
+  static Future<void> openNfcSettings() async {
+    if (!Platform.isAndroid) {
+      return;
+    }
+    try {
+      await _channel.invokeMethod<void>('openNfcSettings');
+    } on PlatformException {
+      // Best-effort — nothing more we can do if the settings screen itself
+      // won't open.
+    } on MissingPluginException {
+      // Older app build without this channel method; ignore.
+    }
+  }
+
   /// The back camera's horizontal field of view in degrees, or null when the
   /// platform can't say (no camera, channel error, other platforms).
   ///
@@ -66,6 +100,34 @@ class PlatformBridge {
       // Reject nonsense so a platform bug degrades to the fallback rather
       // than poisoning every bearing.
       return (fov != null && fov > 10 && fov < 160) ? fov : null;
+    } on PlatformException {
+      return null;
+    } on MissingPluginException {
+      return null;
+    }
+  }
+
+  /// The back camera's Brown-Conrady lens distortion coefficients
+  /// `[k0, k1, k2, k3, k4]` (Android `CameraCharacteristics.LENS_DISTORTION`),
+  /// or null when unavailable — no camera characteristic, API < 28, or a
+  /// non-Android platform (iOS has no public equivalent for a live capture
+  /// session; AR lot mode falls back to the undistorted pinhole model, same
+  /// as it already does when [cameraHorizontalFovDeg] is null). A malformed
+  /// response (wrong element count) is also treated as null so a bad reading
+  /// degrades to "no correction" rather than distorting every bearing.
+  static Future<List<double>?> cameraLensDistortion() async {
+    if (!Platform.isAndroid) {
+      return null;
+    }
+    try {
+      final raw = await _channel.invokeMethod<List<Object?>>(
+        'getLensDistortion',
+      );
+      if (raw == null || raw.length != 5) {
+        return null;
+      }
+      final coeffs = [for (final v in raw) (v as num?)?.toDouble()];
+      return coeffs.any((v) => v == null) ? null : coeffs.cast<double>();
     } on PlatformException {
       return null;
     } on MissingPluginException {

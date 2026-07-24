@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Matches flutter_inappwebview's InAppWebViewFileProvider setup: the plugin's
+  WebChromeClient writes camera-capture photos/videos via
+  File.createTempFile(..., context.getExternalFilesDir(null)) and hands the
+  browser a FileProvider content:// Uri for that file (MediaStore.EXTRA_OUTPUT)
+  so the file input's onShowFileChooser callback resolves once the camera app
+  finishes. Without this <paths> root matching that directory,
+  FileProvider.getUriForFile throws, the plugin swallows it, and the captured
+  photo never reaches the WebView's file input — "photo taken but not saved".
+-->
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <external-files-path name="captures" path="." />
+</paths>

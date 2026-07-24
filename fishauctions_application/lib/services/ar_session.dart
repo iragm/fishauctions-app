@@ -37,8 +37,8 @@ class LocateAim extends LocateState {
 
 /// Per-mount state for one AR scanning session.
 ///
-/// Sits between the screen (which feeds it detections, gravity, and gyro
-/// readings) and `ArApi` (which it batches observation uploads through, via
+/// Sits between the screen (which feeds it detections, gravity, and tracked
+/// AR poses) and `ArApi` (which it batches observation uploads through, via
 /// the injected `sender` so tests need no HTTP). Owns:
 ///
 ///  * **Observation batching** — one frame per camera callback that carried
@@ -48,8 +48,8 @@ class LocateAim extends LocateState {
 ///    duplicates from someone holding the phone still.
 ///  * **Locate-mode pose** — a rolling window of sightings of lots with
 ///    known positions; bearings are rotated into the current device frame
-///    with the integrated gyro yaw, and [solvePose] turns ≥2 distinct
-///    landmarks into a device pose.
+///    with the AR-tracked yaw, and [solvePose] turns ≥2 distinct landmarks
+///    into a device pose.
 class ArSessionController {
   ArSessionController({
     required this.auctionSlug,
@@ -66,12 +66,6 @@ class ArSessionController {
   static const int maxBufferedFrames = 25;
   static const Duration fixWindow = Duration(seconds: 15);
 
-  /// Assumed forward stride length applied per detected pedometer step. The
-  /// solver only uses odometry to sharpen its own noise model (σ = 0.3 m +
-  /// 5%·distance, BACKEND_SPEC.md Part 5), so a generic average stride is
-  /// adequate — no per-user calibration.
-  static const double strideLengthM = 0.75;
-
   final String auctionSlug;
   final String sessionId;
   final Future<void> Function(String sessionId, List<ArFrame> frames) _send;
@@ -86,26 +80,22 @@ class ArSessionController {
   // Locate mode.
   Map<int, ArLotPosition> _positions = const {};
   int? _targetPk;
-  double _yawRad = 0; // integrated rotation about gravity, ccw-positive
-  bool _gyroLive = false; // any real gyro reading integrated yet?
+  double _yawRad = 0; // rotation about gravity, ccw-positive, from AR pose
+  bool _yawLive = false; // any real yaw reading received yet?
   double _pitchDownRad = 0;
 
-  // Freshest phone fix + absolute compass heading, stamped onto each frame.
-  // Null until a real value arrives (a fix/heading is never faked — absence
-  // means "unknown", and the server drops half-supplied or (0,0) fixes).
-  double? _lat;
-  double? _lon;
+  // Freshest absolute compass heading, stamped onto each frame. Null until a
+  // real value arrives (a heading is never faked — absence means "unknown").
   double? _headingDeg;
 
   // Odometry (BACKEND_SPEC.md Part 5): cumulative planar displacement since
   // session start, in the same frame as yaw — +x forward at yaw 0 (session
-  // start), +y 90° ccw (left). Null until a real tracker reading arrives
-  // ("unknown", never "didn't move"); frozen null forever once invalidated
-  // (the underlying counter rebased, e.g. a device reboot mid-session) so
-  // the app never mixes two different origins in one session.
+  // start), +y 90° ccw (left). Null until the first tracked AR pose arrives
+  // ("unknown", never "didn't move"); ARCore/ARKit's world origin is fixed
+  // for the whole session, so unlike the pedometer this replaced there is no
+  // rebase/reset case to guard against here.
   double? _odoX;
   double? _odoY;
-  bool _odoInvalidated = false;
 
   final List<_TimedFix> _fixes = [];
   PoseEstimate? _pose;
@@ -127,19 +117,6 @@ class ArSessionController {
     _pitchDownRad = math.atan2(z, y);
   }
 
-  /// Feed the freshest phone GPS fix (or clear it with nulls). Send both or
-  /// neither — a half-supplied fix is treated as "no fix" and never stamped.
-  /// Reused between updates, so passing a coarse last-known fix is fine.
-  void updateLocation(double? latitude, double? longitude) {
-    if (latitude == null || longitude == null) {
-      _lat = null;
-      _lon = null;
-      return;
-    }
-    _lat = latitude;
-    _lon = longitude;
-  }
-
   /// Feed the freshest absolute compass heading (deg cw from magnetic north),
   /// or null to clear it. Stamped onto subsequent frames. Out-of-range values
   /// are rejected (cleared) so a bad sensor reading is never sent as a heading.
@@ -149,66 +126,32 @@ class ArSessionController {
         : null;
   }
 
-  /// Marks the odometry channel live as of now — the session's origin — so
-  /// frames from this point on carry `(0, 0)` instead of omitting the
-  /// channel. Call once, when the first real pedometer/tracker reading
-  /// arrives (a baseline with no step delta yet). No-op if already started
-  /// or invalidated.
-  void startOdometry() {
-    if (_odoInvalidated || _odoX != null) {
-      return;
-    }
-    _odoX = 0;
-    _odoY = 0;
-  }
-
-  /// Advances the tracked odometry by [count] strides in the current
-  /// (session-fixed) forward direction — call once per pedometer callback
-  /// with however many new steps it reported. Uses the same integrated yaw
-  /// as [ArFrame.yawDeg] so the two channels describe one consistent frame,
-  /// per the backend's `φ = θ − yaw` recovery. No-op before [startOdometry]
-  /// or after [invalidateOdometry].
-  void recordSteps(int count) {
-    if (_odoInvalidated || count <= 0 || _odoX == null) {
-      return;
-    }
-    final distanceM = strideLengthM * count;
-    _odoX = _odoX! + distanceM * math.cos(_yawRad);
-    _odoY = _odoY! + distanceM * math.sin(_yawRad);
-  }
-
-  /// Stops odometry for the rest of this session — the underlying tracker
-  /// rebased its origin (e.g. the step counter went backwards after a device
-  /// reboot mid-session). Resuming with values in a new frame would silently
-  /// corrupt the solver's displacement residuals, so the channel goes null
-  /// for good instead (BACKEND_SPEC.md Part 5's tracker-reset rule).
-  void invalidateOdometry() {
-    _odoInvalidated = true;
-    _odoX = null;
-    _odoY = null;
-  }
-
-  /// Integrate a gyroscope reading (rad/s, device axes) over [dtSeconds].
-  /// Only the component about the gravity axis matters — that's heading
-  /// change regardless of how the phone is held.
-  void integrateGyro(
-    double wx,
-    double wy,
-    double wz,
-    double dtSeconds, {
-    required double gx,
-    required double gy,
-    required double gz,
+  /// Feed one tracked AR pose (ArCameraService's pose stream, already
+  /// converted via `arPoseToYawAndOdometry` in ar_geometry.dart — no trig
+  /// happens here, this just stores the result). Callers should only invoke
+  /// this while the native side reports the pose as actively tracking;
+  /// there is deliberately no "invalidate" path — unlike the pedometer this
+  /// odometry replaced, ARCore/ARKit's world origin is fixed for the whole
+  /// session (never rebased), so a value simply not arriving (tracking
+  /// lost) already leaves yaw/odometry at their last known value, exactly
+  /// like a momentarily-missing magnetometer reading elsewhere in this
+  /// session.
+  ///
+  /// [yawRad] null (the camera was pointing too near-vertical for a
+  /// horizontal heading to mean anything) leaves yaw untouched; odometry
+  /// always updates, since a momentarily-unusable heading doesn't make the
+  /// position wrong.
+  void updateOdometryFromPose({
+    required double? yawRad,
+    required double odoX,
+    required double odoY,
   }) {
-    final g = math.sqrt(gx * gx + gy * gy + gz * gz);
-    if (g < 1e-6) {
-      return;
+    if (yawRad != null) {
+      _yawRad = yawRad;
+      _yawLive = true;
     }
-    // Accelerometer reads the reaction force: at rest it points *up* in
-    // device coordinates, giving the up-axis directly; ω·û is then
-    // counterclockwise-positive heading rate seen from above.
-    _yawRad += (wx * gx + wy * gy + wz * gz) / g * dtSeconds;
-    _gyroLive = true;
+    _odoX = odoX;
+    _odoY = odoY;
   }
 
   /// Record one camera frame's detections. [measurements] holds every parsed
@@ -243,10 +186,8 @@ class ArSessionController {
           capturedAt: now,
           // Session-cumulative heading so the solver can chain frames that
           // saw only one label each; omitted (not zero) without gyro data.
-          yawDeg: _gyroLive ? _yawRad * 180 / math.pi : null,
-          // Freshest GPS fix / absolute heading, when the device reported one.
-          latitude: _lat,
-          longitude: _lon,
+          yawDeg: _yawLive ? _yawRad * 180 / math.pi : null,
+          // Freshest absolute heading, when the device reported one.
           headingDeg: _headingDeg,
           // Tracked odometry, when a pedometer/tracker reading has started
           // the channel — (0, 0) is a legitimate value, so this is gated on

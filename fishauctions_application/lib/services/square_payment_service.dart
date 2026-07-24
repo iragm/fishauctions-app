@@ -47,6 +47,30 @@ class SquarePaymentService {
     return _sdk.tapToPaySettings.isDeviceCapable();
   }
 
+  /// Whether NFC is currently turned on. Distinct from [isDeviceCapable],
+  /// which only checks the device *has* NFC hardware — a device can be
+  /// capable with NFC toggled off in system settings, which Square's SDK
+  /// surfaces as an opaque "connect hardware to take card payments" prompt
+  /// with no card-tap option and no catchable [PaymentError] (from Square's
+  /// side there's simply no reader present). Android-only; always true on
+  /// iOS (Tap to Pay there has no separate user-facing NFC toggle).
+  Future<bool> isNfcEnabled() => PlatformBridge.isNfcEnabled();
+
+  /// Opens the system NFC settings screen so the user can turn NFC on.
+  /// Android only; no-op on iOS.
+  Future<void> openNfcSettings() => PlatformBridge.openNfcSettings();
+
+  /// Whether the currently authorized Square location is activated for card
+  /// processing, or null when unknown (no authorized location yet, or the
+  /// SDK didn't report the flag). `false` explains a charge that never
+  /// prompts for a tap: the account/location hasn't finished Square's
+  /// card-processing activation, a prerequisite separate from having a
+  /// production application id — `authorize()` may also throw
+  /// `AuthorizationErrorCode.locationNotActivatedForCardProcessing` for the
+  /// same underlying reason.
+  Future<bool?> get cardProcessingActivated async =>
+      (await _sdk.authManager.getAuthorizedLocation())?.cardProcessingActivated;
+
   /// iOS only: Tap to Pay on iPhone requires the device to be linked to an
   /// Apple account once (an interactive Apple sheet, Square terms included).
   /// No-op on Android and when already linked. A throw here means the link
@@ -151,6 +175,25 @@ class SquarePaymentService {
         note: note,
         referenceId: referenceId,
       ),
+      // NOTE: `additionalPaymentMethods` is currently a no-op — the Flutter
+      // plugin (2026.7.2) drops it on both platforms: Android's
+      // `PaymentMapper.getPromptParameters` builds `PromptParameters(mode =
+      // DEFAULT)` and never reads the list (whose Kotlin default is
+      // `AdditionalPaymentMethod.Companion.allPaymentMethods`), and iOS
+      // hardcodes `additionalMethods: .all`. So the prompt always offers the
+      // full set of *extra* methods regardless of what's passed here. Keep
+      // the empty list to record intent (Tap to Pay only), but don't read it
+      // as a guarantee that keyed/cash entry is hidden.
+      //
+      // Contactless is NOT something to add to this list: its element type is
+      // `AdditionalPaymentMethod.Type`, whose only values are KEYED and CASH.
+      // Contactless (tap) is the prompt's *primary* method — the separate
+      // `CardEntryMethod.CONTACTLESS` enum lives in the SDK's `cardreader`
+      // package and is read-only output
+      // (`ReaderInfo.supportedCardEntryMethods`,
+      // `CardPaymentDetails.entryMethod`), never a prompt input. A missing tap
+      // option means NFC off / location unactivated / no Tap to Pay access —
+      // see the pre-flight checks in `payment_sheet.dart`.
       const PromptParameters(
         additionalPaymentMethods: [],
         mode: PromptMode.defaultMode,
@@ -161,6 +204,24 @@ class SquarePaymentService {
 
   /// Releases the current authorization (e.g. on logout).
   Future<void> deauthorize() => _sdk.authManager.deauthorize();
+
+  /// The environment the SDK was initialized on. Real Tap to Pay (NFC, no
+  /// hardware) only works in [Environment.production] — Square's Sandbox
+  /// environment has no way to simulate a PCI-certified NFC card read, so
+  /// [charge] in sandbox always surfaces the native "connect a reader"
+  /// prompt unless the Mock Reader UI ([showMockReaderUI]) is showing to
+  /// simulate the tap instead. See the SDK's own docs on `showMockReaderUI`.
+  Future<Environment> environment() => _sdk.settingsManager.getEnvironment();
+
+  /// Shows Square's floating Mock Reader overlay (Sandbox only), which lets a
+  /// tester simulate a card presentment since Sandbox can't read a real NFC
+  /// tap. No-op-ish on failure (e.g. not in sandbox, or already showing) —
+  /// callers should treat a throw here as non-fatal and proceed to [charge]
+  /// anyway, since the native prompt still explains what's missing.
+  Future<void> showMockReaderUI() => _sdk.readerManager.showMockReaderUI();
+
+  /// Dismisses the Mock Reader overlay shown by [showMockReaderUI].
+  Future<void> hideMockReaderUI() => _sdk.readerManager.hideMockReaderUI();
 
   CurrencyCode _currencyFor(String code) {
     switch (code.toUpperCase()) {

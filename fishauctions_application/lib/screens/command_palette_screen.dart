@@ -1,28 +1,39 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:geolocator/geolocator.dart';
 
 import '../models/command_palette_models.dart';
+import '../models/last_used_auction.dart';
 import '../services/command_palette_logger.dart';
 import '../services/command_palette_service.dart';
+import '../services/last_used_auction_service.dart';
+import '../services/location_service.dart';
 
 /// Opens the command palette as a full-screen dialog.
 ///
 /// [navigateToPath] is called with a server-relative web path when the user
 /// taps a result — the caller is responsible for loading it in the WebView.
+/// [onOpenAr] is called with an auction slug when the user taps the locally
+/// injected AR entry (see [_CommandPaletteDialogState._arItem]) — AR is a
+/// native camera screen, not a web path, so it can't go through
+/// [navigateToPath].
 Future<void> showCommandPalette(
   BuildContext context,
-  void Function(String path) navigateToPath,
-) => showDialog<void>(
+  void Function(String path) navigateToPath, {
+  void Function(String auctionSlug)? onOpenAr,
+}) => showDialog<void>(
   context: context,
   useSafeArea: false,
-  builder: (_) => _CommandPaletteDialog(navigateToPath: navigateToPath),
+  builder: (_) =>
+      _CommandPaletteDialog(navigateToPath: navigateToPath, onOpenAr: onOpenAr),
 );
 
 class _CommandPaletteDialog extends StatefulWidget {
-  const _CommandPaletteDialog({required this.navigateToPath});
+  const _CommandPaletteDialog({required this.navigateToPath, this.onOpenAr});
 
   final void Function(String path) navigateToPath;
+  final void Function(String auctionSlug)? onOpenAr;
 
   @override
   State<_CommandPaletteDialog> createState() => _CommandPaletteDialogState();
@@ -34,13 +45,111 @@ class _CommandPaletteDialogState extends State<_CommandPaletteDialog> {
   final _logger = CommandPaletteLogger();
   Timer? _debounce;
 
-  List<PaletteGroup> _groups = [];
+  List<PaletteGroup> _serverGroups = [];
   bool _loading = false;
+
+  // AR command palette entry (BACKEND_SPEC.md "AR Command Palette Entry —
+  // Last-Used-Auction Lookup"). Loaded once alongside the default results;
+  // [_groups] injects a local AR item on top of whatever the server returned,
+  // since AR is a native screen the server can't hand back as a URL.
+  LastUsedAuction? _lastUsedAuction;
+  Position? _arPosition;
+
+  /// 10 miles, in meters — the "near your last in-person auction" radius.
+  static const _arRadiusMeters = 10 * 1609.344;
 
   @override
   void initState() {
     super.initState();
     _fetchResults('');
+    unawaited(_loadArContext());
+  }
+
+  /// Loads the last-used-auction lookup and a best-effort GPS fix, in
+  /// parallel with the default search results. Never prompts for location
+  /// permission — [LocationService.positionIfPermitted] only returns a fix
+  /// when permission was already granted, matching the "no location
+  /// permission ⇒ still show it" rule in [_arItem].
+  Future<void> _loadArContext() async {
+    final results = await Future.wait([
+      LastUsedAuctionService.instance.fetch(),
+      LocationService.instance.positionIfPermitted(fresh: false),
+    ]);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _lastUsedAuction = results[0] as LastUsedAuction?;
+      _arPosition = results[1] as Position?;
+    });
+  }
+
+  /// The rendered groups: the server's results with a local "AR lot scanning"
+  /// group prepended when it applies to the current query.
+  List<PaletteGroup> get _groups {
+    final ar = _arItem(_textController.text);
+    if (ar == null) {
+      return _serverGroups;
+    }
+    return [
+      PaletteGroup(label: 'AR lot scanning', items: [ar]),
+      ..._serverGroups,
+    ];
+  }
+
+  /// The AR entry for [query], or null when it doesn't apply.
+  ///
+  /// Shown when the last-used auction is in-person and hasn't wound down
+  /// ("pretty much over"), and either: the query explicitly asks for it
+  /// ("ar", "lot scanning", "augmented reality" — regardless of distance), or
+  /// the auction is within [_arRadiusMeters]. Distance defaults to "in range"
+  /// whenever it can't be computed (no location permission, no fix yet, or
+  /// the auction has no single physical location) — the in-person + not-over
+  /// gate is the one that actually matters; a missing distance shouldn't hide
+  /// an otherwise-relevant shortcut.
+  PaletteItem? _arItem(String query) {
+    final auction = _lastUsedAuction;
+    if (auction == null || !auction.isActiveInPerson) {
+      return null;
+    }
+    if (!_arQueryMatches(query) && !_arWithinRange(auction)) {
+      return null;
+    }
+    return PaletteItem(
+      type: 'ar',
+      title: 'Scan lots with AR — ${auction.title}',
+      subtitle: 'Point your camera at a label to find and identify lots',
+      url: auction.slug!,
+      icon: 'bi-qr-code-scan',
+    );
+  }
+
+  bool _arWithinRange(LastUsedAuction auction) {
+    final position = _arPosition;
+    final lat = auction.latitude;
+    final lon = auction.longitude;
+    if (position == null || lat == null || lon == null) {
+      return true;
+    }
+    final meters = Geolocator.distanceBetween(
+      position.latitude,
+      position.longitude,
+      lat,
+      lon,
+    );
+    return meters <= _arRadiusMeters;
+  }
+
+  bool _arQueryMatches(String q) {
+    final ql = q.trim().toLowerCase();
+    if (ql.isEmpty) {
+      return false;
+    }
+    if (ql == 'ar') {
+      return true;
+    }
+    const phrases = ['lot scanning', 'augmented reality'];
+    return phrases.any((p) => p.contains(ql) || ql.contains(p));
   }
 
   @override
@@ -74,7 +183,7 @@ class _CommandPaletteDialogState extends State<_CommandPaletteDialog> {
         return;
       }
       setState(() {
-        _groups = groups;
+        _serverGroups = groups;
         _loading = false;
       });
     } on Exception catch (_) {
@@ -112,6 +221,12 @@ class _CommandPaletteDialogState extends State<_CommandPaletteDialog> {
     _logger.recordClick(type: item.type, url: item.url, objectId: item.id);
 
     Navigator.of(context).pop();
+    if (item.type == 'ar') {
+      // AR is a native camera screen, not a web path — [item.url] carries the
+      // auction slug (there's no real URL to log/open) for [onOpenAr].
+      widget.onOpenAr?.call(item.url);
+      return;
+    }
     widget.navigateToPath(item.url);
   }
 

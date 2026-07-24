@@ -113,6 +113,165 @@ void main() {
       expect(at(30).quality, closeTo(0.5, 1e-9));
       expect(at(500).quality, 1.0);
     });
+
+    test('zero distortion coefficients leave the bearing unchanged', () {
+      final sighting = QrSighting(
+        center: Offset(1280 + focal * 0.4, 720 - focal * 0.2),
+        edgePx: 80,
+      );
+      final undistorted = estimateMeasurement(
+        sighting: sighting,
+        imageSize: imageSize,
+        pitchDownRad: 0,
+      );
+      final withZeroK = estimateMeasurement(
+        sighting: sighting,
+        imageSize: imageSize,
+        pitchDownRad: 0,
+        lensDistortion: const [0, 0, 0, 0, 0],
+      );
+      expect(withZeroK.bearingDeg, closeTo(undistorted.bearingDeg, 1e-9));
+      expect(withZeroK.depressionDeg, closeTo(undistorted.depressionDeg, 1e-9));
+    });
+
+    test('a malformed distortion list is ignored, not applied', () {
+      final sighting = QrSighting(
+        center: Offset(1280 + focal * 0.4, 720),
+        edgePx: 80,
+      );
+      final undistorted = estimateMeasurement(
+        sighting: sighting,
+        imageSize: imageSize,
+        pitchDownRad: 0,
+      );
+      final withBadK = estimateMeasurement(
+        sighting: sighting,
+        imageSize: imageSize,
+        pitchDownRad: 0,
+        lensDistortion: const [0.1, 0.2], // wrong length
+      );
+      expect(withBadK.bearingDeg, closeTo(undistorted.bearingDeg, 1e-9));
+    });
+
+    test('barrel distortion pushes an off-center bearing further out', () {
+      // Negative k0 (barrel distortion, common on wide rear lenses) has
+      // radial < 1, so the forward (undistorted → distorted) model
+      // *compresses* off-center points toward the middle of the captured
+      // image. Undistorting a detection therefore recovers a true ray angle
+      // *larger* in magnitude than the naive pinhole estimate off the raw
+      // pixel — correcting away from center, not toward it.
+      final sighting = QrSighting(
+        center: Offset(1280 + focal * 0.6, 720),
+        edgePx: 80,
+      );
+      final naive = estimateMeasurement(
+        sighting: sighting,
+        imageSize: imageSize,
+        pitchDownRad: 0,
+      );
+      final corrected = estimateMeasurement(
+        sighting: sighting,
+        imageSize: imageSize,
+        pitchDownRad: 0,
+        lensDistortion: const [-0.15, 0.02, 0, 0, 0],
+      );
+      expect(corrected.bearingDeg, greaterThan(naive.bearingDeg));
+    });
+  });
+
+  group('undistortNormalized', () {
+    /// Forward Brown-Conrady model (undistorted → distorted), the inverse of
+    /// [undistortNormalized] — mirrors the Android `LENS_DISTORTION` formula
+    /// used to derive it.
+    (double, double) distort(double xi, double yi, List<double> k) {
+      final r2 = xi * xi + yi * yi;
+      final radial = 1 + k[0] * r2 + k[1] * r2 * r2 + k[2] * r2 * r2 * r2;
+      final xc = xi * radial + (k[3] * (r2 + 2 * xi * xi) + 2 * k[4] * xi * yi);
+      final yc = yi * radial + (k[4] * (r2 + 2 * yi * yi) + 2 * k[3] * xi * yi);
+      return (xc, yc);
+    }
+
+    test('inverts the forward model back to the original point', () {
+      const k = [-0.12, 0.03, -0.005, 0.001, -0.001];
+      for (final (xi, yi) in [
+        (0.0, 0.0),
+        (0.2, 0.1),
+        (-0.35, 0.4),
+        (0.6, -0.5),
+      ]) {
+        final (xc, yc) = distort(xi, yi, k);
+        final (recoveredX, recoveredY) = undistortNormalized(xc, yc, k);
+        expect(recoveredX, closeTo(xi, 1e-6));
+        expect(recoveredY, closeTo(yi, 1e-6));
+      }
+    });
+
+    test('zero coefficients are the identity', () {
+      final (x, y) = undistortNormalized(0.33, -0.21, const [0, 0, 0, 0, 0]);
+      expect(x, closeTo(0.33, 1e-12));
+      expect(y, closeTo(-0.21, 1e-12));
+    });
+  });
+
+  group('arPoseToYawAndOdometry', () {
+    test('forward = (0, -1) is yaw zero, at the session origin', () {
+      final r = arPoseToYawAndOdometry(px: 0, pz: 0, fx: 0, fz: -1);
+      expect(r.yawRad, closeTo(0, 1e-9));
+      expect(r.odoX, closeTo(0, 1e-9));
+      expect(r.odoY, closeTo(0, 1e-9));
+    });
+
+    test('a 90° ccw turn (forward = (-1, 0)) reads yaw = +90°', () {
+      final r = arPoseToYawAndOdometry(px: 0, pz: 0, fx: -1, fz: 0);
+      expect(r.yawRad, closeTo(math.pi / 2, 1e-9));
+    });
+
+    test('a 90° cw turn (forward = (1, 0)) reads yaw = -90°', () {
+      final r = arPoseToYawAndOdometry(px: 0, pz: 0, fx: 1, fz: 0);
+      expect(r.yawRad, closeTo(-math.pi / 2, 1e-9));
+    });
+
+    test('walking straight forward from the origin advances odoX only', () {
+      // Moved 5 m along the raw pose's -Z (the yaw-0 forward direction).
+      final r = arPoseToYawAndOdometry(px: 0, pz: -5, fx: 0, fz: -1);
+      expect(r.odoX, closeTo(5, 1e-9));
+      expect(r.odoY, closeTo(0, 1e-9));
+    });
+
+    test('near-vertical camera reports yaw null but keeps odometry', () {
+      final r = arPoseToYawAndOdometry(px: 1, pz: 2, fx: 1e-6, fz: -1e-6);
+      expect(r.yawRad, isNull);
+      expect(r.odoX, closeTo(-2, 1e-9));
+      expect(r.odoY, closeTo(-1, 1e-9));
+    });
+
+    test(
+      'matches the pedometer-style incremental formula for a turn-then-walk',
+      () {
+        // Turn 90° ccw, then walk 3 m forward from the new heading — replay
+        // that same walk as a raw AR pose (position = distance × forward
+        // direction after the turn) and check both routes land on the same
+        // odometry point, per the incremental formula ArSessionController
+        // used before this pose-based one replaced it:
+        //   odoX += d·cos(yaw), odoY += d·sin(yaw)
+        const yaw = math.pi / 2;
+        const distance = 3.0;
+        final expectedOdoX = distance * math.cos(yaw);
+        final expectedOdoY = distance * math.sin(yaw);
+
+        // forward=(-sin(yaw), -cos(yaw)) per this function's own derivation;
+        // walking `distance` along it from the origin gives the raw pose.
+        final fx = -math.sin(yaw);
+        final fz = -math.cos(yaw);
+        final px = distance * fx;
+        final pz = distance * fz;
+
+        final r = arPoseToYawAndOdometry(px: px, pz: pz, fx: fx, fz: fz);
+        expect(r.yawRad, closeTo(yaw, 1e-9));
+        expect(r.odoX, closeTo(expectedOdoX, 1e-9));
+        expect(r.odoY, closeTo(expectedOdoY, 1e-9));
+      },
+    );
   });
 
   group('mapImagePointToWidget', () {
