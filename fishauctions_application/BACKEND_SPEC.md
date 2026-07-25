@@ -97,3 +97,68 @@ is the admin list it produces:
 Nice-to-have: a `printed_ok` flag posted after the first successful print, so
 "what works" means *printed*, not just *paired*. Not implemented app-side yet —
 say the word and it's a small addition.
+
+---
+
+## Part 9 — Binary endpoints reject honest Accept headers (worked around)
+
+**This was the production "Could not load the label. Please try again." bug**,
+and it broke *all* label fetching — Bluetooth and PDF alike.
+
+`MobileLotLabelView` is a DRF `APIView`, and `APIView.initial()` runs content
+negotiation **before authentication**, against `DEFAULT_RENDERER_CLASSES`.
+`settings.py` doesn't set that key, so it's DRF's default — `JSONRenderer` +
+`BrowsableAPIRenderer`. Neither can satisfy `Accept: application/pdf` or
+`Accept: image/png`, so DRF returns **406 Not Acceptable** before the view body
+ever runs. Verified against production:
+
+```
+Accept: application/pdf   → 406 {"detail":"Could not satisfy the request Accept header."}
+Accept: image/png         → 406 {"detail":"Could not satisfy the request Accept header."}
+Accept: */*               → 401 (reaches authentication normally)
+Accept: application/json  → 401
+```
+
+**Worked around app-side**: `LabelService` now sends `Accept: */*`, which
+negotiates fine, and the response still carries the true content type because
+the view returns a plain `HttpResponse`. No backend deploy is needed for
+printing to work — this section is about not leaving the trap in place.
+
+The server-side fix is to give the binary endpoints renderers that match what
+they actually return, so a correct Accept header stops being punished:
+
+```python
+class BinaryRenderer(BaseRenderer):
+    """Pass-through for views that return an HttpResponse of bytes."""
+    media_type = "*/*"
+    format = "bin"
+    charset = None
+    render_style = "binary"
+
+    def render(self, data, accepted_media_type=None, renderer_context=None):
+        return data
+
+
+class PdfRenderer(BinaryRenderer):
+    media_type = "application/pdf"
+    format = "pdf"
+
+
+class PngRenderer(BinaryRenderer):
+    media_type = "image/png"
+    format = "png"
+```
+
+Then on `MobileLotLabelView` (and any future endpoint returning bytes):
+
+```python
+renderer_classes = [JSONRenderer, PdfRenderer, PngRenderer]
+```
+
+JSON stays first so DRF error responses (`{"detail": …}` for 403/404/429) still
+render as JSON — the app parses that `detail` and shows it. Worth a test that
+`Accept: application/pdf` returns 200 with `Content-Type: application/pdf`, so
+this can't regress silently again.
+
+Applies to any other mobile endpoint that returns non-JSON bytes; today that's
+the label view.

@@ -93,7 +93,14 @@ Call this after login. Upserts by `device_uuid` — safe to call repeatedly.
 Printing is configured on the `/printing/` web page (print-method dropdown:
 PDF default / System printer / Bluetooth) and the app branches on the user's
 `print_method`. Full backend contract in `BACKEND_SPEC.md` Part 1; both sides
-are implemented and live (verified against staging 2026-07).
+are implemented and live.
+
+**Never send a binary `Accept` header to `/api/mobile/`.** DRF negotiates
+content in `APIView.initial()` *before* authentication, against
+`DEFAULT_RENDERER_CLASSES` — which the deployment leaves at JSON + browsable
+HTML. `Accept: application/pdf` / `image/png` therefore 406s before the view
+runs; that was the production "Could not load the label" bug (fixed 2026-07-25
+by sending `*/*`, see `LabelService._accept` and `BACKEND_SPEC.md` Part 9).
 
 ```
 GET /api/mobile/labels/<lot_pk>/                    # RGB PNG (default fmt)
