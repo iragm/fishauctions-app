@@ -30,11 +30,12 @@
 
     <!-- ARCore — AR lot mode's camera pipeline (BACKEND_SPEC.md Part 5,
          odo_x_m/odo_y_m): visual-inertial pose tracking replaces the old
-         pedometer-based stride counting. "optional" (not "required") so the
-         app still installs on devices without Play Services for AR — AR lot
-         mode itself degrades to an explainer screen there (ar/ArSessionManager.kt). -->
+         pedometer-based stride counting. Not required, so the app still
+         installs on devices without Play Services for AR — AR lot mode itself
+         degrades to an explainer screen there (ar/ArSessionManager.kt). The
+         matching com.google.ar.core meta-data lives inside <application>
+         below, where meta-data is actually valid. -->
     <uses-feature android:name="android.hardware.camera.ar" android:required="false"/>
-    <meta-data android:name="com.google.ar.core" android:value="optional"/>
 
     <!-- Camera — the web check-in screen scans barcodes via the browser camera
          (getUserMedia) inside the WebView. The system WebView denies that
@@ -94,6 +95,21 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
+
+        <!-- ARCore dependency type. MUST be inside <application> — meta-data is
+             invalid at manifest root, where it's silently dropped from the
+             merged manifest and Google Play then rejects the bundle with "The
+             ARCore dependency type 'com.google.ar.core' is missing from the
+             AndroidManifest.xml file although the meta-data tag
+             'com.google.ar.core.min_apk_version' has been specified" (that
+             min_apk_version tag is merged in by the ARCore AAR itself, so
+             once the dependency exists this tag is mandatory).
+             "optional" pairs with the android.hardware.camera.ar uses-feature
+             above: installable everywhere, and ArSessionManager checks
+             ArCoreApk availability / requests install at runtime. -->
+        <meta-data
+            android:name="com.google.ar.core"
+            android:value="optional" />
 
         <!-- Required by flutter_inappwebview's WebChromeClient for the
              <input type="file"> camera-capture path: it saves the photo via
