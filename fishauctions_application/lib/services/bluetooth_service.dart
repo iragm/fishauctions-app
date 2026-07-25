@@ -70,33 +70,72 @@ class BluetoothService implements PrinterTransport {
 
   // ── Permissions ───────────────────────────────────────────────────────────
 
-  /// Minimum permissions to connect to a known printer. On Android 12+ this is
-  /// BLUETOOTH_CONNECT; older releases fall back to the legacy BLUETOOTH perm.
+  /// Android 12 (API 31) — where the Bluetooth permission model changed from
+  /// one install-time permission to the runtime CONNECT/SCAN pair.
+  static const _androidS = 31;
+
+  /// The runtime permission that gates *connecting* on this platform and OS
+  /// release, or null when there's nothing to request.
+  ///
+  /// This has to be resolved per-release rather than asked for as a fixed set:
+  /// permission_handler resolves every group against the *effective* manifest
+  /// and reports a group that isn't in it as plain `denied` — never prompting,
+  /// never grantable. Each of the Bluetooth groups is missing somewhere:
+  ///
+  ///  * **Android 12+** — legacy `BLUETOOTH` is declared `maxSdkVersion="30"`
+  ///    (per Google's guidance), so the package manager strips it from the
+  ///    installed package and `Permission.bluetooth` is permanently `denied`.
+  ///  * **Android 11 and below** — `BLUETOOTH_CONNECT` doesn't exist yet, and
+  ///    permission_handler denies it rather than treating it as unnecessary.
+  ///    Legacy `BLUETOOTH`/`BLUETOOTH_ADMIN` are install-time, so there is no
+  ///    runtime request to make at all.
+  ///  * **iOS** — `bluetoothConnect`/`bluetoothScan` are Android-only groups
+  ///    and fall through to permission_handler's "unknown" strategy, which
+  ///    also denies. CoreBluetooth prompts on first use instead, and a refusal
+  ///    surfaces as [BluetoothAdapterState.unauthorized] (see
+  ///    [isAdapterUnauthorized]) — a more reliable signal than the plugin's.
+  ///
+  /// Demanding *all* of them (which this used to) is therefore unsatisfiable
+  /// on every platform: that's what the "Bluetooth permission is required"
+  /// dead end was.
+  Future<Permission?> _connectPermission() async {
+    if (!Platform.isAndroid) {
+      return null;
+    }
+    return await PlatformBridge.sdkInt() >= _androidS
+        ? Permission.bluetoothConnect
+        : null;
+  }
+
+  /// Minimum permission to connect to a known printer. True when the OS needs
+  /// none at runtime (see [_connectPermission]).
   Future<bool> requestConnectPermissions() async {
-    final statuses = await [
-      Permission.bluetooth,
-      Permission.bluetoothConnect,
-    ].request();
-    return statuses.values.every((s) => s.isGranted);
+    final permission = await _connectPermission();
+    if (permission == null) {
+      return true;
+    }
+    return (await permission.request()).isGranted;
   }
 
   /// Extra permission to *discover* new printers. Android 12+ uses
   /// BLUETOOTH_SCAN (declared neverForLocation, so no location prompt); Android
-  /// 11 and below need runtime location to return BLE scan results.
+  /// 11 and below have no such permission and instead need runtime location,
+  /// which is what makes the OS return BLE scan results there. iOS needs
+  /// neither — the CoreBluetooth authorization covers scanning.
   Future<bool> requestScanPermissions() async {
-    final perms = <Permission>[Permission.bluetoothScan];
-    if (await PlatformBridge.sdkInt() < 31) {
-      perms.add(Permission.locationWhenInUse);
+    if (!Platform.isAndroid) {
+      return true;
     }
-    final statuses = await perms.request();
-    return statuses.values.every((s) => s.isGranted);
+    final permission = await PlatformBridge.sdkInt() >= _androidS
+        ? Permission.bluetoothScan
+        : Permission.locationWhenInUse;
+    return (await permission.request()).isGranted;
   }
 
-  /// True once the user has permanently denied a Bluetooth permission ("Don't
+  /// True once the user has permanently denied the connect permission ("Don't
   /// ask again"): the prompt can't reappear, so the only fix is OS settings.
   Future<bool> isPermissionPermanentlyDenied() async =>
-      await Permission.bluetoothConnect.isPermanentlyDenied ||
-      await Permission.bluetooth.isPermanentlyDenied;
+      await (await _connectPermission())?.isPermanentlyDenied ?? false;
 
   /// Opens this app's OS settings page so the user can grant a permission they
   /// previously denied permanently.
@@ -104,10 +143,47 @@ class BluetoothService implements PrinterTransport {
 
   // ── Adapter state ─────────────────────────────────────────────────────────
 
+  /// How long to wait for the platform's first adapter-state answer before
+  /// giving up — only hit if the channel is wedged.
+  static const _adapterStateTimeout = Duration(seconds: 5);
+
+  /// The radio's real state, fetching it from the platform when nobody has yet.
+  ///
+  /// `adapterStateNow` is only a *cache*: it reads `unknown` until something
+  /// has actually asked the platform, and nothing does at startup (Android's
+  /// side listens for state *changes*, iOS won't have built its central
+  /// manager). Awaiting the stream's first value is what performs that fetch.
+  /// Reading the cache directly on a cold process therefore reports a radio
+  /// that's on as off.
+  Future<BluetoothAdapterState> adapterState() async {
+    final cached = FlutterBluePlus.adapterStateNow;
+    if (cached != BluetoothAdapterState.unknown) {
+      return cached;
+    }
+    try {
+      return await FlutterBluePlus.adapterState.first.timeout(
+        _adapterStateTimeout,
+      );
+    } on Object {
+      return FlutterBluePlus.adapterStateNow;
+    }
+  }
+
   /// Whether the phone's Bluetooth radio is on. Scans and connections fail
   /// confusingly when it's off, so check this first and show a clear prompt.
   Future<bool> isAdapterOn() async =>
-      FlutterBluePlus.adapterStateNow == BluetoothAdapterState.on;
+      await adapterState() == BluetoothAdapterState.on;
+
+  /// The adapter is unusable *because the OS is refusing this app Bluetooth*,
+  /// not because the radio is switched off — so "turn Bluetooth on" would be
+  /// the wrong thing to tell the user; only OS settings can fix it. This is
+  /// how a declined CoreBluetooth prompt shows up on iOS, and how a revoked
+  /// BLUETOOTH_CONNECT can show up on Android.
+  ///
+  /// Reads the cache deliberately: it's only meaningful right after an
+  /// [isAdapterOn] / [adapterState] call has populated it.
+  bool get isAdapterUnauthorized =>
+      FlutterBluePlus.adapterStateNow == BluetoothAdapterState.unauthorized;
 
   /// Asks the OS to turn the radio on. Android can show a system prompt; iOS
   /// has no API for this (the user toggles it in Control Center), so there we

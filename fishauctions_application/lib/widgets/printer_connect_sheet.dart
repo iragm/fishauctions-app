@@ -101,6 +101,7 @@ class _PrinterConnectSheetState extends ConsumerState<PrinterConnectSheet> {
     setState(() {
       _error = null;
       _needsBluetoothOn = false;
+      _needsSettings = false;
       _devices.clear();
     });
 
@@ -110,9 +111,17 @@ class _PrinterConnectSheetState extends ConsumerState<PrinterConnectSheet> {
       if (!mounted) {
         return;
       }
+      // "Unauthorized" isn't a radio the user can switch on — it's the OS
+      // refusing this app Bluetooth (a declined iOS prompt, a revoked Android
+      // one), so send them to settings instead of Quick Settings.
+      final unauthorized = BluetoothService.instance.isAdapterUnauthorized;
       setState(() {
-        _needsBluetoothOn = true;
-        _error = 'Bluetooth is off. Turn it on to find your printer.';
+        _needsBluetoothOn = !unauthorized;
+        _needsSettings = unauthorized;
+        _error = unauthorized
+            ? 'Bluetooth is off for this app. Open settings to allow it, then '
+                  'come back and scan.'
+            : 'Bluetooth is off. Turn it on to find your printer.';
       });
       return;
     }

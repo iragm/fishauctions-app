@@ -150,10 +150,18 @@ when the lot is off screen) placed either from a map→screen homography fitted
 on the mapped labels currently in frame — scale-free, centimeter-class near a
 scanned cluster — or, when too few are visible, from the bearing/distance of
 the bearing-only resection (≥3 sighted mapped lots) with an assumed table
-height for its on-screen height. Bottom checkboxes (**Watched** /
-**Recommended**, off by default) put the same beacon, in the theme's
-warning/success colors, on any mapped lot the user is standing within 6 ft of
-— which is why the pose solver also runs outside locate mode.
+height for its on-screen height. Locating **one** lot the user explicitly
+asked for is the only thing the map drives.
+
+**Removed 2026-07-25:** bottom **Watched** / **Recommended** checkboxes that
+put the same beacon on *any* mapped lot within 6 ft. The map isn't precise
+enough for unprompted "you're standing next to this" claims. Nothing it needed
+was torn out — `ArSessionController.lotsWithin`, the pose solve, and the
+`watched`/`recommended` flags on `ArLotMeta` all remain — so it's a small
+re-add if the solver tightens up (see `ar_lots_screen.dart` history). The
+in-frame chip markers still show watched (star) and recommended (green): those
+key off the label actually being read, not off a solved position. Consequence:
+the pose solver now only has positions to work with in locate mode.
 
 ```
 GET  /api/mobile/ar/lots/?auction=<slug>&lots=<pks>   # overlay/card metadata

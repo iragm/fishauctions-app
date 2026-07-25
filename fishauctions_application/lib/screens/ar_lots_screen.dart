@@ -38,8 +38,14 @@ import '../widgets/ar_camera_view.dart';
 ///    beacon pinned in the camera view — projected off its visible mapped
 ///    neighbors when there are enough, otherwise off the solved pose — which
 ///    becomes an edge arrow while it's off screen.
-///  * The watched/recommended checkboxes do the same for any mapped lot the
-///    user is standing within six feet of, in the warning/success colors.
+///
+/// Removed 2026-07-25: bottom "Watched"/"Recommended" checkboxes that put the
+/// same beacon on *any* mapped lot within six feet. Locating one lot the user
+/// asked for works, but the map isn't precise enough to be trusted for
+/// unprompted "you're standing next to this" claims. Everything it needed is
+/// still here — `ArSessionController.lotsWithin`, the pose solve, and the
+/// `watched`/`recommended` flags on [ArLotMeta] — so it's a small re-add if
+/// the map ever tightens up; see this file's history for the original.
 ///
 /// Degrades gracefully against a backend without Part 3: chips fall back to
 /// `Lot <pk>` stubs, observation uploads switch off, locate mode reports the
@@ -101,15 +107,6 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
   /// with three or more there isn't room for pictures.
   static const int _maxThumbnailChips = 2;
 
-  /// "You're right next to it": 6 feet, the radius a watched/recommended lot
-  /// has to be inside for its beacon to appear.
-  static const double _beaconRadiusM = 1.83;
-
-  /// How far out we bother pulling metadata for mapped lots, so a beacon can
-  /// pop the moment the user walks into range instead of a fetch later.
-  static const double _flagMetaRadiusM = 12;
-  static const Duration _flagMetaInterval = Duration(seconds: 3);
-
   /// Assumed drop from the camera to a label on a table — the only thing that
   /// gives a pose-projected beacon a sensible *height* on screen (the map is
   /// 2D). Wrong by a few tens of centimeters just nudges the pin up or down.
@@ -147,12 +144,6 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
   /// Pixel dimensions of the most recent detection pass, kept so a beacon can
   /// still be projected from the pose after the labels leave the frame.
   Size? _lastImageSize;
-
-  /// The bottom checkboxes — beacons for nearby watched / recommended lots.
-  /// Off by default: this is opt-in guidance, not a permanent HUD.
-  bool _beaconWatched = false;
-  bool _beaconRecommended = false;
-  DateTime _lastFlagMetaFetch = DateTime.fromMillisecondsSinceEpoch(0);
 
   Timer? _sweepTimer;
   Timer? _positionsTimer;
@@ -292,18 +283,11 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
   }
 
   /// Solved positions are only worth pulling when something on screen depends
-  /// on them — locate mode, or a beacon checkbox. The server re-solves about
+  /// on them, which now means locate mode alone. The server re-solves about
   /// once a minute; keep pulling so "scan more lots until yours is mapped"
   /// can actually complete.
   void _ensurePositionsPolling() {
-    final wanted =
-        widget.locateLotPk != null || _beaconWatched || _beaconRecommended;
-    if (!wanted) {
-      _positionsTimer?.cancel();
-      _positionsTimer = null;
-      return;
-    }
-    if (_positionsTimer != null) {
+    if (widget.locateLotPk == null || _positionsTimer != null) {
       return;
     }
     unawaited(_refreshPositions());
@@ -492,38 +476,10 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
     }
 
     _session.flushIfDue();
-    _maybeFetchFlagMeta(now);
     _locate = _session.locateState;
-    if (changed ||
-        _cardPk != null ||
-        _locate != null ||
-        _beaconWatched ||
-        _beaconRecommended) {
+    if (changed || _cardPk != null || _locate != null) {
       setState(() {});
     }
-  }
-
-  /// With a beacon checkbox on, pull metadata for mapped lots around the
-  /// user — we can't know a lot is watched or recommended without it, and
-  /// waiting until it's 6 feet away would surface the beacon a fetch late.
-  /// Bounded by radius, by one batch per call, and by [_fetchMeta]'s own
-  /// "never re-fetch a known lot" rule, so standing still costs nothing.
-  void _maybeFetchFlagMeta(DateTime now) {
-    if (!_beaconWatched && !_beaconRecommended) {
-      return;
-    }
-    if (now.difference(_lastFlagMetaFetch) < _flagMetaInterval) {
-      return;
-    }
-    final wanted = <int>{
-      for (final lot in _session.lotsWithin(_flagMetaRadiusM))
-        if (_meta[lot.lotPk] == null) lot.lotPk,
-    };
-    if (wanted.isEmpty) {
-      return;
-    }
-    _lastFlagMetaFetch = now;
-    unawaited(_fetchMeta(wanted.take(ArApi.maxLotsPerFetch).toSet()));
   }
 
   // ── Actions ───────────────────────────────────────────────────────────────
@@ -666,7 +622,6 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
               ),
             ..._buildMarkers(widgetSize),
             ?targetBeacon,
-            ..._buildFlagBeacons(widgetSize, mapToScreen),
             if (_locate case final locate? when !oriented)
               Positioned(
                 top: 8,
@@ -678,18 +633,19 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
               Positioned(
                 left: 12,
                 right: 12,
-                bottom: _flagBarHeight + 12 + bottomInset,
+                bottom: 12 + bottomInset,
                 child: _LotCard(
                   meta: cardMeta,
                   onOpen: () => _openLotPage(cardMeta),
                   onToggleWatch: () => unawaited(_toggleWatch(cardMeta.pk)),
                 ),
               ),
+
             if (_hint(cardMeta) case final hint?)
               Positioned(
                 left: 24,
                 right: 24,
-                bottom: _flagBarHeight + 36 + bottomInset,
+                bottom: 36 + bottomInset,
                 child: Text(
                   hint,
                   textAlign: TextAlign.center,
@@ -700,86 +656,16 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
                   ),
                 ),
               ),
-            Positioned(
-              left: 12,
-              right: 12,
-              bottom: 8 + bottomInset,
-              child: _FlagBar(
-                watched: _beaconWatched,
-                recommended: _beaconRecommended,
-                onToggleWatched: () => setState(() {
-                  _beaconWatched = !_beaconWatched;
-                  _ensurePositionsPolling();
-                }),
-                onToggleRecommended: () => setState(() {
-                  _beaconRecommended = !_beaconRecommended;
-                  _ensurePositionsPolling();
-                }),
-              ),
-            ),
           ],
         );
       },
     );
   }
 
-  /// The bottom hint line, or null when the overlay speaks for itself. A
-  /// ticked checkbox with no pose yet gets priority: nothing can be "near
-  /// you" until the phone has placed itself on the map, and a checkbox that
-  /// silently does nothing looks broken.
-  String? _hint(ArLotMeta? cardMeta) {
-    if ((_beaconWatched || _beaconRecommended) &&
-        !_session.hasPose &&
-        _locate == null) {
-      return 'Scan a few lot labels around you so I can tell what you\'re '
-          'standing next to';
-    }
-    return (_visible.isEmpty && cardMeta == null)
-        ? 'Point the camera at lot labels'
-        : null;
-  }
-
-  /// Beacons for the nearby lots the user ticked the boxes for: any mapped
-  /// lot within [_beaconRadiusM] that they're watching (warning) or that's
-  /// recommended to them (success). The locate target keeps its own blue
-  /// beacon and is never doubled up here.
-  List<Widget> _buildFlagBeacons(
-    Size widgetSize,
-    MapImageTransform? mapToScreen,
-  ) {
-    if (!_beaconWatched && !_beaconRecommended) {
-      return const [];
-    }
-    final beacons = <Widget>[];
-    for (final lot in _session.lotsWithin(_beaconRadiusM)) {
-      if (lot.lotPk == widget.locateLotPk) {
-        continue;
-      }
-      final meta = _meta[lot.lotPk];
-      if (meta == null || meta.sold || meta.removed) {
-        continue;
-      }
-      final color = _beaconWatched && meta.watched
-          ? AppTheme.warning
-          : _beaconRecommended && meta.recommended
-          ? AppTheme.success
-          : null;
-      if (color == null) {
-        continue;
-      }
-      final beacon = _beaconFor(
-        widgetSize,
-        pk: lot.lotPk,
-        color: color,
-        distanceM: lot.distanceM,
-        mapToScreen: mapToScreen,
-      );
-      if (beacon != null) {
-        beacons.add(beacon);
-      }
-    }
-    return beacons;
-  }
+  /// The bottom hint line, or null when the overlay speaks for itself.
+  String? _hint(ArLotMeta? cardMeta) => (_visible.isEmpty && cardMeta == null)
+      ? 'Point the camera at lot labels'
+      : null;
 
   /// A beacon for one mapped lot: a pin where it should be, or a small arrow
   /// at the edge of the screen when it's off frame. The position comes from
@@ -800,7 +686,6 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
     required int pk,
     required Color color,
     required MapImageTransform? mapToScreen,
-    double? distanceM,
   }) {
     if (_visible.containsKey(pk)) {
       return null;
@@ -816,7 +701,7 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
     if (projected == null) {
       return null;
     }
-    final distance = distanceM ?? aim?.distanceM;
+    final distance = aim?.distanceM;
     final inset = Rect.fromLTWH(
       24,
       24,
@@ -971,10 +856,6 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
 /// around its own chip.
 const Color _targetColor = Colors.lightBlueAccent;
 
-/// Height reserved at the bottom of the camera view for [_FlagBar], so the
-/// detail card and the "point the camera" hint stack above it.
-const double _flagBarHeight = 52;
-
 /// Camera-permission and camera-error states share this full-screen message.
 class _PermissionExplainer extends StatelessWidget {
   const _PermissionExplainer({
@@ -1027,8 +908,8 @@ class _LotMarker extends StatelessWidget {
   /// Whether the named chip should include the lot's thumbnail below its name.
   final bool showThumbnail;
 
-  // Same warning/success pair the beacons and the checkboxes use, so a lot
-  // means the same thing whichever way it shows up on screen.
+  // Keyed off the metadata for the label actually in frame — no map position
+  // involved, so this stayed when the proximity beacons went.
   Color get _accent => meta.watched
       ? AppTheme.warning
       : meta.recommended
@@ -1231,99 +1112,7 @@ class _BeaconArrow extends StatelessWidget {
   );
 }
 
-/// The bottom checkbox bar: opt in to beacons for nearby watched or
-/// recommended lots. Both off by default.
-class _FlagBar extends StatelessWidget {
-  const _FlagBar({
-    required this.watched,
-    required this.recommended,
-    required this.onToggleWatched,
-    required this.onToggleRecommended,
-  });
-
-  final bool watched;
-  final bool recommended;
-  final VoidCallback onToggleWatched;
-  final VoidCallback onToggleRecommended;
-
-  @override
-  Widget build(BuildContext context) => Material(
-    color: Colors.black.withValues(alpha: 0.7),
-    borderRadius: BorderRadius.circular(12),
-    child: SizedBox(
-      height: _flagBarHeight,
-      child: Row(
-        children: [
-          Expanded(
-            child: _FlagCheckbox(
-              label: 'Watched',
-              value: watched,
-              color: AppTheme.warning,
-              onToggle: onToggleWatched,
-            ),
-          ),
-          Expanded(
-            child: _FlagCheckbox(
-              label: 'Recommended',
-              value: recommended,
-              color: AppTheme.success,
-              onToggle: onToggleRecommended,
-            ),
-          ),
-        ],
-      ),
-    ),
-  );
-}
-
-class _FlagCheckbox extends StatelessWidget {
-  const _FlagCheckbox({
-    required this.label,
-    required this.value,
-    required this.color,
-    required this.onToggle,
-  });
-
-  final String label;
-  final bool value;
-  final Color color;
-  final VoidCallback onToggle;
-
-  @override
-  Widget build(BuildContext context) => InkWell(
-    onTap: onToggle,
-    borderRadius: BorderRadius.circular(12),
-    child: Row(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        Checkbox(
-          value: value,
-          onChanged: (_) => onToggle(),
-          activeColor: color,
-          checkColor: Colors.black,
-          side: const BorderSide(color: Colors.white70, width: 2),
-          visualDensity: VisualDensity.compact,
-          materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-        ),
-        const SizedBox(width: 4),
-        Flexible(
-          child: Text(
-            label,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              color: value ? color : Colors.white,
-              fontSize: 14,
-              fontWeight: value ? FontWeight.w600 : FontWeight.normal,
-            ),
-          ),
-        ),
-      ],
-    ),
-  );
-}
-
-/// Distance for the beacons and the locate banner. The map's scale is
+/// Distance for the beacon and the locate banner. The map's scale is
 /// approximate (it comes from a phone-height prior, not measured ranges), so:
 /// one decimal close up, whole meters beyond.
 String formatDistance(double distanceM) => distanceM < 3
