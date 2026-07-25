@@ -363,10 +363,14 @@ Dart), so it has no JDK setup step and isn't affected. `minSdk` is **28**
 The app has **no anonymous browsing**. The router (`lib/config/router.dart`)
 traps signed-out users on three gate screens until a sign-in succeeds:
 
-- `/login` — native login (password + "Continue with Google"). The Google
-  button renders only when the deployment's `/api/mobile/config/` returns a
-  non-empty `google_server_client_id`; unconfigured deployments simply don't
-  offer it (no "not configured" error).
+- `/login` — native login: "Sign in with Google" on top, then the
+  username/password form. The Google button renders only when the deployment's
+  `/api/mobile/config/` returns a non-empty `google_server_client_id`;
+  unconfigured deployments simply don't offer it (no "not configured" error).
+  It draws Google's own unmodified button artwork from `assets/google/`
+  (`GoogleSignInButton`) — scale it with `height`, never restyle it. OAuth
+  client + SHA-1 registration, and the two ways it fails silently:
+  `GOOGLE_SIGNIN.md`.
 - `/signup`, `/password-reset` — the django-allauth web flows hosted in a
   restricted WebView (`AllauthWebScreen`). **Allauth is mounted at the site
   root** (`/signup/`, `/password/reset/`, `/login/`, `/logout/` — not under

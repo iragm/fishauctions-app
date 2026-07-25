@@ -116,6 +116,13 @@ flutter:
   uses-material-design: true
   assets:
     - assets/icon/app_icon.png
+    # Google's own "Sign in with Google" button artwork, unmodified, from the
+    # branding kit at developers.google.com/identity/branding-guidelines.
+    # These are the 4x Android/Web pill assets; GoogleSignInButton decodes
+    # them at the size it draws, so there are no density variants to keep in
+    # sync. Do not recolor, crop, or re-export them.
+    - assets/google/sign_in_with_google_light.png
+    - assets/google/sign_in_with_google_dark.png
 
 # App icon generation. Source is a single 1024×1024 transparent PNG; the tool
 # fans it out to every Android density + adaptive icon and the iOS appiconset.

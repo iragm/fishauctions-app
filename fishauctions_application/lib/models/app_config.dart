@@ -37,8 +37,8 @@ class AppConfig {
   /// Google (Web) OAuth client id for native sign-in, read at launch from
   /// `/api/mobile/config/`. Native Google login asks the SDK for an ID token
   /// whose audience is this id; the backend verifies it against the same id.
-  /// Not a secret (it ships in every web page's GSI button). Empty → the
-  /// "Continue with Google" button reports sign-in isn't configured here.
+  /// Not a secret (it ships in every web page's GSI button). Empty → the login
+  /// screen hides the "Sign in with Google" button entirely.
   final String googleServerClientId;
 
   /// The deployment's brand, shown as the app-bar title and drawer header
