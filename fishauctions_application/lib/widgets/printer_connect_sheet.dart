@@ -1,13 +1,16 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart' hide BluetoothService;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../models/printer_device_info.dart';
 import '../models/printer_profile.dart';
 import '../providers/printer_provider.dart';
 import '../services/bluetooth_service.dart';
 import '../services/printer_profile_service.dart';
+import '../services/printer_report_service.dart';
 
 /// The native "connect a Bluetooth printer" flow, shown as a modal bottom
 /// sheet *over* the current page — the `/printing/` web page stays the one
@@ -16,9 +19,14 @@ import '../services/printer_profile_service.dart';
 /// printer is set up yet).
 ///
 /// Flow: connect permission → (Android ≤11: location permission) → scan →
-/// pick a device → profile match by BLE name, or a manual profile pick when
-/// nothing matches → connect. Resolves when the sheet closes; callers read
-/// the outcome from [printerProvider].
+/// pick a device → resolve its profile → connect. Resolves when the sheet
+/// closes; callers read the outcome from [printerProvider].
+///
+/// Resolving the profile is the interesting part, because it decides every
+/// byte the app will send. In order: the advertised BLE name, then what the
+/// printer reports about itself over GATT (which survives the user renaming
+/// it), and only if both fail does it ask the user — showing what the printer
+/// did say, and reporting it so a profile can be added for the next person.
 class PrinterConnectSheet extends ConsumerStatefulWidget {
   const PrinterConnectSheet({super.key});
 
@@ -41,6 +49,8 @@ class _PrinterConnectSheetState extends ConsumerState<PrinterConnectSheet> {
   List<PrinterProfile> _profiles = const [];
   bool _scanning = false;
   bool _connecting = false;
+  // Connected, but still asking the device what it is (see _connect).
+  bool _identifying = false;
   String? _error;
   // When set, the error has a concrete fix the user can take from here.
   bool _needsBluetoothOn = false;
@@ -64,7 +74,10 @@ class _PrinterConnectSheetState extends ConsumerState<PrinterConnectSheet> {
   }
 
   Future<void> _loadProfiles() async {
-    final profiles = await PrinterProfileService.instance.getProfiles();
+    // `candidates`, not `getProfiles`: the manual picker has to offer every
+    // profile that automatic matching considers — including bundled seeds the
+    // server's list is missing, like the raw ESC/POS fallback.
+    final profiles = await PrinterProfileService.instance.candidates();
     if (mounted) {
       setState(() => _profiles = profiles);
     }
@@ -213,15 +226,45 @@ class _PrinterConnectSheetState extends ConsumerState<PrinterConnectSheet> {
     setState(() {
       _error = null;
       _connecting = true;
+      _identifying = false;
     });
     await BluetoothService.instance.stopScan();
 
-    // The profile decides every byte the app will send. Auto-match by BLE
-    // name; when nothing matches, the user picks (covers renamed units and
-    // the raw ESC/POS fallback profile, which never auto-matches).
+    // The profile decides every byte the app will send, so it has to be right.
+    // Three tries, cheapest first: the advertised BLE name, then what the
+    // printer says it is over GATT, and only then the user.
     var profile = _matchProfile(name);
-    if (profile == null && mounted) {
-      profile = await _pickProfile(name);
+    var match = ProfileMatch.bleName;
+    PrinterDeviceInfo? info;
+
+    if (profile == null) {
+      setState(() => _identifying = true);
+      try {
+        info = await BluetoothService.instance.identify(device, name: name);
+      } on PrinterException catch (e) {
+        // Couldn't even open the link — asking the user which printer this is
+        // wouldn't help, since connecting is about to fail the same way.
+        _failConnect(e.message);
+        return;
+      }
+      if (!mounted) {
+        return;
+      }
+      setState(() => _identifying = false);
+      final identified = await PrinterProfileService.instance.matchByDeviceInfo(
+        info,
+      );
+      if (identified != null) {
+        (profile, match) = identified;
+      }
+    }
+
+    if (profile == null) {
+      if (!mounted) {
+        return;
+      }
+      profile = await _pickProfile(name, info);
+      match = ProfileMatch.manual;
       if (profile == null) {
         setState(() => _connecting = false);
         return; // user cancelled
@@ -246,28 +289,101 @@ class _PrinterConnectSheetState extends ConsumerState<PrinterConnectSheet> {
                   'Make sure it is powered on and in range.';
       });
     } else {
+      unawaited(_report(info, name: name, profile: profile, match: match));
       Navigator.of(context).pop();
     }
   }
 
-  Future<PrinterProfile?> _pickProfile(String deviceName) =>
-      showDialog<PrinterProfile>(
-        context: context,
-        builder: (ctx) => SimpleDialog(
-          title: Text('What kind of printer is "$deviceName"?'),
-          children: [
-            for (final profile in _profiles)
-              SimpleDialogOption(
-                onPressed: () => Navigator.of(ctx).pop(profile),
-                child: Text(profile.name),
-              ),
-            SimpleDialogOption(
-              onPressed: () => Navigator.of(ctx).pop(),
-              child: const Text('Cancel'),
+  void _failConnect(String message) {
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _connecting = false;
+      _identifying = false;
+      _error = message;
+    });
+  }
+
+  /// Tells the backend what this printer turned out to be. On the BLE-name
+  /// fast path nothing has read the device yet, so read it now — the link is
+  /// open and it's two GATT reads.
+  Future<void> _report(
+    PrinterDeviceInfo? info, {
+    required String name,
+    required PrinterProfile? profile,
+    required ProfileMatch match,
+  }) async {
+    final reported =
+        info ?? await BluetoothService.instance.readDeviceInfo(name: name);
+    await PrinterReportService.instance.report(
+      reported,
+      profile: profile,
+      match: match,
+    );
+  }
+
+  /// Last resort: the printer's name matched nothing and it either wouldn't
+  /// say what it is or said something we have no profile for. Show whatever it
+  /// did report — that's the thing worth copying into a bug report, and it's
+  /// how a profile gets added for it.
+  Future<PrinterProfile?> _pickProfile(
+    String deviceName,
+    PrinterDeviceInfo? info,
+  ) => showDialog<PrinterProfile>(
+    context: context,
+    builder: (ctx) => SimpleDialog(
+      title: Text('What kind of printer is "$deviceName"?'),
+      children: [
+        if (info != null && !info.isEmpty) ...[
+          Padding(
+            padding: const EdgeInsets.fromLTRB(24, 0, 24, 8),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'It reports itself as:',
+                  style: Theme.of(ctx).textTheme.bodySmall,
+                ),
+                const SizedBox(height: 4),
+                SelectableText(
+                  info.summary,
+                  style: Theme.of(ctx).textTheme.bodySmall,
+                ),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: TextButton.icon(
+                    onPressed: () => _copyDetails(info),
+                    icon: const Icon(Icons.copy, size: 18),
+                    label: const Text('Copy details'),
+                  ),
+                ),
+              ],
             ),
-          ],
+          ),
+          const Divider(),
+        ],
+        for (final profile in _profiles)
+          SimpleDialogOption(
+            onPressed: () => Navigator.of(ctx).pop(profile),
+            child: Text(profile.name),
+          ),
+        SimpleDialogOption(
+          onPressed: () => Navigator.of(ctx).pop(),
+          child: const Text('Cancel'),
         ),
-      );
+      ],
+    ),
+  );
+
+  Future<void> _copyDetails(PrinterDeviceInfo info) async {
+    await Clipboard.setData(ClipboardData(text: info.summary));
+    if (mounted) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Printer details copied.')));
+    }
+  }
 
   Future<void> _unpair() async {
     await ref.read(printerProvider.notifier).forget();
@@ -296,9 +412,22 @@ class _PrinterConnectSheetState extends ConsumerState<PrinterConnectSheet> {
             child: Row(
               children: [
                 Expanded(
-                  child: Text(
-                    'Bluetooth printer',
-                    style: Theme.of(context).textTheme.titleLarge,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        'Bluetooth printer',
+                        style: Theme.of(context).textTheme.titleLarge,
+                      ),
+                      if (_connecting)
+                        Text(
+                          _identifying
+                              ? 'Asking the printer what it is…'
+                              : 'Connecting…',
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                    ],
                   ),
                 ),
                 if (_scanning || _connecting)

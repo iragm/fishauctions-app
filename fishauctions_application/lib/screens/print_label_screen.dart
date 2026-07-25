@@ -1,9 +1,11 @@
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:logger/logger.dart';
 import 'package:printing/printing.dart';
 
 import '../models/label_prefs.dart';
@@ -16,6 +18,8 @@ import '../services/label_service.dart';
 import '../services/printer_profile_driver.dart';
 import '../services/printer_profile_service.dart';
 import '../widgets/printer_connect_sheet.dart';
+
+final _log = Logger();
 
 /// Prints a single lot's label. This one screen backs every web "print" action
 /// — self lots, single lots, and auction lot lists all deep-link to
@@ -72,6 +76,11 @@ class _PrintLabelScreenState extends ConsumerState<PrintLabelScreen> {
       setState(() => _phase = _Phase.ready);
     } on DioException catch (e) {
       _fail(_loadErrorFor(e));
+    } on Object catch (e) {
+      // Anything else (a malformed response, a renderer blowing up) would
+      // otherwise leave the screen spinning forever with no way out.
+      _log.w('Label load failed: $e');
+      _fail('Could not load the label. Please try again.');
     }
   }
 
@@ -181,10 +190,18 @@ class _PrintLabelScreenState extends ConsumerState<PrintLabelScreen> {
     });
   }
 
-  /// Maps a failed label fetch to a clear message. The error body is raw
-  /// bytes (PNG/PDF requested), so we key off the status code.
+  /// Maps a failed label fetch to a message the user can act on.
+  ///
+  /// "Could not load the label, please try again" used to be the answer to
+  /// everything that wasn't a 401/403/404/429 — including the server being
+  /// unreachable and the server refusing the request, which need opposite
+  /// responses from the user. So: say when it's the connection, say when it's
+  /// the server, and pass through the server's own explanation when it gave
+  /// one (a 400 here means the label can't be rendered for this lot — e.g. a
+  /// lot with no auction has no label layout to render against).
   String _loadErrorFor(DioException e) {
-    switch (e.response?.statusCode) {
+    final code = e.response?.statusCode;
+    switch (code) {
       case 401:
       case 403:
         return "You don't have permission to print this lot's label.";
@@ -192,8 +209,37 @@ class _PrintLabelScreenState extends ConsumerState<PrintLabelScreen> {
         return 'That lot could not be found. It may have been removed.';
       case 429:
         return 'Too many requests right now. Wait a moment and try again.';
+      case null:
+        _log.w('Label fetch failed with no response: ${e.type} ${e.message}');
+        return "Couldn't reach the server. Check your connection and try "
+            'again.';
       default:
-        return 'Could not load the label. Please try again.';
+        final detail = _detailOf(e);
+        _log.w('Label fetch failed: HTTP $code ${detail ?? ''}');
+        if (code >= 500) {
+          return "The server couldn't produce this label right now "
+              '(HTTP $code). Try again in a moment.';
+        }
+        return detail != null
+            ? '$detail (HTTP $code)'
+            : 'Could not load the label (HTTP $code). Please try again.';
+    }
+  }
+
+  /// The API's `{"detail": …}` explanation, if it sent one. Label requests ask
+  /// for bytes, so an error body arrives as raw bytes rather than parsed JSON.
+  String? _detailOf(DioException e) {
+    final data = e.response?.data;
+    try {
+      final body = data is List<int> ? utf8.decode(data) : data?.toString();
+      if (body == null || body.isEmpty) {
+        return null;
+      }
+      final decoded = jsonDecode(body);
+      final detail = decoded is Map ? decoded['detail'] : null;
+      return detail is String && detail.isNotEmpty ? detail : null;
+    } on Object {
+      return null; // Not JSON (an HTML error page from a proxy, say).
     }
   }
 

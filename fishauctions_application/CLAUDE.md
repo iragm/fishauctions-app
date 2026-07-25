@@ -118,6 +118,17 @@ GET /api/mobile/printers/profiles/                  # ThermalPrinterProfile rows
   bottom sheet through JS-bridge handlers `printerGetState` /
   `printerConnect` / `printerUnpair` (each resolves with
   `{supported, connected, name, address, profile, labelSize}`).
+- **Which profile drives a printer** is resolved in `printer_connect_sheet.dart`
+  cheapest-first: advertised BLE name → what the printer reports over GATT
+  (Device Information Service; `BluetoothService.identify`, matched by
+  `matchProfileForDeviceInfo`) → ask the user. The middle step exists because
+  the BLE name is user-editable and OEM-inconsistent; a service UUID alone is
+  only trusted when exactly one profile claims it (`18f0` is shared by both
+  D11s profiles). Every pairing POSTs what the printer said to
+  `printers/observed/` so unknown printers can be catalogued and given a
+  profile — see `BACKEND_SPEC.md` Part 8 for that endpoint and the
+  `model_patterns`/`manufacturer_patterns` fields, **neither of which the
+  backend has yet**; the app treats both as empty until they land.
 
 ### AR Lot Mode
 

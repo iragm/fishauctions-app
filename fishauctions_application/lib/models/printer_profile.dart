@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'printer_device_info.dart';
+
 /// A Bluetooth thermal label printer the app knows how to drive.
 ///
 /// Profiles are Django admin rows served by `GET /api/mobile/printers/profiles/`
@@ -15,6 +17,8 @@ class PrinterProfile {
     required this.schemaVersion,
     required this.priority,
     required this.bleNamePatterns,
+    required this.modelPatterns,
+    required this.manufacturerPatterns,
     required this.serviceUuid,
     required this.writeCharacteristicUuid,
     required this.notifyCharacteristicUuid,
@@ -42,10 +46,9 @@ class PrinterProfile {
       name: json['name'] as String? ?? json['slug'] as String,
       schemaVersion: _int(json['schema_version'], 1),
       priority: _int(json['priority'], 100),
-      bleNamePatterns: [
-        for (final p in match['ble_name_patterns'] as List? ?? const [])
-          p as String,
-      ],
+      bleNamePatterns: _patterns(match['ble_name_patterns']),
+      modelPatterns: _patterns(match['model_patterns']),
+      manufacturerPatterns: _patterns(match['manufacturer_patterns']),
       serviceUuid: _uuid(match['service_uuid']),
       writeCharacteristicUuid: _uuid(match['write_characteristic_uuid']),
       notifyCharacteristicUuid: _uuid(match['notify_characteristic_uuid']),
@@ -82,8 +85,14 @@ class PrinterProfile {
 
   // ── Matching ──
   /// Case-insensitive regexes tested against the advertised BLE name. Empty =
-  /// never auto-matched (manual pick only).
+  /// never matched this way (a renamed printer, or the raw fallback profile).
   final List<String> bleNamePatterns;
+
+  /// Case-insensitive regexes tested against what the printer reports over
+  /// GATT (Device Information Service) once connected — the reliable identity
+  /// when the advertised name isn't one. See [matchesDeviceInfo].
+  final List<String> modelPatterns;
+  final List<String> manufacturerPatterns;
 
   /// Exact GATT ids ('' = discover the first writable characteristic).
   final String serviceUuid;
@@ -109,13 +118,26 @@ class PrinterProfile {
   final List<dynamic> labelSizeProgram;
   final Map<String, dynamic> labelSizeParse;
 
-  /// Whether [bleName] matches any of this profile's name patterns. A broken
-  /// regex in an admin row must not take scanning down, so it just never
-  /// matches.
-  bool matchesName(String bleName) {
-    for (final pattern in bleNamePatterns) {
+  /// Whether [bleName] matches any of this profile's name patterns.
+  bool matchesName(String bleName) => _matchesAny(bleNamePatterns, bleName);
+
+  /// Whether the printer's own reported identity matches this profile — the
+  /// model number or the manufacturer name from its GATT Device Information
+  /// Service. Unlike the BLE name, these are burned in by the OEM, so a
+  /// printer the user renamed still identifies itself correctly.
+  bool matchesDeviceInfo(PrinterDeviceInfo info) =>
+      _matchesAny(modelPatterns, info.model) ||
+      _matchesAny(manufacturerPatterns, info.manufacturer);
+
+  /// A broken regex in an admin row must not take pairing down, so it just
+  /// never matches.
+  static bool _matchesAny(List<String> patterns, String? value) {
+    if (value == null || value.isEmpty) {
+      return false;
+    }
+    for (final pattern in patterns) {
       try {
-        if (RegExp(pattern, caseSensitive: false).hasMatch(bleName)) {
+        if (RegExp(pattern, caseSensitive: false).hasMatch(value)) {
           return true;
         }
       } on FormatException {
@@ -131,6 +153,12 @@ class PrinterProfile {
     final section = json[key];
     return section is Map ? section.cast<String, dynamic>() : json;
   }
+
+  static List<String> _patterns(dynamic v) => [
+    if (v is List)
+      for (final p in v)
+        if (p is String) p,
+  ];
 
   static Map<String, dynamic> _map(dynamic v) =>
       v is Map ? v.cast<String, dynamic>() : const {};
@@ -166,4 +194,42 @@ List<PrinterProfile> parsePrinterProfiles(String jsonBody) {
   }
   profiles.sort((a, b) => a.priority.compareTo(b.priority));
   return profiles;
+}
+
+/// How a printer's profile was decided, so the backend can learn which
+/// printers identify themselves usefully and which still need a human.
+enum ProfileMatch { bleName, deviceInfo, serviceUuid, manual }
+
+/// Picks the profile for a printer that didn't match on its advertised name,
+/// from what the printer itself reported. Confidence ladder, first hit wins:
+///
+///  1. **Model / manufacturer patterns.** Deliberate backend data — a new
+///     printer is a Django admin edit, not an app release.
+///  2. **Service UUID, but only if exactly one profile claims it.** Weak on
+///     its own: the cheap-BLE-printer service `18f0` is shared by half the
+///     market, and the two D11s profiles (AiYin vs LuJiang board) both use it
+///     — those genuinely can't be told apart this way, and guessing wrong
+///     means sending a different command language. Ambiguity falls through to
+///     asking the user.
+///
+/// [profiles] is in preference order. Null means "ask the user".
+(PrinterProfile, ProfileMatch)? matchProfileForDeviceInfo(
+  List<PrinterProfile> profiles,
+  PrinterDeviceInfo info,
+) {
+  for (final profile in profiles) {
+    if (profile.matchesDeviceInfo(info)) {
+      return (profile, ProfileMatch.deviceInfo);
+    }
+  }
+  final claimants = [
+    for (final profile in profiles)
+      if (profile.serviceUuid.isNotEmpty &&
+          info.hasService(profile.serviceUuid))
+        profile,
+  ];
+  if (claimants.length == 1) {
+    return (claimants.first, ProfileMatch.serviceUuid);
+  }
+  return null;
 }

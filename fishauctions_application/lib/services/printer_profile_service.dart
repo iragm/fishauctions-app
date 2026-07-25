@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:dio/dio.dart';
 import 'package:logger/logger.dart';
 
+import '../models/printer_device_info.dart';
 import '../models/printer_profile.dart';
 import '../utils/secure_storage.dart';
 import 'api_service.dart';
@@ -89,24 +90,38 @@ class PrinterProfileService {
 
   /// The profile to auto-select for a scanned device, by advertised name —
   /// priority order, first match wins. Null when nothing matches (the connect
-  /// UI then asks the user to pick one).
+  /// UI then asks the printer itself, and only then the user).
   Future<PrinterProfile?> matchByName(String bleName) async {
     if (bleName.isEmpty) {
       return null;
     }
-    for (final profile in await getProfiles()) {
-      if (profile.matchesName(bleName)) {
-        return profile;
-      }
-    }
-    // The server list may be reachable but missing the seeds; the bundle is
-    // the last line so a D11s always matches.
-    for (final profile in bundledPrinterProfiles()) {
+    for (final profile in await candidates()) {
       if (profile.matchesName(bleName)) {
         return profile;
       }
     }
     return null;
+  }
+
+  /// The profile for a printer whose advertised name matched nothing, decided
+  /// from what the printer reports over GATT (see [matchProfileForDeviceInfo]
+  /// for the confidence ladder). Null still means "ask the user".
+  Future<(PrinterProfile, ProfileMatch)?> matchByDeviceInfo(
+    PrinterDeviceInfo info,
+  ) async => matchProfileForDeviceInfo(await candidates(), info);
+
+  /// Every profile this build can offer, in preference order: the server's
+  /// list (live or cached) first, then any bundled seed it doesn't include —
+  /// the server list may be reachable but missing the seeds, and the bundle is
+  /// the last line that keeps a D11s working.
+  Future<List<PrinterProfile>> candidates() async {
+    final profiles = await getProfiles();
+    final slugs = {for (final p in profiles) p.slug};
+    return [
+      ...profiles,
+      for (final p in bundledPrinterProfiles())
+        if (!slugs.contains(p.slug)) p,
+    ];
   }
 
   /// Resolves a saved printer's profile by slug. A null/unknown [slug] (a

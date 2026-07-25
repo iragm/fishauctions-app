@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io' show Platform;
 import 'dart:typed_data';
 
@@ -8,6 +9,7 @@ import 'dart:typed_data';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart' hide BluetoothService;
 import 'package:permission_handler/permission_handler.dart';
 
+import '../models/printer_device_info.dart';
 import '../models/printer_model.dart';
 import '../models/printer_profile.dart';
 import '../utils/platform_bridge.dart';
@@ -286,6 +288,87 @@ class BluetoothService implements PrinterTransport {
     return _connectedPrinter!;
   }
 
+  // ── Identification ────────────────────────────────────────────────────────
+
+  /// GATT Device Information Service and the strings worth reading from it
+  /// (Bluetooth SIG assigned numbers), in 16-bit form — see
+  /// [normalizeGattUuid].
+  static const _disService = '180a';
+  static const _disModel = '2a24';
+  static const _disManufacturer = '2a29';
+  static const _disFirmware = '2a26';
+  static const _disHardware = '2a27';
+
+  /// Asks the printer on the *open* link what it is. Best-effort by design:
+  /// plenty of cheap thermal printers implement no Device Information Service
+  /// at all, and printing doesn't depend on any of this — an empty
+  /// [PrinterDeviceInfo] is a normal answer, not a failure.
+  Future<PrinterDeviceInfo> readDeviceInfo({String? name}) async {
+    final device = _device;
+    final bleName =
+        name ?? _connectedPrinter?.name ?? device?.platformName ?? '';
+    if (device == null) {
+      return PrinterDeviceInfo(bleName: bleName);
+    }
+    return PrinterDeviceInfo(
+      bleName: bleName,
+      manufacturer: await _readDisString(device, _disManufacturer),
+      model: await _readDisString(device, _disModel),
+      firmware: await _readDisString(device, _disFirmware),
+      hardware: await _readDisString(device, _disHardware),
+      serviceUuids: [
+        for (final s in device.servicesList)
+          normalizeGattUuid(s.serviceUuid.str),
+      ],
+    );
+  }
+
+  /// Opens a link to [device] purely to ask it what it is, then closes it
+  /// again. Connecting is the only way to reach GATT — a BLE advertisement
+  /// carries a name and service ids, not a model number — so this is what the
+  /// connect sheet does before falling back to asking the user.
+  ///
+  /// Throws a [PrinterException] if the link can't be opened at all (printer
+  /// off, out of range, nothing printable on it); a device that connects but
+  /// says nothing about itself returns an empty [PrinterDeviceInfo].
+  Future<PrinterDeviceInfo> identify(
+    BluetoothDevice device, {
+    String? name,
+  }) async {
+    await _openLink(device);
+    try {
+      return await readDeviceInfo(name: name);
+    } finally {
+      await disconnect();
+      // The caller reconnects straight after this with the profile we just
+      // resolved, and Android's stack is unreliable about reconnecting to a
+      // device it dropped a moment ago. Let it settle first.
+      await Future<void>.delayed(const Duration(milliseconds: 400));
+    }
+  }
+
+  /// A Device Information Service string characteristic, or null when the
+  /// printer doesn't expose it (or refuses the read — some do).
+  Future<String?> _readDisString(
+    BluetoothDevice device,
+    String charUuid,
+  ) async {
+    final c = _findChar(device, charUuid, service: _disService);
+    if (c == null || !c.properties.read) {
+      return null;
+    }
+    try {
+      final value = utf8
+          .decode(await c.read(), allowMalformed: true)
+          // DIS strings are commonly NUL-padded to the characteristic size.
+          .replaceAll('\u0000', '')
+          .trim();
+      return value.isEmpty ? null : value;
+    } on Object {
+      return null;
+    }
+  }
+
   /// True when a live link to [remoteId] with a usable print channel is open.
   bool isConnectedTo(String remoteId) =>
       isConnected && _connectedPrinter?.address == remoteId;
@@ -433,17 +516,24 @@ class BluetoothService implements PrinterTransport {
     }
   }
 
+  /// GATT ids are compared normalized: profiles (and saved printers) store the
+  /// full 128-bit form, while flutter_blue_plus reports SIG-assigned ids in
+  /// their 16-bit short form, so a raw string compare would miss every one of
+  /// them and silently fall through to "first writable characteristic".
   BluetoothCharacteristic? _findChar(
     BluetoothDevice device,
     String charUuid, {
     String? service,
   }) {
+    final wantedChar = normalizeGattUuid(charUuid);
+    final wantedService = service == null ? null : normalizeGattUuid(service);
     for (final s in device.servicesList) {
-      if (service != null && s.serviceUuid.str != service) {
+      if (wantedService != null &&
+          normalizeGattUuid(s.serviceUuid.str) != wantedService) {
         continue;
       }
       for (final c in s.characteristics) {
-        if (c.characteristicUuid.str == charUuid) {
+        if (normalizeGattUuid(c.characteristicUuid.str) == wantedChar) {
           return c;
         }
       }
