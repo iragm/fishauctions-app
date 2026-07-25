@@ -7,6 +7,7 @@ import '../models/auth_models.dart';
 import '../utils/device_identity.dart';
 import '../utils/secure_storage.dart';
 import 'api_service.dart';
+import 'last_page_service.dart';
 import 'offline_sync_service.dart';
 import 'push_service.dart';
 import 'social_auth_service.dart';
@@ -96,6 +97,9 @@ class AuthService {
     // Offline auction data (and any still-unsynced changes) belong to this
     // account — the next sign-in must not inherit them.
     await OfflineSyncService.instance.stopAndClear();
+    // Where the last session was browsing is this account's business too —
+    // the next sign-in starts at the home page, not someone else's lot.
+    await LastPageService.instance.clear();
     await _api.clearTokens();
     await _storage.delete(key: _keyCachedUser);
   }

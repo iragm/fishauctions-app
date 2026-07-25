@@ -46,18 +46,24 @@ class LocateAim extends LocateState {
 ///    [flushInterval] / [maxBufferedFrames]. A lot re-contributes only every
 ///    [perLotInterval]: the solver wants geometry diversity, not 10 Hz
 ///    duplicates from someone holding the phone still.
-///  * **Locate-mode pose** — a rolling window of sightings of lots with
-///    known positions; bearings are rotated into the current device frame
-///    with the AR-tracked yaw, and [solvePose] turns ≥2 distinct landmarks
-///    into a device pose.
+///  * **Interaction events** — scan/zoom/card-opened, de-duped to one per
+///    (lot, type) per session and flushed on the same schedule.
+///  * **Pose** — a rolling window of sightings of lots with known positions;
+///    bearings are rotated into the current device frame with the AR-tracked
+///    yaw, and [solvePose] turns ≥3 distinct landmarks into a device pose.
+///    Locate mode aims its arrow with it; with no locate target it still
+///    runs, so [lotsWithin] can answer "which mapped lots am I standing next
+///    to" for the watched/recommended beacons.
 class ArSessionController {
   ArSessionController({
     required this.auctionSlug,
     required Future<void> Function(String sessionId, List<ArFrame> frames)
     sender,
+    Future<void> Function(List<ArEvent> events)? eventSender,
     DateTime Function()? clock,
     math.Random? random,
   }) : _send = sender,
+       _sendEvents = eventSender,
        _clock = clock ?? DateTime.now,
        sessionId = _newSessionId(random ?? math.Random.secure());
 
@@ -69,9 +75,15 @@ class ArSessionController {
   final String auctionSlug;
   final String sessionId;
   final Future<void> Function(String sessionId, List<ArFrame> frames) _send;
+  final Future<void> Function(List<ArEvent> events)? _sendEvents;
   final DateTime Function() _clock;
 
   final List<ArFrame> _buffer = [];
+  final List<ArEvent> _pendingEvents = [];
+
+  /// `<lotPk>:<event>` pairs already queued this session — the server de-dupes
+  /// too, but re-sending a scan every frame would be absurd traffic.
+  final Set<String> _recordedEvents = {};
   final Map<int, DateTime> _lastRecorded = {};
   int _frameCounter = 0;
   DateTime? _lastFlush;
@@ -100,6 +112,12 @@ class ArSessionController {
   final List<_TimedFix> _fixes = [];
   PoseEstimate? _pose;
   double _yawAtSolve = 0;
+
+  /// Solver island the current [_pose] was resected in — the frame its
+  /// coordinates (and anything compared against them) live in. Only
+  /// meaningful with no locate target; with one, the target's component is
+  /// the frame by definition.
+  int? _poseComponent;
 
   /// Camera pitch below horizontal, from the latest gravity update.
   double get pitchDownRad => _pitchDownRad;
@@ -212,31 +230,55 @@ class ArSessionController {
   /// Number of frames waiting for upload (test hook).
   int get bufferedFrames => _buffer.length;
 
-  /// Flush if the interval elapsed with frames still buffered — the trailing
-  /// batch when the user stops pointing at labels. Driven by the screen's
-  /// sweep timer; [addFrame] handles the active-scanning case itself.
+  /// Number of interaction events waiting for upload (test hook).
+  int get bufferedEvents => _pendingEvents.length;
+
+  /// Queue one interaction with a lot — see [ArEventType]. Repeats within the
+  /// session are dropped, so callers can fire these from per-frame code.
+  void recordEvent(int lotPk, ArEventType type) {
+    if (_recordedEvents.add('$lotPk:${type.wire}')) {
+      // Start the flush clock the same way addFrame does, so a burst of
+      // events at the start of a session leaves as one batch rather than a
+      // POST each.
+      _lastFlush ??= _clock();
+      _pendingEvents.add(ArEvent(lotPk: lotPk, type: type));
+    }
+  }
+
+  /// Flush if the interval elapsed with something still buffered — the
+  /// trailing batch when the user stops pointing at labels. Driven by the
+  /// screen's sweep timer; [addFrame] handles the active-scanning case itself.
   void flushIfDue() {
     final last = _lastFlush;
-    if (_buffer.isNotEmpty &&
+    if ((_buffer.isNotEmpty || _pendingEvents.isNotEmpty) &&
         (last == null || _clock().difference(last) >= flushInterval)) {
       flush();
     }
   }
 
   /// Upload everything buffered. Safe to call repeatedly; drops the batch on
-  /// failure (ArApi already swallows errors — observations are lossy by
-  /// design).
+  /// failure (ArApi already swallows errors — observations and interaction
+  /// events are lossy by design).
   Future<void> flush() async {
-    if (_sending || _buffer.isEmpty) {
-      _lastFlush = _clock();
+    if (_sending) {
       return;
     }
-    final batch = List.of(_buffer);
+    final frames = List.of(_buffer);
+    final events = List.of(_pendingEvents);
     _buffer.clear();
+    _pendingEvents.clear();
     _lastFlush = _clock();
+    if (frames.isEmpty && events.isEmpty) {
+      return;
+    }
     _sending = true;
     try {
-      await _send(sessionId, batch);
+      if (frames.isNotEmpty) {
+        await _send(sessionId, frames);
+      }
+      if (events.isNotEmpty) {
+        await _sendEvents?.call(events);
+      }
     } finally {
       _sending = false;
     }
@@ -244,10 +286,10 @@ class ArSessionController {
 
   // ── Locate mode ────────────────────────────────────────────────────────────
 
-  /// Arm locate mode for [targetPk] with the server's solved [positions].
-  void setLocateTarget(int targetPk, ArPositions? positions) {
+  /// Arm locate mode for [targetPk]. Positions arrive (and refresh) through
+  /// [updatePositions].
+  void setLocateTarget(int targetPk) {
     _targetPk = targetPk;
-    _positions = positions?.byLot ?? const {};
     _fixes.clear();
     _pose = null;
   }
@@ -257,13 +299,10 @@ class ArSessionController {
   /// Existing fixes are re-anchored to the new positions; fixes whose lot
   /// dropped off the map (sold, cleared) are discarded.
   void updatePositions(ArPositions? positions) {
-    if (_targetPk == null) {
-      return;
-    }
     _positions = positions?.byLot ?? const {};
     final rebased = <_TimedFix>[
       for (final f in _fixes)
-        if (_positions[f.lotPk] case final p? when _inTargetFrame(p))
+        if (_positions[f.lotPk] case final p? when _acceptableFix(p))
           _TimedFix(
             lotPk: f.lotPk,
             at: f.at,
@@ -278,23 +317,42 @@ class ArSessionController {
     _solve();
   }
 
-  /// Whether [p] shares the target's solver island. Positions from different
-  /// connectivity components are in unrelated coordinate frames, so they must
-  /// never serve as fixes or ghost anchors for this target. With no target
-  /// position (or a backend that doesn't label components) everything passes.
-  bool _inTargetFrame(ArLotPosition p) {
+  /// The solver island whose coordinates this session is currently working
+  /// in: the locate target's, or — with no target — whichever island the
+  /// pose was resected in. Null when neither is known, which means "no frame
+  /// established yet" and everything passes.
+  ({int? component})? get _activeFrame {
     final target = _targetPk == null ? null : _positions[_targetPk];
-    return target == null || p.component == target.component;
+    if (target != null) {
+      return (component: target.component);
+    }
+    return _pose == null ? null : (component: _poseComponent);
   }
 
+  /// Whether [p] is in the session's active frame. Positions from different
+  /// connectivity components share no observations, so their coordinates are
+  /// unrelated — mixing them would aim confidently at the wrong place.
+  bool _inActiveFrame(ArLotPosition p) {
+    final frame = _activeFrame;
+    return frame == null || p.component == frame.component;
+  }
+
+  /// Whether a sighting of a lot at [p] may join the fix window. In locate
+  /// mode the target's island is fixed, so cross-island sightings are
+  /// rejected outright; with no target every sighting is welcome and
+  /// [_solve]'s dominant-island grouping decides — which is what lets the
+  /// pose follow the user when they walk from one scanned island to another.
+  bool _acceptableFix(ArLotPosition p) =>
+      _targetPk == null || p.component == _positions[_targetPk]?.component;
+
   void _updateFixes(Map<int, ArMeasurement> measurements, DateTime now) {
-    if (_targetPk == null || _positions.isEmpty) {
+    if (_positions.isEmpty) {
       return;
     }
     var changed = false;
     for (final entry in measurements.entries) {
       final position = _positions[entry.key];
-      if (position == null || !_inTargetFrame(position)) {
+      if (position == null || !_acceptableFix(position)) {
         continue;
       }
       // Keep only the freshest fix per landmark — the window exists to span
@@ -319,8 +377,9 @@ class ArSessionController {
   }
 
   void _solve() {
+    final usable = _targetPk == null ? _dominantIslandFixes() : _fixes;
     final fixes = [
-      for (final f in _fixes)
+      for (final f in usable)
         LandmarkFix(
           x: f.position.x,
           y: f.position.y,
@@ -336,7 +395,31 @@ class ArSessionController {
     if (pose != null) {
       _pose = pose;
       _yawAtSolve = _yawRad;
+      _poseComponent = usable.isEmpty ? null : usable.first.position.component;
     }
+  }
+
+  /// The fixes belonging to whichever island most of them are in — a pose
+  /// resected across two unconnected islands would be nonsense, and the
+  /// biggest group is the one the user is standing in.
+  List<_TimedFix> _dominantIslandFixes() {
+    final counts = <int?, int>{};
+    for (final f in _fixes) {
+      counts[f.position.component] = (counts[f.position.component] ?? 0) + 1;
+    }
+    if (counts.length < 2) {
+      return _fixes;
+    }
+    var best = counts.entries.first;
+    for (final entry in counts.entries) {
+      if (entry.value > best.value) {
+        best = entry;
+      }
+    }
+    return [
+      for (final f in _fixes)
+        if (f.position.component == best.key) f,
+    ];
   }
 
   /// The target lot's solved map position, when known — the ghost-marker
@@ -344,12 +427,61 @@ class ArSessionController {
   ArLotPosition? get targetPosition =>
       _targetPk == null ? null : _positions[_targetPk];
 
-  /// Any mapped lot's solved position (ghost-marker anchor lookup). Lots
-  /// mapped in a different island than the target read as unmapped — their
-  /// coordinates would anchor the ghost in the wrong frame.
+  /// Any mapped lot's solved position (beacon + ghost-anchor lookup). Lots
+  /// mapped in a different island than the session's active frame read as
+  /// unmapped — their coordinates would anchor the marker in the wrong frame.
   ArLotPosition? positionOf(int lotPk) {
     final p = _positions[lotPk];
-    return p != null && _inTargetFrame(p) ? p : null;
+    return p != null && _inActiveFrame(p) ? p : null;
+  }
+
+  /// Whether the device has resected its own position on the map — i.e.
+  /// whether [aimTo] and [lotsWithin] can answer anything at all.
+  bool get hasPose => _pose != null;
+
+  /// Device-frame bearing (positive right) and distance to a point in the
+  /// map frame, from the last pose solve rotated forward to the current yaw.
+  /// Null until a pose has been resected.
+  ({double bearingRightRad, double distanceM})? aimTo(double x, double y) {
+    final pose = _pose;
+    if (pose == null) {
+      return null;
+    }
+    final (bearing, distance) = pose.aim(x, y);
+    // The solve froze θ in world coordinates; the phone has kept turning
+    // since. Yaw is ccw-positive, bearings are right-positive, so subsequent
+    // left turns swing the target further right.
+    return (
+      bearingRightRad: wrapRad(bearing + (_yawRad - _yawAtSolve)),
+      distanceM: distance,
+    );
+  }
+
+  /// Mapped lots within [radiusM] of the solved device position, nearest
+  /// first — what the watched/recommended beacons key off. Empty until a pose
+  /// exists; only the active island's lots can be compared against it.
+  List<({int lotPk, ArLotPosition position, double distanceM})> lotsWithin(
+    double radiusM,
+  ) {
+    final pose = _pose;
+    if (pose == null) {
+      return const [];
+    }
+    final found = <({int lotPk, ArLotPosition position, double distanceM})>[];
+    for (final entry in _positions.entries) {
+      final p = entry.value;
+      if (!_inActiveFrame(p)) {
+        continue;
+      }
+      final dx = p.x - pose.x;
+      final dy = p.y - pose.y;
+      final distance = math.sqrt(dx * dx + dy * dy);
+      if (distance <= radiusM) {
+        found.add((lotPk: entry.key, position: p, distanceM: distance));
+      }
+    }
+    found.sort((a, b) => a.distanceM.compareTo(b.distanceM));
+    return found;
   }
 
   /// Current guidance for locate mode; null when locate mode is off.
@@ -362,18 +494,14 @@ class ArSessionController {
     if (position == null) {
       return const LocateUnmapped();
     }
-    final pose = _pose;
-    if (pose == null) {
+    final aim = aimTo(position.x, position.y);
+    if (aim == null) {
       final distinct = <int>{for (final f in _fixes) f.lotPk};
       return LocateNeedScans(distinct.length);
     }
-    final (bearing, distance) = pose.aim(position.x, position.y);
-    // The solve froze θ in world coordinates; the phone has kept turning
-    // since. Yaw is ccw-positive, bearings are right-positive, so subsequent
-    // left turns swing the target further right.
     return LocateAim(
-      bearingRightRad: wrapRad(bearing + (_yawRad - _yawAtSolve)),
-      distanceM: distance,
+      bearingRightRad: aim.bearingRightRad,
+      distanceM: aim.distanceM,
     );
   }
 }

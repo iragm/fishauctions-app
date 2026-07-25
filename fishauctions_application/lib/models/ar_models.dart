@@ -144,6 +144,40 @@ class ArAuctionMeta {
   }
 }
 
+/// One AR interaction with a lot, POSTed to `ar/events/`. The backend turns
+/// each into a lot `PageView` tagged `ar_scan` / `ar_zoom` / `ar_zoom_full`,
+/// de-duped server-side to one row per user per lot per type — so these are
+/// "how many people found this lot in AR", not a hit counter. The app sends
+/// each (lot, type) at most once per session for the same reason.
+///
+/// The app has no literal zoom control (ARCore/ARKit own the camera), so the
+/// funnel maps onto how close the user actually got to the label:
+///
+///  * [scanned] — the label's QR was read at all.
+///  * [zoomed] — the user aimed at that one label from close up (it filled
+///    enough of a centered frame to be the detail card's candidate).
+///  * [zoomedFull] — they held it there and the detail card opened.
+enum ArEventType {
+  scanned('scanned'),
+  zoomed('zoomed'),
+  zoomedFull('zoomed_full');
+
+  const ArEventType(this.wire);
+
+  /// The `event` value the backend's ArEventSerializer accepts.
+  final String wire;
+}
+
+/// One (lot, interaction) pair for `POST ar/events/`.
+class ArEvent {
+  const ArEvent({required this.lotPk, required this.type});
+
+  final int lotPk;
+  final ArEventType type;
+
+  Map<String, dynamic> toJson() => {'lot': lotPk, 'event': type.wire};
+}
+
 /// One measured detection inside a frame, as POSTed to `ar/observations/`.
 ///
 /// Angle-only by design: bearing and gravity-referenced depression are

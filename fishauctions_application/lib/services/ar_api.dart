@@ -18,8 +18,12 @@ class ArApi {
   /// Per-call pk cap, mirroring the server's limit.
   static const int maxLotsPerFetch = 50;
 
+  /// Per-call event cap, mirroring the server's MAX_AR_EVENTS_PER_BATCH.
+  static const int maxEventsPerPost = 100;
+
   bool _lotsAvailable = true;
   bool _observationsAvailable = true;
+  bool _eventsAvailable = true;
   bool _positionsAvailable = true;
 
   /// Whether observation reporting is worth attempting (endpoint present).
@@ -103,6 +107,36 @@ class ArApi {
     }
   }
 
+  /// Reports AR interactions (scan / zoom / card opened) so the lot page can
+  /// show how many people found it in AR. Fire-and-forget like
+  /// [postObservations]: failures are swallowed and a 404 (a deployment
+  /// without the endpoint) disables further attempts for the process.
+  ///
+  /// The caller is expected to have de-duped per session — the server also
+  /// de-dupes per (user, lot, type), so a lost batch costs at most one row.
+  Future<void> postEvents(String auctionSlug, List<ArEvent> events) async {
+    if (!_eventsAvailable || events.isEmpty) {
+      return;
+    }
+    try {
+      for (var i = 0; i < events.length; i += maxEventsPerPost) {
+        final chunk = events.skip(i).take(maxEventsPerPost);
+        await ApiService.instance.dio.post<void>(
+          'ar/events/',
+          data: {
+            'auction': auctionSlug,
+            'events': [for (final e in chunk) e.toJson()],
+          },
+        );
+      }
+    } on DioException catch (e) {
+      if (e.response?.statusCode == 404) {
+        _eventsAvailable = false;
+        debugPrint('AR events endpoint missing — interaction stats disabled.');
+      }
+    }
+  }
+
   /// Fetches the solved lot positions for locate mode. Null when unavailable
   /// (endpoint missing, offline) — locate mode then reports "not mapped yet".
   Future<ArPositions?> fetchPositions(String auctionSlug) async {
@@ -146,6 +180,7 @@ class ArApi {
   void resetAvailability() {
     _lotsAvailable = true;
     _observationsAvailable = true;
+    _eventsAvailable = true;
     _positionsAvailable = true;
   }
 }

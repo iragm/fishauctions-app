@@ -122,12 +122,20 @@ GET /api/mobile/printers/profiles/                  # ThermalPrinterProfile rows
 ### AR Lot Mode
 
 Camera screen (`ar_lots_screen.dart`) that scans lot-label QR codes
-(`https://<domain>/qr/<pk>/`) and overlays lot names — or dots when >3 are in
-frame (star = watched, green = recommended). One label centered/close pops a
-card (photo + the auction's custom label fields + "open lot page", which loads
-`lot_link?src=ar` in the WebView so the page-view beacon records the scan).
-Entry: app-only web buttons → `fishauctions://ar/<auction_slug>` (rules page)
-and `?locate=<lot_pk>` (lot page "Locate with AR").
+(`https://<domain>/qr/<pk>/`) and overlays lot names — with the lot photo in
+the chip while ≤2 are in frame, or dots when >3 are (star = watched, green =
+recommended; a QR that isn't a lot label gets a grey "invalid" dot). One label
+centered/close pops a card (photo + the auction's custom label fields + "open
+lot page", which loads `lot_link?src=ar` in the WebView so the page-view
+beacon records the scan). Entry: app-only web buttons →
+`fishauctions://ar/<auction_slug>` (rules page) and `?locate=<lot_pk>` (lot
+page "Locate with AR").
+
+Interactions are reported to `ar/events/` (de-duped per lot per type per
+session): `scanned` when a label is read, `zoomed` when the user aims at one
+label up close, `zoomed_full` when the detail card opens. The backend stores
+each as a lot `PageView` with source `ar_scan` / `ar_zoom` / `ar_zoom_full`
+and breaks them out on the lot page ("In AR: 4 scanned, 2 zoomed in…").
 
 Each sighting also yields an **angle-only** `(bearing, depression)`
 measurement (QR corner centroids + gravity against the device-reported camera
@@ -136,15 +144,21 @@ arbitrary label sizes; `ar_geometry.dart`, `PlatformBridge.cameraHorizontalFovDe
 batched to the backend (`ar_session.dart`/`ar_api.dart`), where a
 bearing-dominant solver triangulates everyone's scans into a per-auction 2D
 lot map (recency-weighted, outlier-dropping; scale from a phone-height prior)
-with an admin map page. Locate mode: bearing-only resection from ≥3 sighted
-mapped lots gives a gyro-stabilized compass arrow, and when mapped lots are on
-screen the app fits a map→screen homography and pins the target directly in
-the camera view (ghost marker — scale-free, centimeter-class near a scanned
-cluster).
+with an admin map page. Locate mode asks for scans until it can point at the
+lot, then switches to a **beacon**: a pin in the camera view (an edge arrow
+when the lot is off screen) placed either from a map→screen homography fitted
+on the mapped labels currently in frame — scale-free, centimeter-class near a
+scanned cluster — or, when too few are visible, from the bearing/distance of
+the bearing-only resection (≥3 sighted mapped lots) with an assumed table
+height for its on-screen height. Bottom checkboxes (**Watched** /
+**Recommended**, off by default) put the same beacon, in the theme's
+warning/success colors, on any mapped lot the user is standing within 6 ft of
+— which is why the pose solver also runs outside locate mode.
 
 ```
 GET  /api/mobile/ar/lots/?auction=<slug>&lots=<pks>   # overlay/card metadata
 POST /api/mobile/ar/observations/                     # measured sightings
+POST /api/mobile/ar/events/                           # scan/zoom interactions
 GET  /api/mobile/ar/positions/?auction=<slug>         # solved lot positions
 ```
 
@@ -374,6 +388,11 @@ JWT auth is bridged into the WebView's Django cookie session:
 - The web login form is never shown in-app — a web-form login would create a
   cookie session with no JWT.
 - The WebView intercepts specific URL patterns to trigger native flows (e.g. `fishauctions://print/<lot_pk>` → native Bluetooth print dialog, `fishauctions://pay/<invoice_pk>` → native Square payment flow); a web `/logout/` navigation triggers the full native sign-out instead of navigating.
+- The page the user was last on is remembered (`LastPageService`, secure
+  storage, scoped to the account and expired after 24 h) and becomes the
+  landing page on the next cold start — Android routinely kills the app while
+  it's backgrounded, and coming back to the site root loses the user's place.
+  A pending quick action still wins; sign-out clears it.
 - Home-screen quick actions (long-press the launcher icon) deep-link into web pages: `ShortcutService` owns the type→path mapping ("Lots in my last auction" → `/lots/my-last-auction/` backend redirect, "Selling" → `/selling/`, "Invoices" → `/invoices/`); the shell consumes the pending path at mount (surviving the login trap via the handoff `?next=`) or navigates in place when already up.
 
 ## Key Decisions

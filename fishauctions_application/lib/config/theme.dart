@@ -20,6 +20,13 @@ class AppTheme {
   static const Color _danger = Color(0xFFE74C3C); // --bs-danger
   static const Color _border = Color(0xFF444444); // --bs-border-color
 
+  /// `--bs-warning` / `--bs-success` from the same Darkly palette. Native
+  /// overlays that mean "warning"/"success" (AR's watched and recommended
+  /// markers) use these so they read as the same semantic colors the web UI
+  /// uses for the same things.
+  static const Color warning = Color(0xFFF39C12);
+  static const Color success = Color(0xFF00BC8C);
+
   /// The page background, reused for the WebView's own background so the
   /// pre-paint window matches the loaded page instead of flashing white.
   static const Color scaffoldBackground = _bodyBg;

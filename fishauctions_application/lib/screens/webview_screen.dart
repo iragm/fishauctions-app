@@ -28,6 +28,7 @@ import '../services/bluetooth_service.dart';
 import '../services/checkin_service.dart';
 import '../services/download_service.dart';
 import '../services/label_prefs_service.dart';
+import '../services/last_page_service.dart';
 import '../services/location_service.dart';
 import '../services/offline_store.dart';
 import '../services/offline_sync_service.dart';
@@ -228,9 +229,13 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   ///
   /// A pending home-screen shortcut (cold start from a quick action, or a tap
   /// that trapped through the login screen first) becomes the landing page —
-  /// threaded through the handoff's ?next= when one runs.
+  /// threaded through the handoff's ?next= when one runs. Failing that, the
+  /// page this account was last on comes back (see [LastPageService]): the
+  /// app is routinely killed while backgrounded, and returning to the site
+  /// root every time loses the user's place mid-auction.
   Future<String> _initialUrl() async {
-    final shortcutPath = ShortcutService.instance.consume();
+    final shortcutPath =
+        ShortcutService.instance.consume() ?? await _lastPagePath();
     try {
       final cookies = await CookieManager.instance().getCookies(
         url: WebUri(EnvironmentConfig.webBaseUrl),
@@ -250,6 +255,26 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     return shortcutPath == null
         ? EnvironmentConfig.webBaseUrl
         : '${EnvironmentConfig.webBaseUrl}$shortcutPath';
+  }
+
+  /// Where this account was last browsing, if it was recent. Null while the
+  /// profile is still restoring — the saved page is user-scoped, so without a
+  /// user there is nothing safe to restore.
+  Future<String?> _lastPagePath() async {
+    final userId = ref.read(authProvider).value?.id;
+    return userId == null
+        ? null
+        : LastPageService.instance.restore(userId: userId);
+  }
+
+  /// Remember the page in front of the user, for the next cold start.
+  void _rememberPage(Uri url) {
+    final userId = ref.read(authProvider).value?.id;
+    final path = _pathOf(url);
+    if (userId == null || path == null) {
+      return;
+    }
+    unawaited(LastPageService.instance.remember(path, userId: userId));
   }
 
   @override
@@ -501,6 +526,20 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       // The user may have just walked into the auction hall.
       CheckinService.instance.onAppResumed();
     }
+    // Going into the background is the moment before the process may be
+    // reclaimed — take a last reading of where the user is, in case the page
+    // moved without a full load (in-page history) since onLoadStop.
+    if (state == AppLifecycleState.paused) {
+      unawaited(_rememberCurrentPage());
+    }
+  }
+
+  Future<void> _rememberCurrentPage() async {
+    final url = await _controller?.getUrl();
+    final webHost = Uri.parse(EnvironmentConfig.webBaseUrl).host;
+    if (url != null && url.host == webHost) {
+      _rememberPage(url);
+    }
   }
 
   /// Reads the device position and, if available, writes the
@@ -673,6 +712,9 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     // On the auctions/lots screens, offer location in context (once per
     // session). The home page and everything else never triggers this.
     unawaited(_maybeOfferLocation(url.path));
+    if (url.host == Uri.parse(EnvironmentConfig.webBaseUrl).host) {
+      _rememberPage(url);
+    }
     await _reconcileWebSession(url);
   }
 

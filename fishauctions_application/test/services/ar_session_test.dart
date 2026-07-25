@@ -17,14 +17,17 @@ ArMeasurement _m({double bearing = 0, double depression = 20}) =>
 void main() {
   late _Clock clock;
   late List<List<ArFrame>> sent;
+  late List<List<ArEvent>> sentEvents;
   late ArSessionController session;
 
   setUp(() {
     clock = _Clock();
     sent = [];
+    sentEvents = [];
     session = ArSessionController(
       auctionSlug: 'test-auction',
       sender: (sessionId, frames) async => sent.add(frames),
+      eventSender: (events) async => sentEvents.add(events),
       clock: () => clock.now,
       random: math.Random(7),
     );
@@ -226,15 +229,18 @@ void main() {
     });
 
     test('unmapped target', () {
-      session.setLocateTarget(9, positions({1: (0, 0)}));
+      session
+        ..setLocateTarget(9)
+        ..updatePositions(positions({1: (0, 0)}));
       expect(session.locateState, isA<LocateUnmapped>());
     });
 
     test('asks for scans until three mapped lots are sighted, then aims', () {
-      session.setLocateTarget(
-        9,
-        positions({1: (0, 0), 2: (4, 0), 3: (1, 3), 9: (2, 1)}),
-      );
+      session
+        ..setLocateTarget(9)
+        ..updatePositions(
+          positions({1: (0, 0), 2: (4, 0), 3: (1, 3), 9: (2, 1)}),
+        );
       expect(session.locateState, isA<LocateNeedScans>());
 
       session.addFrame({1: measureFrom(0, 0)});
@@ -257,8 +263,8 @@ void main() {
 
     test('turning after the solve swings the arrow by the tracked yaw', () {
       session
-        ..setLocateTarget(
-          9,
+        ..setLocateTarget(9)
+        ..updatePositions(
           positions({1: (0, 0), 2: (4, 0), 3: (1, 3), 9: (2, 1)}),
         )
         ..addFrame({
@@ -277,14 +283,16 @@ void main() {
 
     test('sightings of unmapped lots do not count as fixes', () {
       session
-        ..setLocateTarget(9, positions({1: (0, 0), 9: (2, 1)}))
+        ..setLocateTarget(9)
+        ..updatePositions(positions({1: (0, 0), 9: (2, 1)}))
         ..addFrame({55: _m()});
       expect((session.locateState! as LocateNeedScans).fixCount, 0);
     });
 
     test('stale fixes age out of the window', () {
       session
-        ..setLocateTarget(9, positions({1: (0, 0), 2: (4, 0), 9: (2, 1)}))
+        ..setLocateTarget(9)
+        ..updatePositions(positions({1: (0, 0), 2: (4, 0), 9: (2, 1)}))
         ..addFrame({1: measureFrom(0, 0)});
       clock.advance(ArSessionController.fixWindow + const Duration(seconds: 1));
       session.addFrame({2: measureFrom(4, 0)});
@@ -295,7 +303,8 @@ void main() {
 
     test('updatePositions drops fixes for lots no longer on the map', () {
       session
-        ..setLocateTarget(9, positions({1: (0, 0), 2: (4, 0), 9: (2, 1)}))
+        ..setLocateTarget(9)
+        ..updatePositions(positions({1: (0, 0), 2: (4, 0), 9: (2, 1)}))
         ..addFrame({1: measureFrom(0, 0)})
         ..updatePositions(positions({2: (4, 0), 9: (2, 1)}));
       expect((session.locateState! as LocateNeedScans).fixCount, 0);
@@ -319,14 +328,136 @@ void main() {
       // Lot 3's coordinates live in island 1 — an unrelated frame from the
       // target's island 0, so sighting it must not count toward the fix.
       session
-        ..setLocateTarget(
-          9,
-          islands({1: (0, 0, 0), 3: (1, 3, 1), 9: (2, 1, 0)}),
-        )
+        ..setLocateTarget(9)
+        ..updatePositions(islands({1: (0, 0, 0), 3: (1, 3, 1), 9: (2, 1, 0)}))
         ..addFrame({1: measureFrom(0, 0), 3: measureFrom(1, 3)});
       expect((session.locateState! as LocateNeedScans).fixCount, 1);
       expect(session.positionOf(3), isNull);
       expect(session.positionOf(1), isNotNull);
+    });
+  });
+
+  group('nearby lots (watched/recommended beacons)', () {
+    ArPositions positions(Map<int, (double, double)> byLot) => ArPositions(
+      byLot: {
+        for (final e in byLot.entries)
+          e.key: ArLotPosition(
+            lotPk: e.key,
+            x: e.value.$1,
+            y: e.value.$2,
+            confidence: 0.9,
+          ),
+      },
+      unsoldTotal: byLot.length,
+      unsoldWithPosition: byLot.length,
+    );
+
+    /// The measurement a camera at (2,−3) facing +y takes of a landmark.
+    ArMeasurement measureFrom(double lx, double ly) {
+      const px = 2.0, py = -3.0, theta = math.pi / 2;
+      return ArMeasurement(
+        bearingDeg:
+            -wrapRad(math.atan2(ly - py, lx - px) - theta) * 180 / math.pi,
+        depressionDeg: 25,
+        quality: 0.9,
+      );
+    }
+
+    test('nothing is nearby until a pose has been solved', () {
+      session
+        ..updatePositions(positions({1: (0, 0), 2: (4, 0), 3: (1, 3)}))
+        ..addFrame({1: measureFrom(0, 0)});
+      expect(session.lotsWithin(100), isEmpty);
+    });
+
+    test('the pose is solved with no locate target at all', () {
+      session
+        ..updatePositions(
+          positions({1: (0, 0), 2: (4, 0), 3: (1, 3), 7: (2, -2.5)}),
+        )
+        ..addFrame({
+          1: measureFrom(0, 0),
+          2: measureFrom(4, 0),
+          3: measureFrom(1, 3),
+        });
+      expect(session.locateState, isNull); // still not locate mode
+
+      // Camera resected at (2,−3): lot 7 is half a meter ahead, the rest of
+      // the map is meters away.
+      final near = session.lotsWithin(1.83);
+      expect(near.map((l) => l.lotPk), [7]);
+      expect(near.single.distanceM, closeTo(0.5, 0.15));
+
+      final aim = session.aimTo(2, 1)!; // dead ahead, 4 m out
+      expect(aim.distanceM, closeTo(4, 0.15));
+      expect(aim.bearingRightRad.abs(), lessThan(0.05));
+    });
+
+    test('lots outside the pose island are never reported as nearby', () {
+      session
+        ..updatePositions(
+          ArPositions(
+            byLot: {
+              for (final e in {
+                1: (0.0, 0.0, 0),
+                2: (4.0, 0.0, 0),
+                3: (1.0, 3.0, 0),
+                // Same coordinates as the camera, but a different island:
+                // its numbers mean nothing in this frame.
+                8: (2.0, -3.0, 1),
+              }.entries)
+                e.key: ArLotPosition(
+                  lotPk: e.key,
+                  x: e.value.$1,
+                  y: e.value.$2,
+                  confidence: 0.9,
+                  component: e.value.$3,
+                ),
+            },
+            unsoldTotal: 4,
+            unsoldWithPosition: 4,
+          ),
+        )
+        ..addFrame({
+          1: measureFrom(0, 0),
+          2: measureFrom(4, 0),
+          3: measureFrom(1, 3),
+        });
+      expect(session.lotsWithin(1.83), isEmpty);
+      expect(session.positionOf(8), isNull);
+    });
+  });
+
+  group('interaction events', () {
+    test('each (lot, type) is queued once per session', () {
+      session
+        ..recordEvent(1, ArEventType.scanned)
+        ..recordEvent(1, ArEventType.scanned)
+        ..recordEvent(1, ArEventType.zoomed)
+        ..recordEvent(2, ArEventType.scanned);
+      expect(session.bufferedEvents, 3);
+    });
+
+    test('events flush on the interval, even with no frames buffered', () {
+      session
+        ..recordEvent(1, ArEventType.scanned)
+        ..flushIfDue();
+      expect(sentEvents, isEmpty); // not due yet
+      clock.advance(ArSessionController.flushInterval);
+      session.flushIfDue();
+      expect(sentEvents.single.map((e) => e.toJson()), [
+        {'lot': 1, 'event': 'scanned'},
+      ]);
+      expect(session.bufferedEvents, 0);
+    });
+
+    test('a flushed event is not re-queued afterwards', () async {
+      session.recordEvent(1, ArEventType.zoomedFull);
+      clock.advance(ArSessionController.flushInterval);
+      session.flushIfDue();
+      await Future<void>.value();
+      session.recordEvent(1, ArEventType.zoomedFull);
+      expect(session.bufferedEvents, 0);
     });
   });
 }
