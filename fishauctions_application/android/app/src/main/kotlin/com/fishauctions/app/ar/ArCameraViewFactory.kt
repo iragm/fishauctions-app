@@ -2,7 +2,6 @@ package com.fishauctions.app.ar
 
 import android.app.Activity
 import android.content.Context
-import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.StandardMessageCodec
 import io.flutter.plugin.platform.PlatformView
 import io.flutter.plugin.platform.PlatformViewFactory
@@ -14,14 +13,13 @@ import io.flutter.plugin.platform.PlatformViewFactory
  */
 class ArCameraViewFactory(
     private val activity: Activity,
-    private val poseEvents: EventChannel,
-    private val detectionEvents: EventChannel,
+    private val events: ArEventBridge,
 ) : PlatformViewFactory(StandardMessageCodec.INSTANCE) {
     var activeView: ArCameraPlatformView? = null
         private set
 
     override fun create(context: Context, viewId: Int, args: Any?): PlatformView {
-        val view = ArCameraPlatformView(context, activity, poseEvents, detectionEvents) {
+        val view = ArCameraPlatformView(context, activity, events) {
             activeView = null
         }
         activeView = view

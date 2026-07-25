@@ -88,6 +88,13 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
   /// silently no-op or just hit the same dead end again.
   VoidCallback? _settingsAction;
 
+  /// Android Developer options are on, which stops Square from reading a card.
+  /// Purely advisory — the charge is still attempted (see
+  /// [SquarePaymentService.isDeveloperModeEnabled]); this only decides whether
+  /// the sheet shows its warning strip, so the cashier can recognize the
+  /// otherwise-opaque failure instead of retrying blindly.
+  bool _developerModeOn = false;
+
   /// What the processing spinner says. The same [_Phase.processing] covers two
   /// different network waits — starting the reader (pre-tap) and confirming the
   /// captured payment (post-tap) — so each sets an honest label. Never claims
@@ -97,7 +104,20 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
   @override
   void initState() {
     super.initState();
+    unawaited(_checkDeveloperMode());
     _createPayment();
+  }
+
+  /// Non-blocking, and deliberately not awaited by [_createPayment]: the tap
+  /// must not wait on a warning. It resolves in milliseconds, so the strip is
+  /// on screen well before Square's full-screen prompt takes over — and it's
+  /// still there when the sheet comes back to the error view, which is where a
+  /// developer-mode failure actually lands.
+  Future<void> _checkDeveloperMode() async {
+    final on = await SquarePaymentService.instance.isDeveloperModeEnabled();
+    if (mounted && on) {
+      setState(() => _developerModeOn = true);
+    }
   }
 
   Future<void> _createPayment() async {
@@ -497,35 +517,88 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
           top: 24,
           bottom: 24 + MediaQuery.of(context).viewInsets.bottom,
         ),
-        child: switch (_phase) {
-          _Phase.loading => _LoadingView(onCancel: _popCancelled),
-          _Phase.processing => _ProcessingView(
-            message: _processingMessage,
-            amountLabel: _ctx?.amountLabel,
-          ),
-          _Phase.success => _SuccessView(receipt: _error),
-          _Phase.error => _ErrorView(
-            message: _error ?? 'Something went wrong.',
-            // Stranded (terminal) or fixable-only-in-settings: no retry.
-            // Otherwise, while a capture is outstanding, retry must re-confirm
-            // the same payment, not start a new charge — and there's no "close"
-            // out.
-            onRetry: (_stranded || _settingsAction != null)
-                ? null
-                : (_captureOutstanding ? _confirmCaptured : _createPayment),
-            retryLabel: (_stranded || _settingsAction != null)
-                ? null
-                : (_captureOutstanding ? 'Finish Payment' : 'Try Again'),
-            onOpenSettings: _settingsAction,
-            onClose: (_stranded || !_captureOutstanding) ? _popCancelled : null,
-          ),
-        },
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // Advisory only, and never on the success view — a charge that went
+            // through has nothing left to warn about.
+            if (_developerModeOn && _phase != _Phase.success) ...[
+              const _DeveloperModeNotice(),
+              const SizedBox(height: 16),
+            ],
+            switch (_phase) {
+              _Phase.loading => _LoadingView(onCancel: _popCancelled),
+              _Phase.processing => _ProcessingView(
+                message: _processingMessage,
+                amountLabel: _ctx?.amountLabel,
+              ),
+              _Phase.success => _SuccessView(receipt: _error),
+              _Phase.error => _ErrorView(
+                message: _error ?? 'Something went wrong.',
+                // Stranded (terminal) or fixable-only-in-settings: no retry.
+                // Otherwise, while a capture is outstanding, retry must
+                // re-confirm the same payment, not start a new charge — and
+                // there's no "close" out.
+                onRetry: (_stranded || _settingsAction != null)
+                    ? null
+                    : (_captureOutstanding ? _confirmCaptured : _createPayment),
+                retryLabel: (_stranded || _settingsAction != null)
+                    ? null
+                    : (_captureOutstanding ? 'Finish Payment' : 'Try Again'),
+                onOpenSettings: _settingsAction,
+                onClose: (_stranded || !_captureOutstanding)
+                    ? _popCancelled
+                    : null,
+              ),
+            },
+          ],
+        ),
       ),
     ),
   );
 }
 
 enum _Phase { loading, processing, success, error }
+
+/// Warns that Android Developer options are on, which stops Square's reader
+/// from taking a tap. Deliberately a passive strip, not a gate: the app can't
+/// turn developer mode off, the tap is still attempted, and without this the
+/// failure is indistinguishable from "no reader available".
+class _DeveloperModeNotice extends StatelessWidget {
+  const _DeveloperModeNotice();
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: scheme.errorContainer,
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(
+            Icons.warning_amber_rounded,
+            size: 20,
+            color: scheme.onErrorContainer,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              'Developer options are on for this phone. Square Tap to Pay '
+              "won't read a card while they are — turn them off in Settings › "
+              'System › Developer options if the tap fails.',
+              style: TextStyle(fontSize: 13, color: scheme.onErrorContainer),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
 
 class _LoadingView extends StatelessWidget {
   const _LoadingView({required this.onCancel});

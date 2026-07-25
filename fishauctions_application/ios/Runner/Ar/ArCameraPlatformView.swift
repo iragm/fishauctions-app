@@ -17,10 +17,8 @@ import Vision
 class ArCameraPlatformView: NSObject, FlutterPlatformView, ARSessionDelegate {
   private let sceneView: ARSCNView
   private let session = ARSession()
+  private let events: ArEventBridge
   private let onDispose: () -> Void
-
-  private var poseSink: FlutterEventSink?
-  private var detectionSink: FlutterEventSink?
 
   private var detectionInFlight = false
   private var lastDetectionAttempt = Date.distantPast
@@ -28,20 +26,13 @@ class ArCameraPlatformView: NSObject, FlutterPlatformView, ARSessionDelegate {
 
   init(
     frame: CGRect,
-    poseChannel: FlutterEventChannel,
-    detectionChannel: FlutterEventChannel,
+    events: ArEventBridge,
     onDispose: @escaping () -> Void
   ) {
     sceneView = ARSCNView(frame: frame)
+    self.events = events
     self.onDispose = onDispose
     super.init()
-
-    poseChannel.setStreamHandler(
-      ArStreamHandler(onListen: { [weak self] sink in self?.poseSink = sink },
-                       onCancel: { [weak self] in self?.poseSink = nil }))
-    detectionChannel.setStreamHandler(
-      ArStreamHandler(onListen: { [weak self] sink in self?.detectionSink = sink },
-                       onCancel: { [weak self] in self?.detectionSink = nil }))
 
     sceneView.scene = SCNScene()
     sceneView.automaticallyUpdatesLighting = false
@@ -71,6 +62,7 @@ class ArCameraPlatformView: NSObject, FlutterPlatformView, ARSessionDelegate {
   func dispose() {
     session.pause()
     UIDevice.current.endGeneratingDeviceOrientationNotifications()
+    events.clearStatus()
     onDispose()
   }
 
@@ -157,45 +149,17 @@ class ArCameraPlatformView: NSObject, FlutterPlatformView, ARSessionDelegate {
     }
   }
 
-  // MARK: - Event sinks (must run on main — callers already are, but stay defensive)
+  // MARK: - Event sinks (owned by ArEventBridge; see the note there on why)
 
   private func sendStatus(status: String, message: String?) {
-    DispatchQueue.main.async { [weak self] in
-      self?.poseSink?(["type": "status", "status": status, "message": message as Any])
-    }
+    events.sendStatus(status: status, message: message)
   }
 
   private func sendPose(tracking: Bool, px: Double, pz: Double, fx: Double, fz: Double) {
-    poseSink?(["type": "pose", "tracking": tracking, "px": px, "pz": pz, "fx": fx, "fz": fz])
+    events.sendPose(tracking: tracking, px: px, pz: pz, fx: fx, fz: fz)
   }
 
   private func sendDetections(imageWidth: Int, imageHeight: Int, barcodes: [[String: Any?]]) {
-    detectionSink?([
-      "imageWidth": imageWidth, "imageHeight": imageHeight, "barcodes": barcodes,
-    ])
-  }
-}
-
-/// Trivial `FlutterStreamHandler` that just forwards listen/cancel to closures — both AR event
-/// channels use one of these rather than two near-identical handler classes.
-private class ArStreamHandler: NSObject, FlutterStreamHandler {
-  private let onListenCallback: (@escaping FlutterEventSink) -> Void
-  private let onCancelCallback: () -> Void
-
-  init(onListen: @escaping (@escaping FlutterEventSink) -> Void, onCancel: @escaping () -> Void) {
-    self.onListenCallback = onListen
-    self.onCancelCallback = onCancel
-  }
-
-  func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink)
-    -> FlutterError?
-  {
-    onListenCallback(events)
-    return nil
-  }
-
-  func onCancel(withArguments arguments: Any?) -> FlutterError? {
-    onCancelCallback()
-    return nil
+    events.sendDetections(imageWidth: imageWidth, imageHeight: imageHeight, barcodes: barcodes)
   }
 }

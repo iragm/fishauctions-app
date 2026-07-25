@@ -9,6 +9,7 @@ import android.nfc.NfcAdapter
 import android.os.Build
 import android.provider.Settings
 import com.fishauctions.app.ar.ArCameraViewFactory
+import com.fishauctions.app.ar.ArEventBridge
 import com.squareup.sdk.mobilepayments.MobilePaymentsSdk
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -28,6 +29,7 @@ class MainActivity : FlutterActivity() {
                     "getSdkInt" -> result.success(Build.VERSION.SDK_INT)
                     "isTapToPayCapable" -> result.success(isTapToPayCapable())
                     "isNfcEnabled" -> result.success(isNfcEnabled())
+                    "isDeveloperModeEnabled" -> result.success(isDeveloperModeEnabled())
                     "openNfcSettings" -> openNfcSettings(result)
                     "getCameraFov" -> result.success(backCameraHorizontalFovDeg())
                     "getLensDistortion" -> result.success(backCameraLensDistortion())
@@ -41,10 +43,14 @@ class MainActivity : FlutterActivity() {
         // mobile_scanner/CameraX pipeline that screen used to use. Two EventChannels stream pose
         // (+ session status) and detections out; the platform view itself is registered under
         // "com.fishauctions.app/ar_camera" for the Dart-side AndroidView.
+        //
+        // The channels' stream handlers are attached here, at engine setup, rather than when the
+        // platform view is created: Dart subscribes before it mounts the view, so registering
+        // them any later loses the subscription outright (see ar/ArEventBridge.kt).
         val poseEvents = EventChannel(flutterEngine.dartExecutor.binaryMessenger, "com.fishauctions.app/ar_pose")
         val detectionEvents =
             EventChannel(flutterEngine.dartExecutor.binaryMessenger, "com.fishauctions.app/ar_detections")
-        val factory = ArCameraViewFactory(this, poseEvents, detectionEvents)
+        val factory = ArCameraViewFactory(this, ArEventBridge(this, poseEvents, detectionEvents))
         arCameraViewFactory = factory
         flutterEngine.platformViewsController.registry
             .registerViewFactory("com.fishauctions.app/ar_camera", factory)
@@ -126,6 +132,18 @@ class MainActivity : FlutterActivity() {
     private fun isNfcEnabled(): Boolean {
         val adapter = NfcAdapter.getDefaultAdapter(this) ?: return false
         return adapter.isEnabled
+    }
+
+    // Whether Android's Developer options are switched on. Square's Tap to Pay refuses to take a
+    // card on a device with developer mode enabled (a device-integrity requirement of the
+    // contactless kernel — the same class of check as its root detection), and it surfaces that
+    // the same opaque way as every other reader prerequisite: no tap option, no catchable error.
+    // The app can't fix it, so this only drives a small non-blocking warning in the payment sheet
+    // rather than a gate.
+    private fun isDeveloperModeEnabled(): Boolean = try {
+        Settings.Global.getInt(contentResolver, Settings.Global.DEVELOPMENT_SETTINGS_ENABLED, 0) != 0
+    } catch (e: Throwable) {
+        false
     }
 
     // Opens the system NFC toggle screen so the cashier can turn it on without hunting through

@@ -67,6 +67,27 @@ class PlatformBridge {
     }
   }
 
+  /// Whether Android's Developer options are switched on
+  /// (`Settings.Global.DEVELOPMENT_SETTINGS_ENABLED`). Square's Tap to Pay
+  /// refuses to take a card on a device with developer mode enabled — a
+  /// device-integrity requirement of its contactless kernel — and reports it
+  /// the same opaque way as every other missing reader prerequisite (no tap
+  /// option, no catchable error). Android-only; false elsewhere and on any
+  /// channel error, so a missing check only ever means "no warning shown".
+  static Future<bool> isDeveloperModeEnabled() async {
+    if (!Platform.isAndroid) {
+      return false;
+    }
+    try {
+      return await _channel.invokeMethod<bool>('isDeveloperModeEnabled') ??
+          false;
+    } on PlatformException {
+      return false;
+    } on MissingPluginException {
+      return false;
+    }
+  }
+
   /// Opens the system NFC settings screen (Android only) so the user can turn
   /// NFC on. No-op on other platforms.
   static Future<void> openNfcSettings() async {

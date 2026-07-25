@@ -13,6 +13,8 @@ import UIKit
   private static let cachedSquareAppIdKey = "square_application_id"
   // Process-wide, matching the SDK's process-scoped singleton.
   private static var squareInitializedAppId: String?
+  // Retained for the engine's lifetime — it owns the AR event channels' stream handlers.
+  private var arEvents: ArEventBridge?
 
   override func application(
     _ application: UIApplication,
@@ -63,8 +65,13 @@ import UIKit
     // mobile_scanner/AVFoundation pipeline that screen used to use. Mirrors MainActivity.kt's
     // registration; getLensDistortion/isNfcEnabled etc. above stay Android-only, this is the one
     // platform-view registration both sides share.
+    //
+    // The pose/detection channels' stream handlers are attached here, at engine setup, rather
+    // than when the platform view is created: Dart subscribes before it mounts the view, so
+    // registering them any later loses the subscription outright (see Ar/ArEventBridge.swift).
+    arEvents = ArEventBridge(messenger: registrar.messenger())
     registrar.register(
-      ArCameraViewFactory(messenger: registrar.messenger()),
+      ArCameraViewFactory(events: arEvents!),
       withId: "com.fishauctions.app/ar_camera"
     )
   }

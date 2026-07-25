@@ -5,7 +5,6 @@ import android.content.Context
 import android.opengl.GLES20
 import android.opengl.GLSurfaceView
 import android.view.View
-import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.platform.PlatformView
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
@@ -19,71 +18,28 @@ import javax.microedition.khronos.opengles.GL10
  * controls, so there's no Flutter-texture bridging to build — just a standard ARCore sample
  * `GLSurfaceView` wrapped as a [PlatformView].
  *
- * Pose and QR-detection events are pushed out over the two EventChannels registered in
- * MainActivity (shared globally — only one AR screen is ever shown at a time, so there is
- * exactly one live view per process).
+ * Pose and QR-detection events are pushed out through [ArEventBridge], which owns the two
+ * EventChannels for the engine's lifetime — deliberately not this view, see the note there.
  */
 class ArCameraPlatformView(
     context: Context,
     private val activity: Activity,
-    poseEvents: EventChannel,
-    detectionEvents: EventChannel,
+    private val events: ArEventBridge,
     private val onDispose: () -> Unit,
 ) : PlatformView {
     private val glView: GLSurfaceView = GLSurfaceView(context)
     private val sessionManager = ArSessionManager(activity)
     private val backgroundRenderer = BackgroundRenderer()
 
-    private var poseSink: EventChannel.EventSink? = null
-    private var detectionSink: EventChannel.EventSink? = null
-
     init {
-        poseEvents.setStreamHandler(
-            object : EventChannel.StreamHandler {
-                override fun onListen(args: Any?, sink: EventChannel.EventSink) {
-                    poseSink = sink
-                }
-
-                override fun onCancel(args: Any?) {
-                    poseSink = null
-                }
-            },
-        )
-        detectionEvents.setStreamHandler(
-            object : EventChannel.StreamHandler {
-                override fun onListen(args: Any?, sink: EventChannel.EventSink) {
-                    detectionSink = sink
-                }
-
-                override fun onCancel(args: Any?) {
-                    detectionSink = null
-                }
-            },
-        )
-
         sessionManager.statusListener = object : ArSessionManager.StatusListener {
             override fun onStatus(status: String, message: String?) {
-                activity.runOnUiThread {
-                    val payload = HashMap<String, Any?>()
-                    payload["type"] = "status"
-                    payload["status"] = status
-                    payload["message"] = message
-                    poseSink?.success(payload)
-                }
+                events.emitStatus(status, message)
             }
         }
         sessionManager.poseListener = object : ArSessionManager.PoseListener {
             override fun onPose(tracking: Boolean, px: Float, pz: Float, fx: Float, fz: Float) {
-                activity.runOnUiThread {
-                    val payload = HashMap<String, Any?>()
-                    payload["type"] = "pose"
-                    payload["tracking"] = tracking
-                    payload["px"] = px.toDouble()
-                    payload["pz"] = pz.toDouble()
-                    payload["fx"] = fx.toDouble()
-                    payload["fz"] = fz.toDouble()
-                    poseSink?.success(payload)
-                }
+                events.emitPose(tracking, px, pz, fx, fz)
             }
         }
         sessionManager.detectionListener = object : ArSessionManager.DetectionListener {
@@ -92,18 +48,7 @@ class ArCameraPlatformView(
                 imageHeight: Int,
                 barcodes: List<ArSessionManager.DetectedBarcode>,
             ) {
-                activity.runOnUiThread {
-                    val payload = HashMap<String, Any?>()
-                    payload["imageWidth"] = imageWidth
-                    payload["imageHeight"] = imageHeight
-                    payload["barcodes"] = barcodes.map { b ->
-                        hashMapOf(
-                            "rawValue" to b.rawValue,
-                            "corners" to b.corners.map { listOf(it[0].toDouble(), it[1].toDouble()) },
-                        )
-                    }
-                    detectionSink?.success(payload)
-                }
+                events.emitDetections(imageWidth, imageHeight, barcodes)
             }
         }
 
@@ -161,8 +106,7 @@ class ArCameraPlatformView(
     override fun dispose() {
         glView.onPause()
         sessionManager.close()
-        poseSink = null
-        detectionSink = null
+        events.clearStatus()
         onDispose()
     }
 }

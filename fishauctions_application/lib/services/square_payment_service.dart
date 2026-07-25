@@ -60,6 +60,19 @@ class SquarePaymentService {
   /// Android only; no-op on iOS.
   Future<void> openNfcSettings() => PlatformBridge.openNfcSettings();
 
+  /// Whether Android's Developer options are switched on, which blocks a Tap
+  /// to Pay card read: Square's contactless kernel treats developer mode as a
+  /// device-integrity failure (same family as its root detection) and the
+  /// charge dead-ends in the opaque "connect hardware to take card payments"
+  /// prompt with no catchable [PaymentError] — indistinguishable, from the
+  /// app's side, from NFC being off. The app can't turn it off for the user,
+  /// so this drives a non-blocking warning in the payment sheet rather than a
+  /// gate: a device that has it on today may still be mid-approval, and
+  /// blocking on a heuristic would be worse than a charge that fails loudly.
+  /// Android-only; false on iOS.
+  Future<bool> isDeveloperModeEnabled() =>
+      PlatformBridge.isDeveloperModeEnabled();
+
   /// Whether the currently authorized Square location is activated for card
   /// processing, or null when unknown (no authorized location yet, or the
   /// SDK didn't report the flag). `false` explains a charge that never
