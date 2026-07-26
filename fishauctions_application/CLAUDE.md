@@ -103,23 +103,44 @@ runs; that was the production "Could not load the label" bug (fixed 2026-07-25
 by sending `*/*`, see `LabelService._accept` and `BACKEND_SPEC.md` Part 9).
 
 ```
-GET /api/mobile/labels/<lot_pk>/                    # RGB PNG (default fmt)
-GET /api/mobile/labels/<lot_pk>/?fmt=png&resolution=WxH&dpi=N   # exact raster
-GET /api/mobile/labels/<lot_pk>/?fmt=pdf            # single-lot PDF (WeasyPrint, user's prefs)
-GET /api/mobile/labels/prefs/   + PATCH             # UserLabelPrefs + computed warnings
-GET /api/mobile/printers/profiles/                  # ThermalPrinterProfile rows (ETag'd)
+GET  /api/mobile/labels/<lot_pk>/                   # RGB PNG (default fmt)
+GET  /api/mobile/labels/<lot_pk>/?fmt=png&resolution=WxH&dpi=N   # exact raster
+GET  /api/mobile/labels/<lot_pk>/?fmt=pdf           # single-lot PDF (WeasyPrint, user's prefs)
+GET  /api/mobile/labels/prefs/   + PATCH            # UserLabelPrefs + computed warnings
+POST /api/mobile/labels/printed/                    # mark label_printed (BACKEND_SPEC Part W — NOT implemented yet)
+GET  /api/mobile/printers/profiles/                 # ThermalPrinterProfile rows (ETag'd)
 ```
 
+- **Bluetooth printing has no screen at all.** A print needs no confirmation:
+  the shell (`LabelPrintService`) connects, renders and sends over whatever
+  page the user was on, showing a non-blocking progress message (with a
+  **Stop** action for a batch) and nothing else. Only a failure interrupts —
+  with the printer's own message and a Retry. `PrintLabelScreen` survives for
+  the **PDF** method only (its preview *is* the deliverable); **System
+  printer** now goes straight to the OS print dialog and pops.
+- **Printing with no printer paired takes the user to `/printing/` — once**
+  (`PrinterSetupPrompt`, device-local since pairing is per device; unpairing
+  resets it). Every time after, a "No printer connected" snackbar with a **Set
+  up** action, because a print button that keeps yanking the user off their
+  page is worse than no printer.
+- **Multi-lot:** `fishauctions://print/?lots=12,13,14` (`lotPksFromPrintLink`)
+  loops the single-lot raster path with one connect and a progress count.
+  Emitting it from the bulk label buttons is backend work — `BACKEND_SPEC.md`
+  Part W, along with `labels/printed/`, without which native printing never
+  clears the website's unprinted-label lists (the PDF views set
+  `label_printed` as a side effect of rendering; nothing on the native path
+  does).
 - **PDF / System printer** — the same WeasyPrint PDFs the website makes;
   System routes them into the OS print dialog (`printing` package), both from
-  WebView downloads and the `fishauctions://print/<lot_pk>` screen.
+  WebView downloads and the `fishauctions://print/<lot_pk>` deep link.
 - On the Bluetooth method the shell also intercepts plain navigations to the
-  website's own `/lots/print/<pk>/` (`SingleLotLabelView`) and routes them to
-  the native print screen, so a single-lot label prints natively from *any*
-  entry point — the users table, the command palette, a bookmark — not just
-  the one lot-page button that emits `fishauctions://print/<pk>`. Web label
-  links are otherwise widely hidden in the app; un-hiding them is
-  `BACKEND_SPEC.md` Part A.
+  website's own `/lots/print/<pk>/` (`SingleLotLabelView`) and prints them
+  natively, so a single-lot label prints natively from *any* entry point — the
+  users table, the command palette, a bookmark — not just the one lot-page
+  button that emits `fishauctions://print/<pk>`. The *bulk* label URLs can't
+  be intercepted this way (the app can't know which lots they'd print), which
+  is why Part W puts the lot set in the link. Web label links are otherwise
+  widely hidden in the app; un-hiding them is `BACKEND_SPEC.md` Part A.
 - **Bluetooth** — server-rendered PNG at the printer's exact raster → 1-bit
   pack (`LabelRaster`) → `PrinterProfileDriver` interprets the printer's
   declarative command program (JSON steps: `tx`/`tx_text`/`tx_raster`/
@@ -170,9 +191,11 @@ GET /api/mobile/printers/profiles/                  # ThermalPrinterProfile rows
 - **Raster geometry is `mm × dpi / 25.4`, capped at the printhead**
   (`LabelRasterSpec`), never the printhead width scaled by the label's aspect
   ratio — that older math rendered a 76×51 mm label as 96×64 px (32 effective
-  dpi, illegible) on a 12 mm D11s head. `LabelRasterSpec.exceedsHead` warns on
-  the print screen when the user's label size simply doesn't fit their
-  printer, which no amount of resampling can fix.
+  dpi, illegible) on a 12 mm D11s head. `LabelRasterSpec.exceedsHead` reports
+  a label size that simply doesn't fit the printer — which no amount of
+  resampling can fix — as the print job's warning (there's no preview screen
+  left to put it on, and it outranks any driver warning: it explains a label
+  the user is holding and can see is cropped).
 - The `/printing/` page's Bluetooth card drives the native connect/unpair
   bottom sheet through JS-bridge handlers `printerGetState` /
   `printerConnect` / `printerUnpair` (each resolves with
@@ -423,6 +446,7 @@ verifies the app compiles and links.
 - **iOS:** project config (bundle id, iOS 16 target, Info.plist keys) is done; the Mac-only work — first signed build, Google iOS OAuth client, the Square platform channel in AppDelegate, and the Tap to Pay entitlement — is checklisted in `IOS.md`.
 - ~~Printing backend endpoints~~ — landed (`printers/profiles/`, `labels/prefs/`, `labels/<pk>/?fmt=pdf`, `UserLabelPrefs.print_method`, the `/printing/` page's dropdown + BT card are live on staging). The app still degrades gracefully when offline: bundled printer profiles, print method defaults to PDF, prefs fetch returns null.
 - **Printer onboarding (`BACKEND_SPEC.md` Parts T/U/V):** app side is done and verified on a VEVOR Y486BT. Outstanding backend work, all small and all data: the **`tspl-raster` seed row** (Part T — the app bundles it, so the two are currently out of sync), `probe_replies`/`probed_language` on `ObservedPrinter` plus a `probe` choice for `matched_by` (Part U), a declared `command_language` on `ThermalPrinterProfile` so profile language stops being inferred from its own print program, a user-facing rename for "Raw ESC/POS raster (GS v 0)", and a `/printing/` card button that reaches the native sheet **while connected** (Part V) — without it the only route to "Print test label" is to unpair and re-pair.
+- **Multi-lot printing + printed-marking (`BACKEND_SPEC.md` Part W):** app side landed 2026-07-26 — `fishauctions://print/?lots=…` is handled, so the template change is unblocked. Backend still owes: the bulk label buttons emitting that link when `user_print_method == 'bluetooth'` (plus letting `printredirect` carry the scheme, or gating in `LotLabelView.dispatch` instead), and `POST /api/mobile/labels/printed/`. Until the link lands, Bluetooth users still get a PDF sheet from the bulk buttons; until `labels/printed/` lands, natively printed labels stay "unprinted" on the website (the app's call self-disables on 404).
 - **Push notifications:** the backend side of `BACKEND_SPEC.md` Part 2 is **implemented** (`auctions/notifications.py` notify_user choke point, `send_push_to_user` + `promo_push_notifications` tasks, `UserData.push_notifications_instead_of_email`, `PushNotificationSent`, firebase-admin) but inert by design until (a) `FIREBASE_CREDENTIALS_JSON` is set on the deployment and (b) devices report real FCM tokens. App plumbing exists (`fcm_token` sent on device registration when present, `devices/unregister/` called on sign-out) but `PushService.currentToken()` is a stub returning null until a Firebase project + `firebase_messaging` are wired (the plan delivers the public Firebase client config via `/api/mobile/config/`, not a bundled `google-services.json`). Until both land, every notification falls back to email (`user_prefers_push()` is false for everyone). **Full setup checklist + config-endpoint decision: `PUSH.md`.**
 - **Square Tap to Pay (runtime):** Backend endpoints are done; charging still needs a real NFC device on API 31+ and Square production approval (sandbox works for the full flow). Not exercisable in CI.
 - ~~Offline sync backend~~ — landed (`offline/snapshot/` + `offline/sync/` in `auctions/mobile/`).
@@ -491,7 +515,7 @@ JWT auth is bridged into the WebView's Django cookie session:
   root-mounted).
 - The web login form is never shown in-app — a web-form login would create a
   cookie session with no JWT.
-- The WebView intercepts specific URL patterns to trigger native flows (e.g. `fishauctions://print/<lot_pk>` → native Bluetooth print dialog, `fishauctions://pay/<invoice_pk>` → native Square payment flow); a web `/logout/` navigation triggers the full native sign-out instead of navigating.
+- The WebView intercepts specific URL patterns to trigger native flows (e.g. `fishauctions://print/<lot_pk>` and `fishauctions://print/?lots=…` → native printing, with no screen on the Bluetooth method, `fishauctions://pay/<invoice_pk>` → native Square payment flow); a web `/logout/` navigation triggers the full native sign-out instead of navigating.
 - The page the user was last on is remembered (`LastPageService`, secure
   storage, scoped to the account and expired after 24 h) and becomes the
   landing page on the next cold start — Android routinely kills the app while

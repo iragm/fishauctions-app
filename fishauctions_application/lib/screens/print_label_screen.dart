@@ -1,4 +1,3 @@
-import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
@@ -9,51 +8,46 @@ import 'package:logger/logger.dart';
 import 'package:printing/printing.dart';
 
 import '../models/label_prefs.dart';
-import '../models/printer_profile.dart';
-import '../providers/printer_provider.dart';
-import '../services/bluetooth_service.dart';
 import '../services/label_prefs_service.dart';
-import '../services/label_raster.dart';
 import '../services/label_service.dart';
-import '../services/printer_profile_driver.dart';
-import '../services/printer_profile_service.dart';
-import '../widgets/printer_connect_sheet.dart';
+import '../services/system_print_service.dart';
 
 final _log = Logger();
 
-/// Prints a single lot's label. This one screen backs every web "print" action
-/// — self lots, single lots, and auction lot lists all deep-link to
-/// `fishauctions://print/<lot_pk>`, which routes here.
+/// The **PDF-based** print methods for a single lot: the label PDF the website
+/// itself produces (WeasyPrint, laid out with the user's `UserLabelPrefs`).
 ///
-/// The user's print method (the `/printing/` page dropdown) picks the path:
-///  • Bluetooth — fetch the label PNG at the printer's exact raster size,
-///    preview it, and drive the printer's profile program over BLE.
-///  • PDF / System printer — fetch the single-lot PDF (rendered with the
-///    user's label prefs, identical to the website's print buttons) and show
-///    it with print + share actions.
+///  • **System printer** — straight into the OS print dialog, then out of the
+///    way. The dialog is the confirmation; a preview in front of it is one
+///    more tap to reach the same sheet.
+///  • **PDF** — the preview, whose print/share actions are the point.
+///
+/// Bluetooth labels never come here. That path has no screen at all: the shell
+/// prints them in the background with a progress message over whatever page
+/// the user was on (`LabelPrintService`). If prefs resolve to Bluetooth after
+/// this screen is already up — a stale cached method, since the shell checks
+/// before pushing — the PDF is the harmless fallback.
 class PrintLabelScreen extends ConsumerStatefulWidget {
-  const PrintLabelScreen({required this.lotPk, super.key});
+  const PrintLabelScreen({required this.lotPk, this.prefs, super.key});
 
   final int lotPk;
+
+  /// The caller's already-fetched prefs — the shell has them from deciding
+  /// this isn't the Bluetooth path, and re-fetching them would delay the
+  /// screen by a round trip for nothing. Null when this route was entered
+  /// directly, in which case they're fetched here.
+  final LabelPrefs? prefs;
 
   @override
   ConsumerState<PrintLabelScreen> createState() => _PrintLabelScreenState();
 }
 
-enum _Phase { loading, ready, connecting, printing, success, error, noPrinter }
+enum _Phase { loading, ready, error }
 
 class _PrintLabelScreenState extends ConsumerState<PrintLabelScreen> {
   _Phase _phase = _Phase.loading;
   String? _error;
-  String? _warning;
-  PrintMethod _method = PrintMethod.pdf;
-  LabelPrefs? _prefs;
-  Uint8List? _png;
-  Uint8List? _pdf;
-
-  /// What [_fetchPngForPrinter] asked the server for — null when no profile or
-  /// label size was resolvable and the server default was used instead.
-  LabelRasterSpec? _raster;
+  late Uint8List _pdf;
 
   @override
   void initState() {
@@ -66,20 +60,21 @@ class _PrintLabelScreenState extends ConsumerState<PrintLabelScreen> {
       _phase = _Phase.loading;
       _error = null;
     });
-    _prefs = await LabelPrefsService.instance.fetch();
-    _method = _prefs?.printMethod ?? PrintMethod.pdf;
+    final prefs = widget.prefs ?? await LabelPrefsService.instance.fetch();
     try {
-      if (_method == PrintMethod.bluetooth) {
-        _png = await _fetchPngForPrinter();
-      } else {
-        _pdf = await LabelService.instance.fetchLabelPdf(widget.lotPk);
-      }
+      final pdf = _pdf = await LabelService.instance.fetchLabelPdf(
+        widget.lotPk,
+      );
       if (!mounted) {
+        return;
+      }
+      if (prefs?.printMethod == PrintMethod.system) {
+        await _printWithSystemDialog(pdf);
         return;
       }
       setState(() => _phase = _Phase.ready);
     } on DioException catch (e) {
-      _fail(_loadErrorFor(e));
+      _fail(labelFetchErrorMessage(e));
     } on Object catch (e) {
       // Anything else (a malformed response, a renderer blowing up) would
       // otherwise leave the screen spinning forever with no way out.
@@ -88,116 +83,25 @@ class _PrintLabelScreenState extends ConsumerState<PrintLabelScreen> {
     }
   }
 
-  /// The label PNG at the printer's native raster, so barcodes and text render
-  /// crisp at the printhead's own dot pitch instead of being downscaled
-  /// on-device. Without a resolvable profile/size the server default is
-  /// fetched and resized later.
-  Future<Uint8List> _fetchPngForPrinter() async {
-    final profile = await _profile();
-    final size = _prefs?.sizeMm;
-    if (profile == null || size == null) {
-      return LabelService.instance.fetchLabelPng(widget.lotPk);
-    }
-    final raster = _raster = LabelRasterSpec.of(profile, size);
-    return LabelService.instance.fetchLabelPng(
-      widget.lotPk,
-      widthPx: raster.widthPx,
-      heightPx: raster.heightPx,
-      dpi: profile.dpi,
-    );
-  }
-
-  /// The saved printer's profile (pre-profile saves resolve to the D11s).
-  ///
-  /// Awaits the provider rather than reading a snapshot of it.
-  /// `printerProvider` is an [AsyncNotifierProvider] that loads the saved
-  /// printer from secure storage, so on the *first* read of a process it is
-  /// still `AsyncLoading`
-  /// and `.value` is null — indistinguishable from "no printer set up". That
-  /// made the first print after every cold start fall back to the server's
-  /// default 600×400 raster: a label at the wrong size and a fraction of the
-  /// printer's real resolution, with no raster caption under it.
-  Future<PrinterProfile?> _profile() async {
-    final saved = await ref.read(printerProvider.future);
-    if (saved == null) {
-      return null;
-    }
-    return PrinterProfileService.instance.bySlug(saved.profileSlug);
-  }
-
-  Future<void> _printBluetooth() async {
-    final png = _png;
-    if (png == null) {
-      return;
-    }
-    // Awaited for the same reason as _profile(): a still-loading provider
-    // would otherwise send a user who *has* a printer to "no printer set up".
-    if (await ref.read(printerProvider.future) == null) {
-      if (!mounted) {
-        return;
-      }
-      setState(() => _phase = _Phase.noPrinter);
-      return;
-    }
-
-    setState(() {
-      _phase = _Phase.connecting;
-      _error = null;
-      _warning = null;
-    });
-
+  /// Hands the PDF to the OS print dialog and leaves. Whether the user sent
+  /// the job or dismissed the dialog, this screen has nothing left to show —
+  /// dropping them back where they tapped print is the whole flow.
+  Future<void> _printWithSystemDialog(Uint8List pdf) async {
     try {
-      await ref.read(printerProvider.notifier).ensureConnected();
-    } on PrinterException catch (e) {
-      _fail(e.message);
-      return;
-    } on Object {
+      await SystemPrintService.instance.printPdf(
+        pdf,
+        jobName: 'label_${widget.lotPk}',
+      );
+    } on Object catch (e) {
+      _log.w('System print dialog failed: $e');
       _fail(
-        "Couldn't connect to the printer. Make sure it's on and in range, "
-        'then try again.',
+        "Couldn't open the print dialog. Try again, or switch the print "
+        'method on the Label printing page.',
       );
       return;
     }
-
-    if (!mounted) {
-      return;
-    }
-    setState(() => _phase = _Phase.printing);
-
-    try {
-      final profile = await _profile();
-      if (profile == null) {
-        _fail(
-          "This printer's profile is no longer available. Unpair it on the "
-          'Label printing page and connect it again.',
-        );
-        return;
-      }
-      // Resize to the raster we asked for, not to the full printhead width —
-      // a label narrower than the head should print narrow, not be stretched
-      // across every element.
-      final bitmap = LabelRaster.fromPng(
-        png,
-        targetWidth: _raster?.widthPx ?? profile.printWidthPx,
-      );
-      final size = _prefs?.sizeMm;
-      final warning = await PrinterProfileDriver(
-        BluetoothService.instance,
-        profile,
-      ).printLabel(bitmap, labelWidthMm: size?.$1, labelHeightMm: size?.$2);
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _warning = warning;
-        _phase = _Phase.success;
-      });
-    } on PrinterException catch (e) {
-      _fail(e.message);
-    } on FormatException {
-      _fail('The label image was invalid. Please try loading it again.');
-    } on Object {
-      _fail('Printing failed. Check the printer and try again.');
+    if (mounted) {
+      context.pop();
     }
   }
 
@@ -211,140 +115,26 @@ class _PrintLabelScreenState extends ConsumerState<PrintLabelScreen> {
     });
   }
 
-  /// Maps a failed label fetch to a message the user can act on.
-  ///
-  /// "Could not load the label, please try again" used to be the answer to
-  /// everything that wasn't a 401/403/404/429 — including the server being
-  /// unreachable and the server refusing the request, which need opposite
-  /// responses from the user. So: say when it's the connection, say when it's
-  /// the server, and pass through the server's own explanation when it gave
-  /// one (a 400 here means the label can't be rendered for this lot — e.g. a
-  /// lot with no auction has no label layout to render against).
-  String _loadErrorFor(DioException e) {
-    final code = e.response?.statusCode;
-    switch (code) {
-      case 401:
-      case 403:
-        return "You don't have permission to print this lot's label.";
-      case 404:
-        return 'That lot could not be found. It may have been removed.';
-      case 429:
-        return 'Too many requests right now. Wait a moment and try again.';
-      case null:
-        _log.w('Label fetch failed with no response: ${e.type} ${e.message}');
-        return "Couldn't reach the server. Check your connection and try "
-            'again.';
-      default:
-        final detail = _detailOf(e);
-        _log.w('Label fetch failed: HTTP $code ${detail ?? ''}');
-        if (code >= 500) {
-          return "The server couldn't produce this label right now "
-              '(HTTP $code). Try again in a moment.';
-        }
-        return detail != null
-            ? '$detail (HTTP $code)'
-            : 'Could not load the label (HTTP $code). Please try again.';
-    }
-  }
-
-  /// The API's `{"detail": …}` explanation, if it sent one. Label requests ask
-  /// for bytes, so an error body arrives as raw bytes rather than parsed JSON.
-  String? _detailOf(DioException e) {
-    final data = e.response?.data;
-    try {
-      final body = data is List<int> ? utf8.decode(data) : data?.toString();
-      if (body == null || body.isEmpty) {
-        return null;
-      }
-      final decoded = jsonDecode(body);
-      final detail = decoded is Map ? decoded['detail'] : null;
-      return detail is String && detail.isNotEmpty ? detail : null;
-    } on Object {
-      return null; // Not JSON (an HTML error page from a proxy, say).
-    }
-  }
-
-  Future<void> _openConnectSheet() async {
-    await PrinterConnectSheet.show(context);
-    if (mounted) {
-      setState(() => _phase = _Phase.ready);
-    }
-  }
-
   @override
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(title: const Text('Print Label')),
     body: SafeArea(
       child: switch (_phase) {
         _Phase.loading => const Center(child: CircularProgressIndicator()),
-        // PDF / System printer: PdfPreview owns the print + share actions
-        // (the OS dialog is the "system printer" path; sharing covers the
-        // plain PDF method), so both non-Bluetooth methods share this view.
-        _Phase.ready when _method != PrintMethod.bluetooth => PdfPreview(
-          build: (_) async => _pdf!,
+        // PdfPreview owns the print + share actions (the OS dialog and the
+        // share sheet), which is the entire PDF method.
+        _Phase.ready => PdfPreview(
+          build: (_) async => _pdf,
           canChangePageFormat: false,
           canChangeOrientation: false,
           canDebug: false,
           pdfFileName: 'label_${widget.lotPk}.pdf',
         ),
-        _ => Padding(
+        _Phase.error => Padding(
           padding: const EdgeInsets.all(24),
-          child: switch (_phase) {
-            _Phase.ready => _LabelPreview(
-              png: _png!,
-              raster: _raster,
-              onPrint: _printBluetooth,
-            ),
-            _Phase.connecting => const _Centered(
-              children: [
-                CircularProgressIndicator(),
-                SizedBox(height: 16),
-                Text('Connecting to printer…'),
-              ],
-            ),
-            _Phase.printing => const _Centered(
-              children: [
-                CircularProgressIndicator(),
-                SizedBox(height: 16),
-                Text('Printing…'),
-              ],
-            ),
-            _Phase.success => _Centered(
-              children: [
-                Icon(
-                  _warning == null ? Icons.check_circle : Icons.info_outline,
-                  size: 80,
-                  color: _warning == null ? Colors.green : Colors.amber,
-                ),
-                const SizedBox(height: 16),
-                Text(_warning ?? 'Label sent.', textAlign: TextAlign.center),
-                const SizedBox(height: 24),
-                FilledButton(
-                  onPressed: () => context.pop(),
-                  child: const Text('Done'),
-                ),
-                TextButton(
-                  onPressed: _printBluetooth,
-                  child: const Text('Print again'),
-                ),
-              ],
-            ),
-            _Phase.noPrinter => _Centered(
-              children: [
-                const Icon(Icons.print_disabled, size: 64),
-                const SizedBox(height: 16),
-                const Text(
-                  'No printer is set up yet.',
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: 24),
-                FilledButton(
-                  onPressed: _openConnectSheet,
-                  child: const Text('Connect a printer'),
-                ),
-              ],
-            ),
-            _ => _Centered(
+          child: Center(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 Icon(
                   Icons.error_outline,
@@ -357,129 +147,12 @@ class _PrintLabelScreenState extends ConsumerState<PrintLabelScreen> {
                   textAlign: TextAlign.center,
                 ),
                 const SizedBox(height: 24),
-                FilledButton(
-                  onPressed: (_png == null && _pdf == null)
-                      ? _load
-                      : _printBluetooth,
-                  child: const Text('Try Again'),
-                ),
-              ],
-            ),
-          },
-        ),
-      },
-    ),
-  );
-}
-
-/// Debug preview of the bytes about to be printed.
-///
-/// Deliberately *not* a pretty render: it shows the printer's own raster,
-/// nearest-neighbour, so blocky text here means blocky text on the label. The
-/// caption underneath is the point — it reports the exact raster requested, so
-/// "the preview looks like garbage" resolves to a number you can act on
-/// instead of a guess about what the server sent.
-class _LabelPreview extends StatelessWidget {
-  const _LabelPreview({
-    required this.png,
-    required this.raster,
-    required this.onPrint,
-  });
-
-  final Uint8List png;
-  final LabelRasterSpec? raster;
-  final VoidCallback onPrint;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final spec = raster;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        // The preview scrolls and the Print button is pinned below it. A tall
-        // label (a 4×6 at 203 dpi is 812×1218) otherwise sized the Card past
-        // the viewport, starved the Spacer, and pushed the button off the
-        // bottom of the screen — "the preview looks awful and there's no
-        // Print button".
-        Expanded(
-          child: SingleChildScrollView(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Card(
-                  clipBehavior: Clip.antiAlias,
-                  child: Padding(
-                    padding: const EdgeInsets.all(12),
-                    // The label at the printer's own raster — true WYSIWYG
-                    // (upscaled pixels and all; what you see is what the
-                    // printhead gets).
-                    child: Image.memory(
-                      png,
-                      fit: BoxFit.contain,
-                      filterQuality: FilterQuality.none,
-                    ),
-                  ),
-                ),
-                if (spec != null) ...[
-                  const SizedBox(height: 8),
-                  Text(
-                    spec.summary,
-                    textAlign: TextAlign.center,
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: theme.colorScheme.onSurfaceVariant,
-                    ),
-                  ),
-                  if (spec.exceedsHead) ...[
-                    const SizedBox(height: 8),
-                    Row(
-                      children: [
-                        Icon(
-                          Icons.warning_amber,
-                          size: 18,
-                          color: theme.colorScheme.error,
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            'Your label size is wider than this printer can '
-                            'print, so the label is cut off at the printhead. '
-                            'Pick a label size that fits on the Label printing '
-                            'page.',
-                            style: theme.textTheme.bodySmall?.copyWith(
-                              color: theme.colorScheme.error,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ],
+                FilledButton(onPressed: _load, child: const Text('Try Again')),
               ],
             ),
           ),
         ),
-        const SizedBox(height: 16),
-        FilledButton.icon(
-          onPressed: onPrint,
-          icon: const Icon(Icons.print),
-          label: const Text('Print'),
-        ),
-      ],
-    );
-  }
-}
-
-class _Centered extends StatelessWidget {
-  const _Centered({required this.children});
-
-  final List<Widget> children;
-
-  @override
-  Widget build(BuildContext context) => Center(
-    child: Column(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: children,
+      },
     ),
   );
 }

@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../models/label_prefs.dart';
 import '../providers/auth_provider.dart';
 import '../screens/allauth_web_screen.dart';
 import '../screens/ar_lots_screen.dart';
@@ -82,10 +83,17 @@ final routerProvider = Provider<GoRouter>((ref) {
         path: '/password-reset',
         builder: (context, state) => const AllauthWebScreen.passwordReset(),
       ),
+      // The PDF/System print methods only. Bluetooth printing has no screen —
+      // the shell runs it in the background over the page the user was on
+      // (LabelPrintService), because a label print needs no confirmation.
       GoRoute(
         path: '/print/:lotPk',
-        builder: (context, state) =>
-            PrintLabelScreen(lotPk: int.parse(state.pathParameters['lotPk']!)),
+        builder: (context, state) => PrintLabelScreen(
+          lotPk: int.parse(state.pathParameters['lotPk']!),
+          // The shell passes the prefs it already fetched; anything else
+          // (a direct route) leaves the screen to fetch its own.
+          prefs: state.extra is LabelPrefs ? state.extra! as LabelPrefs : null,
+        ),
       ),
       // AR lot mode — reached via the web's fishauctions://ar/<slug> deep
       // links (auction rules page; lot pages add ?locate=<pk>). Pops with a

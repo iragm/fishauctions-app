@@ -304,6 +304,111 @@ this" is the setting most likely to be wrong.
 
 ---
 
+## Part W — Multi-lot Bluetooth printing (the app side has landed)
+
+**The blocker is gone: `fishauctions://print/?lots=…` is implemented in the app
+as of 2026-07-26, so the template change is safe to ship.** Previously a
+Bluetooth user who tapped a *bulk* label button got a PDF sheet they can't feed
+to a thermal printer, and the deep link wasn't handled — this part is what
+closes that.
+
+### W1. Emit the lot set for Bluetooth users
+
+```
+fishauctions://print/?lots=<comma-separated lot pks>
+```
+
+Built from the same querysets the PDF views already use — `AuctionTOS.print_labels_qs`
+/ `AuctionTOS.unprinted_labels_qs` (and `Auction.unprinted_labels_qs` for the
+auction-wide button) — **in the same order the PDF prints them**, since that's
+the order the labels come out of the printer.
+
+Emit it *instead of* the web label URL when
+`user_print_method == 'bluetooth'` (the `label_print_method` context processor
+already exposes this) **and** `request.is_mobile_app`. Everyone else keeps the
+PDF, unchanged.
+
+What the app does with it: connects once, then loops the existing single-lot
+raster path over the list, showing a progress count with a **Stop** action.
+There is no screen — see W3.
+
+Places that build a bulk label link, all of which need the switch:
+
+| Where | What it builds |
+| --- | --- |
+| `AuctionTOS.print_labels_link_html` / `print_unprinted_labels_link_html` (models.py) | the users-table anchors — server-rendered HTML, so this is a one-line branch per property |
+| `Auction.label_print_link` / `label_print_unprinted_link` (models.py) | `?printredirect=` links |
+| `auction.html`, `user_labels.html`, `lot_user_table_header.html`, `bulk_add_lots_auto.html` | `{% url 'print_my_labels' … %}` / `print_labels_by_bidder_number` buttons |
+| `BulkAddLots` redirect (views.py ~6279, the `printredirect=` branch) | print-after-adding-lots |
+
+**`printredirect` needs one extra change.** The base.html handler deliberately
+rejects anything that isn't same-origin (`url.origin === window.location.origin`),
+so a `fishauctions:` value is silently dropped. Allow the scheme through when
+`request.is_mobile_app` — synthesizing the same `<a>` click, which is exactly
+how the per-lot deep link already reaches the app — or keep `printredirect`
+same-origin and gate at the *view* instead (below).
+
+**Keep a link under ~2000 characters** (≈300 pks). Beyond that prefer the
+unprinted variant; the app itself has no cap (it prints serially, cancellable),
+but URL length limits vary by platform. Note the PDF path's own 100-label cap
+does not apply here — nothing is being laid out on a page.
+
+**Alternative worth considering: gate in `LotLabelView.dispatch` instead of in
+N templates.** Every bulk entry point — buttons, `printredirect`, the command
+palette, a bookmarked URL — funnels through that one view, and the app already
+intercepts the *single*-lot equivalent (`/lots/print/<pk>/`) for exactly this
+reason: gating templates one by one leaves entry points behind. If you go that
+way, respond with a small HTML page that navigates to the deep link rather than
+a 302 to a custom scheme — a JS/anchor navigation is the path the app is known
+to intercept today, a custom-scheme redirect is not, and it should be verified
+against a build before shipping.
+
+### W2. `POST /api/mobile/labels/printed/` — mark labels printed
+
+New endpoint. Without it, "print unprinted labels" never shrinks for anyone
+printing natively: the PDF views set `label_printed` as a side effect of
+rendering (`LotLabelView.get_context_data` → `bulk_update`), and neither
+`labels/<pk>/` nor the deep-link path goes through them. That's a pre-existing
+gap for single-lot native prints; a batch of 40 makes it obvious.
+
+```
+POST /api/mobile/labels/printed/
+  Body:    { "lots": [12, 13, 14] }
+  Returns: { "marked": 3 }
+```
+
+- Permission per lot, same rule as `labels/<pk>/` (`_can_access`: the lot's
+  seller TOS owner, an auction admin, or the lot's own user). Silently skip
+  lots the user can't touch rather than failing the batch — some already
+  printed fine.
+- Sets `label_printed = True` and `label_needs_reprinting = False`, matching
+  the PDF views exactly.
+- Idempotent; a re-print posting the same pks is normal.
+
+**The app already calls this** (`LabelPrintService.markPrinted`, after the
+labels that actually went out — including the ones sent before a failure or a
+cancel). It is fire-and-forget and self-disabling: a 404 turns it off for the
+process, so a deployment without the endpoint behaves exactly as today.
+
+### W3. What changed in the app, in case it affects the page copy
+
+- **Bluetooth printing has no screen.** No preview before, no confirmation
+  after: the label is sent and the user keeps their place, with a
+  non-blocking progress message over the page they were on. Only failures
+  interrupt — and a soft warning (the printer never acked) still surfaces.
+  A `/printing/` page that promises a preview should stop.
+- **The "System printer" method now goes straight to the OS print dialog** for
+  a single lot, instead of a preview screen with a print button in it.
+- **First print with no printer paired sends the user to `/printing/`** —
+  once, per device. After that it's a "No printer connected" message with a
+  **Set up** action. Unpairing resets it. So `/printing/` is now a landing
+  page people arrive on mid-task, having tapped print somewhere else: the
+  Bluetooth card wanting to be findable without scrolling matters more than it
+  used to (and Part V's "reach the sheet while connected" is the other half of
+  that).
+
+---
+
 ## Media size — why there is no auto-detection
 
 Asked for, investigated, **not possible on this printer.**

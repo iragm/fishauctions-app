@@ -1,8 +1,12 @@
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
+import 'package:logger/logger.dart';
 
 import 'api_service.dart';
+
+final _log = Logger();
 
 /// Fetches a lot's rendered label from the mobile API
 /// (`GET /api/mobile/labels/<lot_pk>/`).
@@ -64,5 +68,59 @@ class LabelService {
       options: Options(responseType: ResponseType.bytes, headers: _accept),
     );
     return Uint8List.fromList(res.data ?? const []);
+  }
+}
+
+/// Maps a failed label fetch to a message the user can act on. Shared by every
+/// print path (the PDF screen and the Bluetooth job), so a label that won't
+/// render explains itself the same way wherever it was asked for.
+///
+/// "Could not load the label, please try again" used to be the answer to
+/// everything that wasn't a 401/403/404/429 — including the server being
+/// unreachable and the server refusing the request, which need opposite
+/// responses from the user. So: say when it's the connection, say when it's
+/// the server, and pass through the server's own explanation when it gave one
+/// (a 400 here means the label can't be rendered for this lot — e.g. a lot
+/// with no auction has no label layout to render against).
+String labelFetchErrorMessage(DioException e) {
+  final code = e.response?.statusCode;
+  switch (code) {
+    case 401:
+    case 403:
+      return "You don't have permission to print this lot's label.";
+    case 404:
+      return 'That lot could not be found. It may have been removed.';
+    case 429:
+      return 'Too many requests right now. Wait a moment and try again.';
+    case null:
+      _log.w('Label fetch failed with no response: ${e.type} ${e.message}');
+      return "Couldn't reach the server. Check your connection and try again.";
+    default:
+      final detail = _detailOf(e);
+      _log.w('Label fetch failed: HTTP $code ${detail ?? ''}');
+      if (code >= 500) {
+        return "The server couldn't produce this label right now "
+            '(HTTP $code). Try again in a moment.';
+      }
+      return detail != null
+          ? '$detail (HTTP $code)'
+          : 'Could not load the label (HTTP $code). Please try again.';
+  }
+}
+
+/// The API's `{"detail": …}` explanation, if it sent one. Label requests ask
+/// for bytes, so an error body arrives as raw bytes rather than parsed JSON.
+String? _detailOf(DioException e) {
+  final data = e.response?.data;
+  try {
+    final body = data is List<int> ? utf8.decode(data) : data?.toString();
+    if (body == null || body.isEmpty) {
+      return null;
+    }
+    final decoded = jsonDecode(body);
+    final detail = decoded is Map ? decoded['detail'] : null;
+    return detail is String && detail.isNotEmpty ? detail : null;
+  } on Object {
+    return null; // Not JSON (an HTML error page from a proxy, say).
   }
 }

@@ -8,6 +8,7 @@ import '../models/printer_profile.dart';
 import '../services/bluetooth_service.dart';
 import '../services/printer_profile_driver.dart';
 import '../services/printer_profile_service.dart';
+import '../services/printer_setup_prompt.dart';
 import '../utils/secure_storage.dart';
 
 const _keyPrinter = 'saved_printer';
@@ -105,6 +106,9 @@ class PrinterNotifier extends AsyncNotifier<BluetoothPrinter?> {
     await BluetoothService.instance.disconnect();
     state = const AsyncData(null);
     await _persist(null);
+    // Unpairing is starting over, so the next print with no printer should
+    // again take the user to the printing page rather than just nudge.
+    await PrinterSetupPrompt.instance.reset();
   }
 
   /// Best-effort label-size read-back (profiles without a size program, or

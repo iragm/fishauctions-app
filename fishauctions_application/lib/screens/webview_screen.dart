@@ -28,10 +28,12 @@ import '../services/bluetooth_service.dart';
 import '../services/checkin_service.dart';
 import '../services/download_service.dart';
 import '../services/label_prefs_service.dart';
+import '../services/label_print_service.dart';
 import '../services/last_page_service.dart';
 import '../services/location_service.dart';
 import '../services/offline_store.dart';
 import '../services/offline_sync_service.dart';
+import '../services/printer_setup_prompt.dart';
 import '../services/push_service.dart';
 import '../services/shortcut_service.dart';
 import '../services/square_payment_service.dart';
@@ -809,13 +811,165 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     }
   }
 
-  void _showSnack(String message) {
+  /// Prints [lotPks] by the method the user picked on the `/printing/` page.
+  ///
+  /// Bluetooth deliberately has **no screen**: the user already tapped print,
+  /// so there is nothing to confirm before and nothing to acknowledge after.
+  /// The job runs over whatever page they were on, showing a progress message
+  /// and otherwise staying out of the way — only a failure interrupts. The
+  /// PDF and System methods still push `PrintLabelScreen`, where the PDF (and
+  /// the OS dialog it feeds) is the actual deliverable.
+  Future<void> _launchPrint(List<int> lotPks, {LabelPrefs? prefs}) async {
+    if (lotPks.isEmpty) {
+      return;
+    }
+    final resolved = prefs ?? await LabelPrefsService.instance.fetch();
     if (!mounted) {
       return;
     }
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text(message)));
+    if (resolved?.printMethod == PrintMethod.bluetooth) {
+      await _printNatively(lotPks, prefs: resolved);
+      return;
+    }
+    if (lotPks.length == 1) {
+      unawaited(context.push('/print/${lotPks.first}', extra: resolved));
+      return;
+    }
+    // A batch link is only emitted for the Bluetooth method, so getting one
+    // on any other method means the page was rendered before the method
+    // changed. Reload it and the page renders its own PDF button, which is
+    // the right answer for those methods.
+    _showSnack('Your label print method changed — reloading this page.');
+    unawaited(_controller?.reload());
+  }
+
+  /// Runs a Bluetooth print job and reports only what's worth reporting.
+  Future<void> _printNatively(List<int> lotPks, {LabelPrefs? prefs}) async {
+    if (LabelPrintService.instance.isBusy) {
+      // One BLE link, one job at a time — a second tap can't interleave.
+      _showSnack('Still printing — one moment.');
+      return;
+    }
+    final messenger = ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(_printingSnack(lotPks.length));
+    final result = await LabelPrintService.instance.printLots(
+      lotPks,
+      ref: ref,
+      prefs: prefs,
+    );
+    messenger.hideCurrentSnackBar();
+    if (!mounted) {
+      return;
+    }
+    switch (result.status) {
+      case LabelPrintStatus.sent:
+        _reportPrinted(result);
+      case LabelPrintStatus.noPrinter:
+        await _offerPrinterSetup();
+      case LabelPrintStatus.failed:
+        // Retry the labels that *didn't* print, not the whole batch — the
+        // printed ones are already stuck on boxes. They go out in order, so
+        // the remainder is everything past the printed count.
+        final remaining = lotPks.sublist(
+          result.printed.clamp(0, lotPks.length),
+        );
+        _showSnack(
+          _failureText(result),
+          actionLabel: result.fixInSettings ? 'Settings' : 'Retry',
+          onAction: result.fixInSettings
+              ? () => unawaited(openAppSettings())
+              : () => unawaited(_printNatively(remaining, prefs: prefs)),
+        );
+      case LabelPrintStatus.busy:
+        break;
+    }
+  }
+
+  /// The non-blocking "printing" message: a live count over whatever page the
+  /// user was on, with a way to stop a long batch. It runs until the job hides
+  /// it rather than on a timer, since a hundred labels take minutes.
+  SnackBar _printingSnack(int total) => SnackBar(
+    duration: const Duration(hours: 1),
+    content: ValueListenableBuilder<LabelPrintProgress?>(
+      valueListenable: LabelPrintService.instance.progress,
+      builder: (context, progress, _) => Text(
+        progress?.message ??
+            (total > 1 ? 'Printing $total labels…' : 'Printing label…'),
+      ),
+    ),
+    action: total > 1
+        ? SnackBarAction(
+            label: 'Stop',
+            onPressed: LabelPrintService.instance.cancel,
+          )
+        : null,
+  );
+
+  /// What a failed job says. Mid-batch, how far it got is the first thing the
+  /// user needs — which labels to re-print depends on it.
+  String _failureText(LabelPrintResult result) {
+    final detail =
+        result.message ?? 'Printing failed. Check the printer and try again.';
+    if (result.total > 1 && result.printed > 0) {
+      return 'Printed ${result.printed} of ${result.total} labels, then '
+          'stopped: $detail';
+    }
+    return detail;
+  }
+
+  /// A label that printed is its own confirmation — it's in the user's hand.
+  /// So: say nothing for a clean single label, and speak up only for a soft
+  /// problem the printer reported, a batch that ended early, or a batch big
+  /// enough that "did all of those go?" is a real question.
+  void _reportPrinted(LabelPrintResult result) {
+    if (result.message != null) {
+      _showSnack(result.message!);
+    } else if (result.printed < result.total) {
+      _showSnack('Stopped after ${result.printed} of ${result.total} labels.');
+    } else if (result.total > 1) {
+      _showSnack('Sent ${result.total} labels to the printer.');
+    }
+  }
+
+  /// Nothing is paired. The first time that happens, take the user to the
+  /// `/printing/` page — "no printer is set up" isn't something they can act
+  /// on from the page they're on, and pairing lives there. Every time after,
+  /// they've seen that page and chose not to finish, so nudge with a way back
+  /// instead of yanking them off what they were doing.
+  Future<void> _offerPrinterSetup() async {
+    final firstRun = await PrinterSetupPrompt.instance.consumeFirstRun();
+    if (!mounted) {
+      return;
+    }
+    if (firstRun) {
+      _loadPath('/printing/');
+      _showSnack('Connect your label printer here, then print again.');
+      return;
+    }
+    _showSnack(
+      'No printer connected.',
+      actionLabel: 'Set up',
+      onAction: () => _loadPath('/printing/'),
+    );
+  }
+
+  void _showSnack(
+    String message, {
+    String? actionLabel,
+    VoidCallback? onAction,
+  }) {
+    if (!mounted) {
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        action: actionLabel == null || onAction == null
+            ? null
+            : SnackBarAction(label: actionLabel, onPressed: onAction),
+      ),
+    );
   }
 
   /// The state object the printer JS handlers resolve with — what the
@@ -1072,12 +1226,14 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     // bookmarked URL — goes through this path and would hand a Bluetooth user
     // a PDF to share. Catch it here so *any* single-lot label prints natively,
     // rather than gating each template on the print method one by one.
-    final labelLotPk = _singleLotLabelPath.firstMatch(uri.path)?.group(1);
+    final labelLotPk = int.tryParse(
+      _singleLotLabelPath.firstMatch(uri.path)?.group(1) ?? '',
+    );
     if (labelLotPk != null && action.isForMainFrame) {
       // Only pay for the prefs lookup once the path has already matched.
       final prefs = await LabelPrefsService.instance.fetch();
       if (prefs?.printMethod == PrintMethod.bluetooth && mounted) {
-        unawaited(context.push('/print/$labelLotPk'));
+        unawaited(_launchPrint([labelLotPk], prefs: prefs));
         return NavigationActionPolicy.CANCEL;
       }
     }
@@ -1221,14 +1377,15 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
           unawaited(_launchPayment(invoicePk));
         }
       case 'print':
-        // fishauctions://print/<lot_pk> — print a label. Without a valid pk
-        // (e.g. a bare "set up printing" link) fall back to the /printing/
-        // page, the one place printing is configured.
-        final lotPk = int.tryParse(uri.pathSegments.firstOrNull ?? '');
-        if (lotPk != null) {
-          context.push('/print/$lotPk');
-        } else {
+        // fishauctions://print/<lot_pk> — one label; ?lots=1,2,3 — a batch
+        // (the bulk label buttons, on the Bluetooth method). Without any
+        // parseable pk (e.g. a bare "set up printing" link) fall back to the
+        // /printing/ page, the one place printing is configured.
+        final lotPks = lotPksFromPrintLink(uri);
+        if (lotPks.isEmpty) {
           _loadPath('/printing/');
+        } else {
+          unawaited(_launchPrint(lotPks));
         }
       case 'ar':
         // fishauctions://ar/<auction_slug>[?locate=<lot_pk>] — AR lot mode
