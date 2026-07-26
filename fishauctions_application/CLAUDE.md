@@ -113,6 +113,13 @@ GET /api/mobile/printers/profiles/                  # ThermalPrinterProfile rows
 - **PDF / System printer** — the same WeasyPrint PDFs the website makes;
   System routes them into the OS print dialog (`printing` package), both from
   WebView downloads and the `fishauctions://print/<lot_pk>` screen.
+- On the Bluetooth method the shell also intercepts plain navigations to the
+  website's own `/lots/print/<pk>/` (`SingleLotLabelView`) and routes them to
+  the native print screen, so a single-lot label prints natively from *any*
+  entry point — the users table, the command palette, a bookmark — not just
+  the one lot-page button that emits `fishauctions://print/<pk>`. Web label
+  links are otherwise widely hidden in the app; un-hiding them is
+  `BACKEND_SPEC.md` Part A.
 - **Bluetooth** — server-rendered PNG at the printer's exact raster → 1-bit
   pack (`LabelRaster`) → `PrinterProfileDriver` interprets the printer's
   declarative command program (JSON steps: `tx`/`tx_text`/`tx_raster`/
@@ -121,6 +128,22 @@ GET /api/mobile/printers/profiles/                  # ThermalPrinterProfile rows
   release. Bundled seed profiles (`bundled_printer_profiles.dart`: D11s
   AiYin/Lujiang + raw ESC/POS) cover cold-start/offline and must stay in sync
   with the backend seed rows.
+- **A BLE write can't exceed `MTU − 3` bytes, and both platforms reject an
+  oversized one rather than splitting it.** An un-negotiated link sits at the
+  spec minimum MTU of 23 → 20 usable bytes, so a profile pacing at 200-byte
+  chunks failed on its first *raster* chunk while the short setup commands
+  sailed through — surfacing as "Lost connection to the printer while
+  printing" on a printer sitting right there (fixed 2026-07-25:
+  `BluetoothService._negotiateMtu` requests 512 on Android, tolerating a
+  refusal, and `_maxWritePayload` clamps every chunk to the *live* `mtuNow` —
+  live because iOS settles its MTU after connect returns). The profile's
+  `chunk_size` is a pacing hint, never a licence to exceed the link.
+- **Raster geometry is `mm × dpi / 25.4`, capped at the printhead**
+  (`LabelRasterSpec`), never the printhead width scaled by the label's aspect
+  ratio — that older math rendered a 76×51 mm label as 96×64 px (32 effective
+  dpi, illegible) on a 12 mm D11s head. `LabelRasterSpec.exceedsHead` warns on
+  the print screen when the user's label size simply doesn't fit their
+  printer, which no amount of resampling can fix.
 - The `/printing/` page's Bluetooth card drives the native connect/unpair
   bottom sheet through JS-bridge handlers `printerGetState` /
   `printerConnect` / `printerUnpair` (each resolves with

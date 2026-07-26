@@ -51,6 +51,10 @@ class _PrintLabelScreenState extends ConsumerState<PrintLabelScreen> {
   Uint8List? _png;
   Uint8List? _pdf;
 
+  /// What [_fetchPngForPrinter] asked the server for — null when no profile or
+  /// label size was resolvable and the server default was used instead.
+  LabelRasterSpec? _raster;
+
   @override
   void initState() {
     super.initState();
@@ -84,21 +88,21 @@ class _PrintLabelScreenState extends ConsumerState<PrintLabelScreen> {
     }
   }
 
-  /// The label PNG at the printer's native raster: the profile's printhead
-  /// width, the height from the label prefs' aspect ratio, the profile's dpi —
-  /// so barcodes render crisp instead of being downscaled on-device. Without a
-  /// resolvable profile/size the server default is fetched and resized later.
+  /// The label PNG at the printer's native raster, so barcodes and text render
+  /// crisp at the printhead's own dot pitch instead of being downscaled
+  /// on-device. Without a resolvable profile/size the server default is
+  /// fetched and resized later.
   Future<Uint8List> _fetchPngForPrinter() async {
     final profile = await _profile();
     final size = _prefs?.sizeMm;
     if (profile == null || size == null) {
       return LabelService.instance.fetchLabelPng(widget.lotPk);
     }
-    final (widthMm, heightMm) = size;
+    final raster = _raster = LabelRasterSpec.of(profile, size);
     return LabelService.instance.fetchLabelPng(
       widget.lotPk,
-      widthPx: profile.printWidthPx,
-      heightPx: (profile.printWidthPx * heightMm / widthMm).round(),
+      widthPx: raster.widthPx,
+      heightPx: raster.heightPx,
       dpi: profile.dpi,
     );
   }
@@ -155,9 +159,12 @@ class _PrintLabelScreenState extends ConsumerState<PrintLabelScreen> {
         );
         return;
       }
+      // Resize to the raster we asked for, not to the full printhead width —
+      // a label narrower than the head should print narrow, not be stretched
+      // across every element.
       final bitmap = LabelRaster.fromPng(
         png,
-        targetWidth: profile.printWidthPx,
+        targetWidth: _raster?.widthPx ?? profile.printWidthPx,
       );
       final size = _prefs?.sizeMm;
       final warning = await PrinterProfileDriver(
@@ -269,7 +276,11 @@ class _PrintLabelScreenState extends ConsumerState<PrintLabelScreen> {
         _ => Padding(
           padding: const EdgeInsets.all(24),
           child: switch (_phase) {
-            _Phase.ready => _LabelPreview(png: _png!, onPrint: _printBluetooth),
+            _Phase.ready => _LabelPreview(
+              png: _png!,
+              raster: _raster,
+              onPrint: _printBluetooth,
+            ),
             _Phase.connecting => const _Centered(
               children: [
                 CircularProgressIndicator(),
@@ -347,37 +358,86 @@ class _PrintLabelScreenState extends ConsumerState<PrintLabelScreen> {
   );
 }
 
+/// Debug preview of the bytes about to be printed.
+///
+/// Deliberately *not* a pretty render: it shows the printer's own raster,
+/// nearest-neighbour, so blocky text here means blocky text on the label. The
+/// caption underneath is the point — it reports the exact raster requested, so
+/// "the preview looks like garbage" resolves to a number you can act on
+/// instead of a guess about what the server sent.
 class _LabelPreview extends StatelessWidget {
-  const _LabelPreview({required this.png, required this.onPrint});
+  const _LabelPreview({
+    required this.png,
+    required this.raster,
+    required this.onPrint,
+  });
 
   final Uint8List png;
+  final LabelRasterSpec? raster;
   final VoidCallback onPrint;
 
   @override
-  Widget build(BuildContext context) => Column(
-    crossAxisAlignment: CrossAxisAlignment.stretch,
-    children: [
-      Card(
-        clipBehavior: Clip.antiAlias,
-        child: Padding(
-          padding: const EdgeInsets.all(12),
-          // The label at the printer's own raster — true WYSIWYG (upscaled
-          // pixels and all; what you see is what the printhead gets).
-          child: Image.memory(
-            png,
-            fit: BoxFit.contain,
-            filterQuality: FilterQuality.none,
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final spec = raster;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Card(
+          clipBehavior: Clip.antiAlias,
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            // The label at the printer's own raster — true WYSIWYG (upscaled
+            // pixels and all; what you see is what the printhead gets).
+            child: Image.memory(
+              png,
+              fit: BoxFit.contain,
+              filterQuality: FilterQuality.none,
+            ),
           ),
         ),
-      ),
-      const Spacer(),
-      FilledButton.icon(
-        onPressed: onPrint,
-        icon: const Icon(Icons.print),
-        label: const Text('Print'),
-      ),
-    ],
-  );
+        if (spec != null) ...[
+          const SizedBox(height: 8),
+          Text(
+            spec.summary,
+            textAlign: TextAlign.center,
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+          ),
+          if (spec.exceedsHead) ...[
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Icon(
+                  Icons.warning_amber,
+                  size: 18,
+                  color: theme.colorScheme.error,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'Your label size is wider than this printer can print, so '
+                    'the label is cut off at the printhead. Pick a label size '
+                    'that fits on the Label printing page.',
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.error,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ],
+        const Spacer(),
+        FilledButton.icon(
+          onPressed: onPrint,
+          icon: const Icon(Icons.print),
+          label: const Text('Print'),
+        ),
+      ],
+    );
+  }
 }
 
 class _Centered extends StatelessWidget {

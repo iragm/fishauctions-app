@@ -990,6 +990,10 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
 
   // ── Navigation, downloads, permissions, bridges ───────────────────────────
 
+  /// The website's single-lot label PDF (`SingleLotLabelView`, Django's
+  /// `lots/print/<int:pk>/`).
+  static final _singleLotLabelPath = RegExp(r'^/lots/print/(\d+)/?$');
+
   /// Gatekeeps every main-frame navigation. Custom-scheme deep links run the
   /// native flow; links to other sites open in the system browser; everything
   /// on our host loads in place.
@@ -1025,6 +1029,22 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     if (uri.host != webHost && action.isForMainFrame) {
       await _openExternally(uri);
       return NavigationActionPolicy.CANCEL;
+    }
+
+    // The website's own single-lot label link. Only the lot detail page knows
+    // to emit `fishauctions://print/<pk>` instead; every other route to a
+    // label — the users table's per-bidder links, the command palette, a
+    // bookmarked URL — goes through this path and would hand a Bluetooth user
+    // a PDF to share. Catch it here so *any* single-lot label prints natively,
+    // rather than gating each template on the print method one by one.
+    final labelLotPk = _singleLotLabelPath.firstMatch(uri.path)?.group(1);
+    if (labelLotPk != null && action.isForMainFrame) {
+      // Only pay for the prefs lookup once the path has already matched.
+      final prefs = await LabelPrefsService.instance.fetch();
+      if (prefs?.printMethod == PrintMethod.bluetooth && mounted) {
+        unawaited(context.push('/print/$labelLotPk'));
+        return NavigationActionPolicy.CANCEL;
+      }
     }
 
     // A logout link on our host — an in-page web sign-out — means sign out

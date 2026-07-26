@@ -7,6 +7,7 @@ import 'dart:typed_data';
 // it so it doesn't clash with this class. We still consume those service
 // objects via type inference from `device.servicesList`.
 import 'package:flutter_blue_plus/flutter_blue_plus.dart' hide BluetoothService;
+import 'package:logger/logger.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../models/printer_device_info.dart';
@@ -17,6 +18,8 @@ import 'printer_exception.dart';
 import 'printer_transport.dart';
 
 export 'printer_exception.dart';
+
+final _log = Logger();
 
 /// Wraps flutter_blue_plus (BLE) for thermal label printing on iOS + Android,
 /// and implements [PrinterTransport] so `PrinterProfileDriver` stays
@@ -40,6 +43,14 @@ class BluetoothService implements PrinterTransport {
   /// How long to wait for a BLE link before giving up, so a powered-off printer
   /// can't hang the UI indefinitely.
   static const _connectTimeout = Duration(seconds: 15);
+
+  /// Largest ATT MTU worth asking for (the BLE ceiling). The printer answers
+  /// with what it can actually do; see [_negotiateMtu].
+  static const _desiredMtu = 512;
+
+  /// ATT payload available on a link that never negotiated: the spec's minimum
+  /// MTU of 23, less the 3-byte write header.
+  static const _minAttPayload = 20;
 
   // Write pacing, set per-connection from the printer's profile (thermal
   // printers drop data sent faster than their link can take). The defaults
@@ -412,7 +423,15 @@ class BluetoothService implements PrinterTransport {
       );
     }
     try {
-      await device.connect(license: _license, timeout: _connectTimeout);
+      // mtu:null opts out of flutter_blue_plus doing the MTU request as part
+      // of connect(): it lets a refusal throw, which would report a printer
+      // that is in fact connected as unreachable. We do it ourselves below,
+      // where refusing is survivable.
+      await device.connect(
+        license: _license,
+        timeout: _connectTimeout,
+        mtu: null,
+      );
     } on TimeoutException {
       throw const PrinterException(
         "Couldn't reach the printer. Make sure it's powered on and within a "
@@ -424,6 +443,7 @@ class BluetoothService implements PrinterTransport {
         'range, then try again.',
       );
     }
+    await _negotiateMtu(device);
     try {
       await device.discoverServices();
     } on Object {
@@ -450,6 +470,40 @@ class BluetoothService implements PrinterTransport {
     _watchConnection(device);
     await _subscribeNotify(device, profile: profile);
     return write;
+  }
+
+  /// Widens the ATT MTU so a raster chunk can actually be written.
+  ///
+  /// **Not an optimization.** A BLE characteristic write carries at most
+  /// `MTU - 3` bytes and both platforms *reject* an oversized write rather
+  /// than splitting it. A link that never negotiates sits at the spec minimum
+  /// of 23 (20 usable bytes), so a profile pacing at 200-byte chunks fails on
+  /// its first raster chunk — after the short setup commands have already gone
+  /// through, which is exactly what "Lost connection to the printer while
+  /// printing" was: not a dropped link at all, but a write the OS refused to
+  /// send. [_maxWritePayload] then clamps chunks to whatever we actually got.
+  ///
+  /// Best-effort on purpose. iOS negotiates the MTU itself and rejects
+  /// `requestMtu` outright; a printer that refuses to grow just stays small and
+  /// gets more, smaller writes.
+  Future<void> _negotiateMtu(BluetoothDevice device) async {
+    if (!Platform.isAndroid) {
+      return;
+    }
+    try {
+      await device.requestMtu(_desiredMtu);
+    } on Object {
+      // Refused or unsupported — mtuNow keeps whatever the link already had.
+    }
+  }
+
+  /// Bytes the current link can carry in one write, read live rather than
+  /// cached at connect time: iOS settles its MTU asynchronously *after* the
+  /// connection completes, so a value latched during [_openLink] would pin us
+  /// to the 23-byte default for the whole session.
+  int get _maxWritePayload {
+    final mtu = _device?.mtuNow ?? 0;
+    return mtu > 3 ? mtu - 3 : _minAttPayload;
   }
 
   /// Picks the characteristic to print through: the preferred one (the
@@ -589,10 +643,14 @@ class BluetoothService implements PrinterTransport {
     final withoutResponse =
         writeChar.properties.writeWithoutResponse &&
         (!_preferWriteWithResponse || !writeChar.properties.write);
+    // The profile's chunk size is a *pacing* choice — how much this printer
+    // likes to swallow at once. The link imposes a hard ceiling on top of it,
+    // and exceeding that is an outright error, not a slow write.
+    final chunk = _chunkSize.clamp(1, _maxWritePayload);
     try {
-      for (var offset = 0; offset < data.length; offset += _chunkSize) {
-        final end = (offset + _chunkSize < data.length)
-            ? offset + _chunkSize
+      for (var offset = 0; offset < data.length; offset += chunk) {
+        final end = (offset + chunk < data.length)
+            ? offset + chunk
             : data.length;
         // Pacing spans write() calls: the printer sees one byte stream, so a
         // command following a raster must keep the same inter-chunk gap.
@@ -608,11 +666,23 @@ class BluetoothService implements PrinterTransport {
       }
     } on PrinterException {
       rethrow;
-    } on Object {
-      throw const PrinterException(
-        'Lost connection to the printer while printing. Keep it on and in '
-        'range, then print again.',
-      );
+    } on Object catch (e) {
+      // Don't report every write failure as a dropped link: an oversized
+      // write, a rejected characteristic, and a printer that walked out of
+      // range all used to say "lost connection", sending the user off to
+      // check a printer that was sitting right there. Ask the link which it
+      // was, and log the platform's own reason either way.
+      _log.w('Printer write failed (chunk $chunk B, mtu ${device.mtuNow}): $e');
+      throw device.isDisconnected
+          ? const PrinterException(
+              'Lost connection to the printer while printing. Keep it on and '
+              'in range, then print again.',
+            )
+          : const PrinterException(
+              "The printer rejected the data. It's still connected, so this "
+              'is likely the wrong printer profile — unpair it on the Label '
+              'printing page and connect it again.',
+            );
     }
   }
 }
