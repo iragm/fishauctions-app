@@ -110,6 +110,25 @@ class PrinterProfileService {
     PrinterDeviceInfo info,
   ) async => matchProfileForDeviceInfo(await candidates(), info);
 
+  /// The profile for a printer that answered a `PrinterProbe` query in
+  /// [language] — but only when exactly one profile speaks it.
+  ///
+  /// The uniqueness rule is the whole safety argument. Knowing a printer
+  /// speaks TSPL doesn't tell you its printhead width or its GATT ids, so
+  /// picking one of several TSPL profiles at random would drive it wrong. One
+  /// candidate means there is nothing to get wrong; more than one is a real
+  /// question, and those are the only ones worth putting to the user.
+  Future<PrinterProfile?> matchByLanguage(String? language) async {
+    if (language == null || language.isEmpty) {
+      return null;
+    }
+    final matches = [
+      for (final profile in await candidates())
+        if (profile.inferredLanguage == language) profile,
+    ];
+    return matches.length == 1 ? matches.single : null;
+  }
+
   /// Every profile this build can offer, in preference order: the server's
   /// list (live or cached) first, then any bundled seed it doesn't include —
   /// the server list may be reachable but missing the seeds, and the bundle is

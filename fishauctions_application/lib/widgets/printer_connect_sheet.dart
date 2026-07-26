@@ -9,8 +9,13 @@ import '../models/printer_device_info.dart';
 import '../models/printer_profile.dart';
 import '../providers/printer_provider.dart';
 import '../services/bluetooth_service.dart';
+import '../services/label_prefs_service.dart';
+import '../services/label_raster.dart';
+import '../services/printer_probe.dart';
+import '../services/printer_profile_driver.dart';
 import '../services/printer_profile_service.dart';
 import '../services/printer_report_service.dart';
+import '../services/printer_test_label.dart';
 
 /// The native "connect a Bluetooth printer" flow, shown as a modal bottom
 /// sheet *over* the current page — the `/printing/` web page stays the one
@@ -52,6 +57,9 @@ class _PrinterConnectSheetState extends ConsumerState<PrinterConnectSheet> {
   // Connected, but still asking the device what it is (see _connect).
   bool _identifying = false;
   String? _error;
+  // Non-error feedback (test print sent, etc).
+  String? _notice;
+  bool _testing = false;
   // When set, the error has a concrete fix the user can take from here.
   bool _needsBluetoothOn = false;
   bool _needsSettings = false;
@@ -213,6 +221,18 @@ class _PrinterConnectSheetState extends ConsumerState<PrinterConnectSheet> {
     }
   }
 
+  /// The human name of the profile driving the saved printer. Falls back to
+  /// the raw slug — an unrecognized one is worth showing, not hiding, since it
+  /// means the server dropped a profile the printer was paired with.
+  String _profileName(String? slug) {
+    for (final profile in _profiles) {
+      if (profile.slug == slug) {
+        return profile.name;
+      }
+    }
+    return slug ?? '';
+  }
+
   PrinterProfile? _matchProfile(String name) {
     for (final profile in _profiles) {
       if (profile.matchesName(name)) {
@@ -256,6 +276,19 @@ class _PrinterConnectSheetState extends ConsumerState<PrinterConnectSheet> {
       );
       if (identified != null) {
         (profile, match) = identified;
+      } else {
+        // Last automatic step before giving up and asking: the printer's DIS
+        // is often its radio module (a Y486BT reports "Feasycom FSC-BT986"),
+        // but its *print engine* will still answer a status query in whatever
+        // language it speaks. One profile for that language is a safe match;
+        // several is genuinely ambiguous and falls through to the user.
+        final byLanguage = await PrinterProfileService.instance.matchByLanguage(
+          PrinterProbe.languageFrom(BluetoothService.instance.lastProbeReplies),
+        );
+        if (byLanguage != null) {
+          profile = byLanguage;
+          match = ProfileMatch.probe;
+        }
       }
     }
 
@@ -271,9 +304,12 @@ class _PrinterConnectSheetState extends ConsumerState<PrinterConnectSheet> {
       }
     }
 
+    // Non-null from here: every path above either resolved a profile or
+    // returned.
+    final resolved = profile;
     await ref
         .read(printerProvider.notifier)
-        .connect(device, name: name, profile: profile);
+        .connect(device, name: name, profile: resolved);
     if (!mounted) {
       return;
     }
@@ -289,8 +325,18 @@ class _PrinterConnectSheetState extends ConsumerState<PrinterConnectSheet> {
                   'Make sure it is powered on and in range.';
       });
     } else {
-      unawaited(_report(info, name: name, profile: profile, match: match));
-      Navigator.of(context).pop();
+      unawaited(_report(info, name: name, profile: resolved, match: match));
+      // Deliberately does *not* close the sheet on success. A connection only
+      // proves the link is open, not that the profile drives this printer —
+      // and the profile may well have been a guess the user just made in
+      // _pickProfile. Staying here puts "Print test label" one tap away, at
+      // the only moment the user is holding the printer and expecting to fuss
+      // with it.
+      setState(() {
+        _notice =
+            'Connected with the "${resolved.name}" profile. Print a test '
+            'label to confirm it works before you need it.';
+      });
     }
   }
 
@@ -320,6 +366,7 @@ class _PrinterConnectSheetState extends ConsumerState<PrinterConnectSheet> {
       reported,
       profile: profile,
       match: match,
+      probeReplies: BluetoothService.instance.lastProbeReplies,
     );
   }
 
@@ -330,51 +377,79 @@ class _PrinterConnectSheetState extends ConsumerState<PrinterConnectSheet> {
   Future<PrinterProfile?> _pickProfile(
     String deviceName,
     PrinterDeviceInfo? info,
-  ) => showDialog<PrinterProfile>(
-    context: context,
-    builder: (ctx) => SimpleDialog(
-      title: Text('What kind of printer is "$deviceName"?'),
-      children: [
-        if (info != null && !info.isEmpty) ...[
+  ) {
+    // Everything automatic has already failed, so lead with what we *did*
+    // learn. A user who can't answer "what protocol is this?" can usually
+    // answer "which of these is my printer", and the detected language at
+    // least narrows the list to the ones that can work at all.
+    final language = PrinterProbe.languageFrom(
+      BluetoothService.instance.lastProbeReplies,
+    );
+    final likely = [
+      for (final p in _profiles)
+        if (language != null && p.inferredLanguage == language) p,
+    ];
+    final rest = [
+      for (final p in _profiles)
+        if (!likely.contains(p)) p,
+    ];
+    return showDialog<PrinterProfile>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: Text('Which printer is "$deviceName"?'),
+        children: [
           Padding(
             padding: const EdgeInsets.fromLTRB(24, 0, 24, 8),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'It reports itself as:',
-                  style: Theme.of(ctx).textTheme.bodySmall,
-                ),
-                const SizedBox(height: 4),
-                SelectableText(
-                  info.summary,
-                  style: Theme.of(ctx).textTheme.bodySmall,
-                ),
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: TextButton.icon(
-                    onPressed: () => _copyDetails(info),
-                    icon: const Icon(Icons.copy, size: 18),
-                    label: const Text('Copy details'),
-                  ),
-                ),
-              ],
+            child: Text(
+              likely.isEmpty
+                  ? "This printer didn't identify itself. Pick the closest "
+                        'match, then print a test label to check it — you can '
+                        'change it if nothing comes out.'
+                  : 'It answered as a $language printer. The likely matches '
+                        'are listed first; print a test label to confirm.',
+              style: Theme.of(ctx).textTheme.bodySmall,
             ),
           ),
+          for (final profile in [...likely, ...rest])
+            SimpleDialogOption(
+              onPressed: () => Navigator.of(ctx).pop(profile),
+              child: Text(profile.name),
+            ),
           const Divider(),
-        ],
-        for (final profile in _profiles)
+          if (info != null && !info.isEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(24, 0, 24, 8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'It reports itself as:',
+                    style: Theme.of(ctx).textTheme.bodySmall,
+                  ),
+                  const SizedBox(height: 4),
+                  SelectableText(
+                    info.summary,
+                    style: Theme.of(ctx).textTheme.bodySmall,
+                  ),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: TextButton.icon(
+                      onPressed: () => _copyDetails(info),
+                      icon: const Icon(Icons.copy, size: 18),
+                      label: const Text('Copy details'),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           SimpleDialogOption(
-            onPressed: () => Navigator.of(ctx).pop(profile),
-            child: Text(profile.name),
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Cancel'),
           ),
-        SimpleDialogOption(
-          onPressed: () => Navigator.of(ctx).pop(),
-          child: const Text('Cancel'),
-        ),
-      ],
-    ),
-  );
+        ],
+      ),
+    );
+  }
 
   Future<void> _copyDetails(PrinterDeviceInfo info) async {
     await Clipboard.setData(ClipboardData(text: info.summary));
@@ -387,6 +462,81 @@ class _PrinterConnectSheetState extends ConsumerState<PrinterConnectSheet> {
 
   Future<void> _unpair() async {
     await ref.read(printerProvider.notifier).forget();
+  }
+
+  /// How tall a test label to print when the user's label size is unknown —
+  /// enough to carry the text block and ruler on any printhead.
+  static const _testLabelHeightMm = 40.0;
+
+  /// Prints the diagnostic label from [PrinterTestLabel].
+  ///
+  /// This is what makes picking a profile a *decision* rather than a guess.
+  /// The profile determines every byte sent to the printer, and the app cannot
+  /// tell a right guess from a wrong one — a printer driven by the wrong
+  /// command language typically just sits there. Before this, the user found
+  /// out at the counter with a queue behind them; now the answer is one tap
+  /// and five seconds away, right where the profile was chosen.
+  Future<void> _testPrint() async {
+    setState(() {
+      _testing = true;
+      _error = null;
+      _notice = null;
+    });
+    try {
+      final notifier = ref.read(printerProvider.notifier);
+      final printer = await notifier.ensureConnected();
+      final profile = await PrinterProfileService.instance.bySlug(
+        printer.profileSlug,
+      );
+      if (profile == null) {
+        throw const PrinterException(
+          "This printer's profile is no longer available. Unpair it and "
+          'connect it again.',
+        );
+      }
+      // Print at the user's real label size when we know it, so the test also
+      // proves the size is right — not just that the printer responds.
+      final size = (await LabelPrefsService.instance.fetch())?.sizeMm;
+      final spec = size == null ? null : LabelRasterSpec.of(profile, size);
+      final bitmap = PrinterTestLabel.build(
+        profile,
+        widthPx: spec?.widthPx ?? profile.printWidthPx,
+        heightPx:
+            spec?.heightPx ?? (_testLabelHeightMm * profile.dpi / 25.4).round(),
+      );
+      final warning = await PrinterProfileDriver(
+        BluetoothService.instance,
+        profile,
+      ).printLabel(bitmap, labelWidthMm: size?.$1, labelHeightMm: size?.$2);
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _testing = false;
+        _notice =
+            warning ??
+            'Test label sent. If it printed cleanly, this printer is set up '
+                'correctly. If nothing came out, unpair and pick a different '
+                'printer type.';
+      });
+    } on PrinterException catch (e) {
+      _failTest(e.message);
+    } on Object catch (e) {
+      _failTest(
+        'The test label failed to print ($e). Check that the printer is on, '
+        'has labels loaded, and try again.',
+      );
+    }
+  }
+
+  void _failTest(String message) {
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _testing = false;
+      _error = message;
+    });
   }
 
   @override
@@ -458,16 +608,55 @@ class _PrinterConnectSheetState extends ConsumerState<PrinterConnectSheet> {
                       color: saved.connected ? Colors.green : Colors.grey,
                     ),
                     title: Text(saved.name),
+                    // Name the profile: it's the setting most likely to be
+                    // wrong, and the user can't otherwise see what was picked.
                     subtitle: Text(
-                      saved.connected ? 'Connected' : 'Saved (not connected)',
+                      '${saved.connected ? "Connected" : "Saved — reconnects "
+                                "when you print"}'
+                      '${saved.profileSlug == null ? "" : "\n"
+                                "${_profileName(saved.profileSlug)}"}',
                     ),
-                    trailing: TextButton(
-                      onPressed: _unpair,
-                      child: const Text('Unpair'),
-                    ),
+                    isThreeLine: saved.profileSlug != null,
+                  ),
+                  OverflowBar(
+                    alignment: MainAxisAlignment.end,
+                    children: [
+                      TextButton(
+                        onPressed: _testing ? null : _unpair,
+                        child: const Text('Unpair'),
+                      ),
+                      TextButton(
+                        onPressed: _testing ? null : _testPrint,
+                        child: Text(
+                          _testing ? 'Printing…' : 'Print test label',
+                        ),
+                      ),
+                      FilledButton(
+                        onPressed: _testing
+                            ? null
+                            : () => Navigator.of(context).pop(),
+                        child: const Text('Done'),
+                      ),
+                    ],
                   ),
                   const Divider(),
                 ],
+                if (_notice != null)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Icon(
+                          Icons.check_circle,
+                          size: 18,
+                          color: Colors.green,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(child: Text(_notice!)),
+                      ],
+                    ),
+                  ),
                 if (_error != null)
                   Padding(
                     padding: const EdgeInsets.all(16),

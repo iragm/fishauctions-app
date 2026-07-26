@@ -30,20 +30,49 @@ class ProfilePrinterStatus {
   bool get printing => flags.contains('printing');
   bool get coverOpen => flags.contains('cover_open');
   bool get outOfPaper => flags.contains('out_of_paper');
+  bool get paperJam => flags.contains('paper_jam');
   bool get lowBattery => flags.contains('low_battery');
   bool get overheated => flags.contains('overheated');
 
   /// A user-facing reason printing can't start right now, or null if it can.
   /// Low battery is a warning, not a blocker, so it isn't returned here.
+  ///
+  /// **Cover-open is reported first, and that ordering is load-bearing** —
+  /// specifically for TSPL, whose `<ESC>!?` answers with an *enumerated value*
+  /// rather than independent bits:
+  ///
+  /// ```
+  /// 00 normal      01 head open        02 jam        03 jam + head open
+  /// 04 no paper    05 no paper + open  06 no ribbon  07 no ribbon + open
+  /// ```
+  ///
+  /// A VEVOR Y486BT with nothing but its lid open answers **`0x07`**, so
+  /// decoding it as a bitmask lights up `out_of_paper` (0x04) and `paper_jam`
+  /// (0x02) as well — and the user is told to load labels that are already
+  /// loaded. Every odd value in that table means "head open", so testing the
+  /// 0x01 bit first is the one reading that is right regardless. Genuine
+  /// out-of-paper and jams (0x04 / 0x02, lid shut) still report themselves,
+  /// and a printer that is both empty *and* open asks to be closed first,
+  /// which it needs anyway.
+  ///
+  /// The `status_flags` schema can only express bitmasks, so this ordering is
+  /// how the enumeration is survived; `BACKEND_SPEC.md` covers giving profiles
+  /// a real value-map instead.
   PrinterException? get blocker {
+    if (coverOpen) {
+      return const PrinterException(
+        'The printer cover is open. Close it, then try again.',
+      );
+    }
     if (outOfPaper) {
       return const PrinterException(
         'The printer is out of labels. Load a label roll, then try again.',
       );
     }
-    if (coverOpen) {
+    if (paperJam) {
       return const PrinterException(
-        'The printer cover is open. Close it, then try again.',
+        'The printer has a label jam. Open the cover, remove the jammed '
+        'label, close it, then try again.',
       );
     }
     if (overheated) {

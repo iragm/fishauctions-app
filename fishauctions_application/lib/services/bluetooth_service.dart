@@ -15,6 +15,7 @@ import '../models/printer_model.dart';
 import '../models/printer_profile.dart';
 import '../utils/platform_bridge.dart';
 import 'printer_exception.dart';
+import 'printer_probe.dart';
 import 'printer_transport.dart';
 
 export 'printer_exception.dart';
@@ -285,10 +286,22 @@ class BluetoothService implements PrinterTransport {
     PrinterProfile? profile,
   }) async {
     final device = BluetoothDevice.fromId(saved.address);
+    // The *profile* wins over the remembered ids whenever it names them. The
+    // saved ids are only a cache of what discovery picked at pairing time, and
+    // discovery can pick wrong — a Y486BT was remembered against its serial
+    // module's control characteristic. Preferring the cache meant a corrected
+    // profile could never reach an already-paired printer: the fix shipped,
+    // every reconnect ignored it, and the only cure was unpair/re-pair.
+    final profileService = profile?.serviceUuid ?? '';
+    final profileChar = profile?.writeCharacteristicUuid ?? '';
     final write = await _openLink(
       device,
-      preferredService: saved.serviceUuid,
-      preferredChar: saved.characteristicUuid,
+      preferredService: profileService.isNotEmpty
+          ? profileService
+          : saved.serviceUuid,
+      preferredChar: profileChar.isNotEmpty
+          ? profileChar
+          : saved.characteristicUuid,
       profile: profile,
     );
     _connectedPrinter = saved.copyWith(
@@ -334,6 +347,12 @@ class BluetoothService implements PrinterTransport {
     );
   }
 
+  /// Replies collected by the last [identify] call's `PrinterProbe` sweep.
+  /// Read by the connect sheet to report them, and to show the user something
+  /// concrete when it has to ask what their printer is.
+  Map<String, PrinterReply> get lastProbeReplies => _lastProbeReplies;
+  Map<String, PrinterReply> _lastProbeReplies = const {};
+
   /// Opens a link to [device] purely to ask it what it is, then closes it
   /// again. Connecting is the only way to reach GATT — a BLE advertisement
   /// carries a name and service ids, not a model number — so this is what the
@@ -348,7 +367,18 @@ class BluetoothService implements PrinterTransport {
   }) async {
     await _openLink(device);
     try {
-      return await readDeviceInfo(name: name);
+      final info = await readDeviceInfo(name: name);
+      // Only unidentified printers get here, and for those the DIS is usually
+      // the radio module rather than the printer. Asking the print engine
+      // itself is what actually distinguishes them.
+      _lastProbeReplies = await PrinterProbe.run(this);
+      if (_lastProbeReplies.isNotEmpty) {
+        _log.i(
+          'Printer probe: ${_lastProbeReplies.entries.map((e) => "${e.key}="
+              "${e.value.hex}").join(' | ')}',
+        );
+      }
+      return info;
     } finally {
       await disconnect();
       // The caller reconnects straight after this with the profile we just
@@ -433,9 +463,17 @@ class BluetoothService implements PrinterTransport {
         mtu: null,
       );
     } on TimeoutException {
+      // A timeout here is most often *not* a printer that's off. Android's
+      // bonded list includes classic (BR/EDR) pairings — which is how a label
+      // printer paired in Settings shows up — and this app speaks BLE only, so
+      // a GATT connect to the classic radio can never complete. Dual-mode
+      // printers advertise their BLE side as a separate device, commonly with
+      // a "-BLE" suffix, which is the one to pick.
       throw const PrinterException(
-        "Couldn't reach the printer. Make sure it's powered on and within a "
-        'few feet, then try again.',
+        "Couldn't reach the printer. If it's on and nearby, this is probably "
+        "its classic Bluetooth pairing, which the app can't print over — "
+        'scan again and pick the entry ending in "-BLE" if there is one. '
+        'Otherwise power the printer off and on, then try again.',
       );
     } on Object {
       throw const PrinterException(
@@ -453,10 +491,16 @@ class BluetoothService implements PrinterTransport {
         're-pair the printer.',
       );
     }
+    _logGatt(device);
     final write = _resolveWrite(
       device,
       preferredService: preferredService,
       preferredChar: preferredChar,
+    );
+    _log.i(
+      'Printer ${device.remoteId.str}: writing to '
+      '${write == null ? "<none found>" : "${write.serviceUuid.str}/"
+                "${write.characteristicUuid.str}"}',
     );
     if (write == null) {
       await device.disconnect();
@@ -506,10 +550,11 @@ class BluetoothService implements PrinterTransport {
     return mtu > 3 ? mtu - 3 : _minAttPayload;
   }
 
-  /// Picks the characteristic to print through: the preferred one (the
-  /// profile's write characteristic, or the remembered one on reconnect),
-  /// else the first writable characteristic (profiles with no GATT ids),
-  /// preferring write-with-response.
+  /// Picks the characteristic to print through, most trustworthy first:
+  /// the preferred one (the profile's write characteristic, or the remembered
+  /// one on reconnect), then a known serial-bridge data pipe
+  /// ([_knownDataCharacteristics]), and only then the first writable
+  /// characteristic outside the SIG housekeeping services.
   BluetoothCharacteristic? _resolveWrite(
     BluetoothDevice device, {
     String? preferredService,
@@ -525,8 +570,22 @@ class BluetoothService implements PrinterTransport {
         return c;
       }
     }
+    // Before guessing, look for a characteristic that is *known* to be a data
+    // pipe. Most BLE printers are a serial-bridge module behind a UART, and
+    // those modules publish a documented data characteristic alongside control
+    // ones that must not be written to.
+    for (final wanted in _knownDataCharacteristics) {
+      final c = _findChar(device, wanted);
+      if (c != null && _isWritable(c)) {
+        return c;
+      }
+    }
     BluetoothCharacteristic? fallback;
     for (final s in device.servicesList) {
+      final uuid = normalizeGattUuid(s.serviceUuid.str);
+      if (_nonPrintableServices.contains(uuid)) {
+        continue;
+      }
       for (final c in s.characteristics) {
         if (c.properties.write) {
           return c;
@@ -536,6 +595,41 @@ class BluetoothService implements PrinterTransport {
     }
     return fallback;
   }
+
+  /// Data-in characteristics of the serial-bridge modules these printers are
+  /// built on, tried in order before falling back to "first writable".
+  ///
+  /// This exists because "first writable characteristic" is actively wrong on
+  /// the common ones. A VEVOR Y486BT is a Feasycom FSC-BT986 running
+  /// Microchip's transparent UART service, whose *first* writable
+  /// characteristic (`…6daa…`) is the module's **control** channel — writing
+  /// label data there reconfigures the radio instead of printing. The real
+  /// pipe is `…8841…`, which sorts later.
+  static const _knownDataCharacteristics = [
+    // Microchip / ISSC transparent UART — RX (central → peripheral).
+    '49535343-8841-43f4-a8d4-ecbe34729bb3',
+    // Nordic UART Service — RX.
+    '6e400002-b5a3-f393-e0a9-e50e24dcca9e',
+    // Ubiquitous cheap-thermal-printer write characteristics.
+    'ff02',
+    'fff2',
+  ];
+
+  /// SIG-defined services that are never a print channel, skipped when falling
+  /// back to "the first writable characteristic".
+  ///
+  /// Generic Attribute (1801) in particular exposes a *writable* "Client
+  /// Supported Features" characteristic (2b29), and it sorts first — so the
+  /// fallback used to select GATT housekeeping as the print channel on any
+  /// printer whose profile doesn't name its ids, and then quietly write label
+  /// rasters into it. Generic Access, Device Information and Battery are
+  /// listed for the same reason: readable/writable, and never the printer.
+  static const _nonPrintableServices = {
+    '1800', // Generic Access
+    '1801', // Generic Attribute
+    '180a', // Device Information
+    '180f', // Battery
+  };
 
   /// Subscribes to the printer's notify characteristic (the profile's, else
   /// the first notify/indicate characteristic) and forwards its bytes to
@@ -561,6 +655,11 @@ class BluetoothService implements PrinterTransport {
     try {
       await notify.setNotifyValue(true);
       _notifySub = notify.onValueReceived.listen((value) {
+        // Logged because a new printer's profile is authored from what it
+        // says back: status bytes, and any media/model reply worth parsing
+        // with a `label_size_parse` regex. Without this the replies are
+        // invisible and a profile can only be guessed at.
+        _log.i('Printer → ${_hex(value)}  ${_printable(value)}');
         if (!_notifyController.isClosed) {
           _notifyController.add(Uint8List.fromList(value));
         }
@@ -595,7 +694,78 @@ class BluetoothService implements PrinterTransport {
     return null;
   }
 
+  /// Dumps the printer's whole GATT tree to the log. A new printer model is
+  /// supported by writing a profile, and a profile has to name the service and
+  /// characteristics to talk over — this is where those ids come from, so it's
+  /// logged for every connection rather than hidden behind a debug flag.
+  void _logGatt(BluetoothDevice device) {
+    final lines = <String>[];
+    for (final s in device.servicesList) {
+      lines.add('  service ${s.serviceUuid.str}');
+      for (final c in s.characteristics) {
+        final p = c.properties;
+        final props = [
+          if (p.read) 'read',
+          if (p.write) 'write',
+          if (p.writeWithoutResponse) 'writeNR',
+          if (p.notify) 'notify',
+          if (p.indicate) 'indicate',
+        ].join(',');
+        lines.add('    char ${c.characteristicUuid.str} [$props]');
+      }
+    }
+    _log.i(
+      'Printer GATT ${device.remoteId.str} '
+      '"${device.platformName}" mtu=${device.mtuNow}\n${lines.join('\n')}',
+    );
+  }
+
+  /// Notify frames are short status/ack replies; cap the dump so a printer
+  /// that streams can't flood the log.
+  static const _maxLoggedFrame = 64;
+
+  static String _hex(List<int> bytes) {
+    final shown = bytes.take(_maxLoggedFrame);
+    final hex = shown.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
+    return bytes.length > _maxLoggedFrame ? '$hex …' : hex;
+  }
+
+  /// The same bytes as text, so an ASCII-protocol reply (TSPL, CPCL) is
+  /// readable at a glance instead of needing hex decoded by hand.
+  static String _printable(List<int> bytes) => String.fromCharCodes([
+    for (final b in bytes.take(_maxLoggedFrame))
+      (b >= 0x20 && b < 0x7f) ? b : 0x2e,
+  ]);
+
+  /// Data-*out* characteristics of the same serial-bridge modules as
+  /// [_knownDataCharacteristics], preferred over "first notify found".
+  ///
+  /// Same trap as the write side: Microchip's transparent UART lists its
+  /// control characteristic (`…aca3…`, write+notify) before the actual TX pipe
+  /// (`…1e4d…`), so a naive scan subscribes to the channel the printer never
+  /// answers on. That matters most during [identify], which runs without a
+  /// profile to name the ids — and identify is exactly when the replies are
+  /// the whole point.
+  static const _knownNotifyCharacteristics = [
+    // Microchip / ISSC transparent UART — TX (peripheral → central).
+    '49535343-1e4d-4bd9-ba61-23c647249616',
+    // Nordic UART Service — TX.
+    '6e400003-b5a3-f393-e0a9-e50e24dcca9e',
+    'ff01',
+    'fff1',
+  ];
+
   BluetoothCharacteristic? _firstNotify(BluetoothDevice device) {
+    for (final wanted in _knownNotifyCharacteristics) {
+      final c = _findChar(device, wanted);
+      if (c != null && (c.properties.notify || c.properties.indicate)) {
+        return c;
+      }
+    }
+    return _anyNotify(device);
+  }
+
+  BluetoothCharacteristic? _anyNotify(BluetoothDevice device) {
     for (final s in device.servicesList) {
       for (final c in s.characteristics) {
         if (c.properties.notify || c.properties.indicate) {

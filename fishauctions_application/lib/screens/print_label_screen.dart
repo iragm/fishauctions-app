@@ -108,8 +108,17 @@ class _PrintLabelScreenState extends ConsumerState<PrintLabelScreen> {
   }
 
   /// The saved printer's profile (pre-profile saves resolve to the D11s).
+  ///
+  /// Awaits the provider rather than reading a snapshot of it.
+  /// `printerProvider` is an [AsyncNotifierProvider] that loads the saved
+  /// printer from secure storage, so on the *first* read of a process it is
+  /// still `AsyncLoading`
+  /// and `.value` is null — indistinguishable from "no printer set up". That
+  /// made the first print after every cold start fall back to the server's
+  /// default 600×400 raster: a label at the wrong size and a fraction of the
+  /// printer's real resolution, with no raster caption under it.
   Future<PrinterProfile?> _profile() async {
-    final saved = ref.read(printerProvider).value;
+    final saved = await ref.read(printerProvider.future);
     if (saved == null) {
       return null;
     }
@@ -121,7 +130,12 @@ class _PrintLabelScreenState extends ConsumerState<PrintLabelScreen> {
     if (png == null) {
       return;
     }
-    if (ref.read(printerProvider).value == null) {
+    // Awaited for the same reason as _profile(): a still-loading provider
+    // would otherwise send a user who *has* a printer to "no printer set up".
+    if (await ref.read(printerProvider.future) == null) {
+      if (!mounted) {
+        return;
+      }
       setState(() => _phase = _Phase.noPrinter);
       return;
     }
@@ -383,53 +397,69 @@ class _LabelPreview extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Card(
-          clipBehavior: Clip.antiAlias,
-          child: Padding(
-            padding: const EdgeInsets.all(12),
-            // The label at the printer's own raster — true WYSIWYG (upscaled
-            // pixels and all; what you see is what the printhead gets).
-            child: Image.memory(
-              png,
-              fit: BoxFit.contain,
-              filterQuality: FilterQuality.none,
-            ),
-          ),
-        ),
-        if (spec != null) ...[
-          const SizedBox(height: 8),
-          Text(
-            spec.summary,
-            textAlign: TextAlign.center,
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
-            ),
-          ),
-          if (spec.exceedsHead) ...[
-            const SizedBox(height: 8),
-            Row(
+        // The preview scrolls and the Print button is pinned below it. A tall
+        // label (a 4×6 at 203 dpi is 812×1218) otherwise sized the Card past
+        // the viewport, starved the Spacer, and pushed the button off the
+        // bottom of the screen — "the preview looks awful and there's no
+        // Print button".
+        Expanded(
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Icon(
-                  Icons.warning_amber,
-                  size: 18,
-                  color: theme.colorScheme.error,
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    'Your label size is wider than this printer can print, so '
-                    'the label is cut off at the printhead. Pick a label size '
-                    'that fits on the Label printing page.',
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: theme.colorScheme.error,
+                Card(
+                  clipBehavior: Clip.antiAlias,
+                  child: Padding(
+                    padding: const EdgeInsets.all(12),
+                    // The label at the printer's own raster — true WYSIWYG
+                    // (upscaled pixels and all; what you see is what the
+                    // printhead gets).
+                    child: Image.memory(
+                      png,
+                      fit: BoxFit.contain,
+                      filterQuality: FilterQuality.none,
                     ),
                   ),
                 ),
+                if (spec != null) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    spec.summary,
+                    textAlign: TextAlign.center,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                  if (spec.exceedsHead) ...[
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        Icon(
+                          Icons.warning_amber,
+                          size: 18,
+                          color: theme.colorScheme.error,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            'Your label size is wider than this printer can '
+                            'print, so the label is cut off at the printhead. '
+                            'Pick a label size that fits on the Label printing '
+                            'page.',
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: theme.colorScheme.error,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ],
               ],
             ),
-          ],
-        ],
-        const Spacer(),
+          ),
+        ),
+        const SizedBox(height: 16),
         FilledButton.icon(
           onPressed: onPrint,
           icon: const Icon(Icons.print),

@@ -17,7 +17,22 @@ List<PrinterProfile> bundledPrinterProfiles() =>
 // rows differ only in the enable/stop pair (AiYin vs Base/Lujiang boards —
 // the wrong pair is a *silent* no-print, hence two rows the user can pick
 // between on an ambiguous name match).
-const _bundledJson = '''
+// The TSPL row drives the VEVOR Y486BT and its many TSC-compatible cousins.
+// Verified on hardware 2026-07-26: real lot labels print correctly, and the
+// `<ESC>!?` status query answers `00` (ready), so out-of-labels / jam / cover
+// detection is live.
+//
+// `label_size_program` is deliberately empty. TSPL has no standard "what media
+// is loaded" query, and this firmware answers neither `~!T` nor `~!I` — probed
+// on the same unit, no notify frame came back at all. The printer does its
+// label recognition internally and never reports the result, so the size has
+// to come from the user's prefs. The plumbing (`readLabelSize` → the
+// /printing/ page's "adopt this size" offer) is still there for a printer that
+// does answer: filling it in is a Django row edit, not an app release.
+//
+// Raw string: the TSPL programs embed JSON `\r\n` escapes, which a normal
+// Dart string would turn into real newlines — invalid inside a JSON string.
+const _bundledJson = r'''
 {
   "schema_version_max": 1,
   "profiles": [
@@ -118,6 +133,43 @@ const _bundledJson = '''
       "status_flags": {"byte": -1, "flags": {"printing": "01",
         "cover_open": "02", "out_of_paper": "04", "low_battery": "08",
         "overheated": "50"}},
+      "label_size_program": [],
+      "label_size_parse": {}
+    },
+    {
+      "slug": "tspl-raster",
+      "name": "TSPL label printer (VEVOR Y486BT, TSC-compatible)",
+      "schema_version": 1,
+      "priority": 100,
+      "match": {
+        "ble_name_patterns": ["^y486", "^y468"],
+        "model_patterns": ["^y486"],
+        "manufacturer_patterns": [],
+        "service_uuid": "49535343-fe7d-4ae5-8fa9-9fafd205e455",
+        "write_characteristic_uuid": "49535343-8841-43f4-a8d4-ecbe34729bb3",
+        "notify_characteristic_uuid": "49535343-1e4d-4bd9-ba61-23c647249616"
+      },
+      "transport": {
+        "chunk_size": 500,
+        "chunk_delay_ms": 5,
+        "prefer_write_with_response": true
+      },
+      "raster": {
+        "print_width_px": 832,
+        "dpi": 203,
+        "invert": true,
+        "max_label_width_mm": 104.0,
+        "max_label_height_mm": null
+      },
+      "print_program": [
+        {"tx_text": "SIZE {width_mm} mm,{height_mm} mm\r\nDIRECTION 0\r\nREFERENCE 0,0\r\nCLS\r\n"},
+        {"tx_text": "BITMAP 0,0,{width_bytes},{height_px},0,"},
+        {"tx_raster": true},
+        {"tx_text": "\r\nPRINT {copies},1\r\n"}
+      ],
+      "status_program": [{"tx": "1b 21 3f"}],
+      "status_flags": {"byte": 0, "flags": {"cover_open": "01",
+        "paper_jam": "02", "out_of_paper": "04", "printing": "20"}},
       "label_size_program": [],
       "label_size_parse": {}
     },

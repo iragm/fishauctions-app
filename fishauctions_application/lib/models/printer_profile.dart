@@ -121,6 +121,61 @@ class PrinterProfile {
   /// Whether [bleName] matches any of this profile's name patterns.
   bool matchesName(String bleName) => _matchesAny(bleNamePatterns, bleName);
 
+  /// Which command language this profile speaks, read off its own print
+  /// program.
+  ///
+  /// Inferred rather than declared because the profile schema has no language
+  /// field yet (see `BACKEND_SPEC.md` — `command_language` is proposed). This
+  /// isn't guesswork: it reads the actual bytes the profile sends, which *are*
+  /// the language. Pairing it with what a printer answered to `PrinterProbe`
+  /// is what lets an unknown printer be matched automatically instead of
+  /// asking the user to choose a protocol they've never heard of.
+  ///
+  /// Null when the program is too generic to tell.
+  String? get inferredLanguage {
+    final text = _programText(printProgram).toLowerCase();
+    if (text.contains('bitmap ') || text.contains('size {width_mm}')) {
+      return 'tspl';
+    }
+    if (text.contains('^gfa') || text.contains('^xa')) {
+      return 'zpl';
+    }
+    if (text.contains('! u1') || text.contains('! 0 200')) {
+      return 'cpcl';
+    }
+    if (text.contains('10ff')) {
+      return 'd11s';
+    }
+    if (text.contains('1d7630')) {
+      return 'escpos';
+    }
+    return null;
+  }
+
+  /// Flattens a program's `tx`/`tx_text` payloads into one searchable string.
+  /// Hex is whitespace-stripped so "1d 76 30" and "1d7630" both match.
+  static String _programText(List<dynamic> steps) {
+    final buffer = StringBuffer();
+    for (final raw in steps) {
+      if (raw is! Map) {
+        continue;
+      }
+      final tx = raw['tx'];
+      if (tx is String) {
+        buffer.write(tx.replaceAll(RegExp(r'\s+'), ''));
+      }
+      final text = raw['tx_text'];
+      if (text is String) {
+        buffer.write(text);
+      }
+      final nested = raw['repeat_per_copy'];
+      if (nested is List) {
+        buffer.write(_programText(nested));
+      }
+    }
+    return buffer.toString();
+  }
+
   /// Whether the printer's own reported identity matches this profile — the
   /// model number or the manufacturer name from its GATT Device Information
   /// Service. Unlike the BLE name, these are burned in by the OEM, so a
@@ -198,7 +253,27 @@ List<PrinterProfile> parsePrinterProfiles(String jsonBody) {
 
 /// How a printer's profile was decided, so the backend can learn which
 /// printers identify themselves usefully and which still need a human.
-enum ProfileMatch { bleName, deviceInfo, serviceUuid, manual }
+enum ProfileMatch {
+  bleName,
+  deviceInfo,
+  serviceUuid,
+
+  /// Matched by asking the print engine which command language it speaks
+  /// (`PrinterProbe`) and finding exactly one profile that speaks it.
+  probe,
+
+  manual;
+
+  /// The string `printers/observed/` accepts. `matched_by` is a strict
+  /// `ChoiceField` on the backend, so [probe] reports as `deviceInfo` — both
+  /// mean "the printer told us what it is", and sending an unknown value
+  /// would 400 the whole report. Collapse this to `probe` once
+  /// `MATCHED_BY_CHOICES` gains it (see `BACKEND_SPEC.md`).
+  String get wireName => switch (this) {
+    ProfileMatch.probe => ProfileMatch.deviceInfo.name,
+    _ => name,
+  };
+}
 
 /// Picks the profile for a printer that didn't match on its advertised name,
 /// from what the printer itself reported. Confidence ladder, first hit wins:

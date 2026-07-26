@@ -192,7 +192,7 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       )
       ..addJavaScriptHandler(
         handlerName: 'printerGetState',
-        callback: (_) => _printerState(),
+        callback: (_) => _printerStateReconnecting(),
       )
       ..addJavaScriptHandler(
         handlerName: 'printerConnect',
@@ -822,6 +822,41 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   /// `/printing/` page's Bluetooth card renders. `labelSize` is the size the
   /// printer itself reported (profiles that can read it); the page offers to
   /// adopt it into the user's label prefs.
+  /// How long the `/printing/` page waits for a saved printer to come back
+  /// before rendering. Short on purpose: the page must not hang behind a
+  /// printer that is switched off or in another room.
+  static const _printerReconnectTimeout = Duration(seconds: 6);
+
+  /// [_printerState], but first gives a remembered printer a chance to be
+  /// *actually* connected.
+  ///
+  /// There is no live BLE link on a fresh launch — a saved printer is only
+  /// remembered — and nothing used to re-open one until the moment of a print.
+  /// So the Bluetooth card said "disconnected" every time the user opened the
+  /// page, even with the printer sitting there powered on, and the only way to
+  /// make it say otherwise was to print something. Reconnecting here is
+  /// cheap (the printing page is exactly where a user checks their printer)
+  /// and makes the card's state honest.
+  ///
+  /// Failure is silent by design: this is a status read, not a print. If the
+  /// printer is off, the card correctly shows disconnected, and printing still
+  /// reconnects on its own later.
+  Future<Map<String, dynamic>> _printerStateReconnecting() async {
+    final printer = await ref.read(printerProvider.future);
+    if (printer != null &&
+        !BluetoothService.instance.isConnectedTo(printer.address)) {
+      try {
+        await ref
+            .read(printerProvider.notifier)
+            .ensureConnected()
+            .timeout(_printerReconnectTimeout);
+      } on Object {
+        // Off, out of range, or Bluetooth disabled — report it as disconnected.
+      }
+    }
+    return _printerState();
+  }
+
   Map<String, dynamic> _printerState() {
     final printer = ref.read(printerProvider).value;
     final hasSize =

@@ -4,6 +4,7 @@ import 'package:logger/logger.dart';
 import '../models/printer_device_info.dart';
 import '../models/printer_profile.dart';
 import 'api_service.dart';
+import 'printer_probe.dart';
 
 final _log = Logger();
 
@@ -30,10 +31,16 @@ class PrinterReportService {
   /// Test seam — lets a test reset the process-wide disable.
   void resetForTest() => _unavailable = false;
 
+  /// [probeReplies] is what the printer answered to [PrinterProbe]'s queries
+  /// (empty when it was identified without probing). It's the difference
+  /// between a report saying "some printer called FSC-BT986" and one saying
+  /// "answers TSPL `<ESC>!?` with 00, ignores ESC/POS and ZPL" — the latter is
+  /// enough to write a working profile without owning the hardware.
   Future<void> report(
     PrinterDeviceInfo info, {
     required PrinterProfile? profile,
     required ProfileMatch match,
+    Map<String, PrinterReply> probeReplies = const {},
   }) async {
     if (_unavailable) {
       return;
@@ -44,7 +51,14 @@ class PrinterReportService {
         data: {
           ...info.toJson(),
           'profile_slug': profile?.slug,
-          'matched_by': match.name,
+          'matched_by': match.wireName,
+          if (probeReplies.isNotEmpty) ...{
+            'probe_replies': {
+              for (final e in probeReplies.entries)
+                e.key: {'hex': e.value.hex, 'ascii': e.value.ascii},
+            },
+            'probed_language': PrinterProbe.languageFrom(probeReplies),
+          },
         },
       );
     } on DioException catch (e) {

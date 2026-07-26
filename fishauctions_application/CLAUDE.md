@@ -126,8 +126,37 @@ GET /api/mobile/printers/profiles/                  # ThermalPrinterProfile rows
   `delay_ms`/`await`/`repeat_per_copy`, schema v1). Printers are **Django
   admin rows** served by `printers/profiles/`; adding one needs no app
   release. Bundled seed profiles (`bundled_printer_profiles.dart`: D11s
-  AiYin/Lujiang + raw ESC/POS) cover cold-start/offline and must stay in sync
-  with the backend seed rows.
+  AiYin/Lujiang, TSPL, raw ESC/POS) cover cold-start/offline and must stay in
+  sync with the backend seed rows.
+- **Not every label printer speaks ESC/POS — most 4″ ones don't.** The
+  `tspl-raster` profile drives the VEVOR Y486BT and TSC-compatible printers
+  generally (verified on hardware 2026-07-26). Two things about TSPL invert
+  the usual assumptions: the raster is inlined in an *ASCII* `BITMAP` command
+  rather than `GS v 0`, and **a `0` bit prints black**, so the profile sets
+  `invert`. Driving one with a D11s profile is what produced "The printer
+  didn't confirm the print finished" — the D11s stop opcode means nothing to
+  it, so its ack never came. TSPL has no completion ack at all, hence no
+  `await` step. The backend seed row is `BACKEND_SPEC.md` Part T.
+- **A profile must name its GATT ids whenever it can, because "first writable
+  characteristic" is actively wrong on the common serial-bridge modules.** The
+  Y486BT is a Feasycom FSC-BT986 running Microchip's transparent UART, whose
+  first writable characteristic (`…6daa…`) is the module's *control* channel;
+  the data pipe is `…8841…`. Discovery picked the control channel and the
+  label silently went nowhere. `BluetoothService._knownDataCharacteristics`
+  now tries the documented data pipes (Microchip, Nordic UART, `ff02`, `fff2`)
+  before guessing, and the fallback skips the SIG housekeeping services
+  (`1800`/`1801`/`180a`/`180f` — `1801` publishes a writable characteristic
+  that sorts first).
+- **The profile's GATT ids beat the remembered ones on reconnect.** A saved
+  printer caches whatever discovery picked at pairing time; preferring that
+  cache meant a corrected profile could never reach an already-paired printer
+  and the only cure was unpair/re-pair.
+- **A dual-mode printer appears twice, and only one entry can work.** Android's
+  bonded list includes classic (BR/EDR) pairings — which is what you get
+  pairing a label printer in Settings — and this app is BLE-only, so a GATT
+  connect to the classic radio times out with the printer sitting right there.
+  The BLE side advertises separately, commonly with a `-BLE` suffix and a
+  *different* MAC. The connect timeout message says so.
 - **A BLE write can't exceed `MTU − 3` bytes, and both platforms reject an
   oversized one rather than splitting it.** An un-negotiated link sits at the
   spec minimum MTU of 23 → 20 usable bytes, so a profile pacing at 200-byte
@@ -151,14 +180,35 @@ GET /api/mobile/printers/profiles/                  # ThermalPrinterProfile rows
 - **Which profile drives a printer** is resolved in `printer_connect_sheet.dart`
   cheapest-first: advertised BLE name → what the printer reports over GATT
   (Device Information Service; `BluetoothService.identify`, matched by
-  `matchProfileForDeviceInfo`) → ask the user. The middle step exists because
-  the BLE name is user-editable and OEM-inconsistent; a service UUID alone is
-  only trusted when exactly one profile claims it (`18f0` is shared by both
-  D11s profiles). Every pairing POSTs what the printer said to
-  `printers/observed/` so unknown printers can be catalogued and given a
-  profile — see `BACKEND_SPEC.md` Part 8 for that endpoint and the
-  `model_patterns`/`manufacturer_patterns` fields, **neither of which the
-  backend has yet**; the app treats both as empty until they land.
+  `matchProfileForDeviceInfo`) → **what command language it answers in**
+  (`PrinterProbe`) → ask the user. The DIS step exists because the BLE name is
+  user-editable and OEM-inconsistent; a service UUID alone is only trusted when
+  exactly one profile claims it (`18f0` is shared by both D11s profiles).
+- **The probe is the step that removes the "what kind of printer is this?"
+  dialog.** DIS often describes the *radio module*, not the printer (a Y486BT
+  says "Feasycom FSC-BT986"), but the print engine will still answer the status
+  query of whatever language it speaks. `PrinterProbe` sends the read-only
+  status/identity request of TSPL, ESC/POS, ZPL, CPCL and D11s and records what
+  answers; a language matching **exactly one** profile is auto-selected
+  (`matchByLanguage`). Ambiguity is a real question and still goes to the user.
+  Every query must stay read-only — this runs against uncharacterised hardware.
+- **Adding a printer is meant to be a data task**, so pairing POSTs everything
+  needed to author a profile to `printers/observed/` — DIS strings, service
+  UUIDs, and now the probe replies. `BACKEND_SPEC.md` Part U covers the fields
+  the backend still needs (`probe_replies`, `probed_language`, a `probe` choice
+  for `matched_by`, and a declared `command_language` so profile language stops
+  being inferred from its own bytes).
+- **"Print test label"** (`PrinterTestLabel`, in the connect sheet) is what
+  makes a guessed profile safe: it renders on-device — deliberately, since it
+  must work while pairing, possibly offline, before any lot exists — and proves
+  the language, the raster geometry, the `invert` polarity and the orientation
+  in one 5-second loop. It is currently only reachable from the connect sheet,
+  which the `/printing/` card can't open while connected (`BACKEND_SPEC.md`
+  Part V).
+- **No media-size auto-detection on TSPL.** Probed directly: the Y486BT ignores
+  `~!T` and `~!I` entirely while answering `<ESC>!?` on the same link. The
+  `label_size_program`/`label_size_parse` plumbing stays for printers that do
+  answer (ZPL `~HS`, some CPCL) — filling it in is a Django row edit.
 
 ### AR Lot Mode
 
@@ -372,6 +422,7 @@ verifies the app compiles and links.
 - **PaymentIntent model:** The prompt specified a standalone PaymentIntent model but the backend uses `InvoicePayment` directly. This works — just don't expect a `/payments/<id>/status/` endpoint to exist yet.
 - **iOS:** project config (bundle id, iOS 16 target, Info.plist keys) is done; the Mac-only work — first signed build, Google iOS OAuth client, the Square platform channel in AppDelegate, and the Tap to Pay entitlement — is checklisted in `IOS.md`.
 - ~~Printing backend endpoints~~ — landed (`printers/profiles/`, `labels/prefs/`, `labels/<pk>/?fmt=pdf`, `UserLabelPrefs.print_method`, the `/printing/` page's dropdown + BT card are live on staging). The app still degrades gracefully when offline: bundled printer profiles, print method defaults to PDF, prefs fetch returns null.
+- **Printer onboarding (`BACKEND_SPEC.md` Parts T/U/V):** app side is done and verified on a VEVOR Y486BT. Outstanding backend work, all small and all data: the **`tspl-raster` seed row** (Part T — the app bundles it, so the two are currently out of sync), `probe_replies`/`probed_language` on `ObservedPrinter` plus a `probe` choice for `matched_by` (Part U), a declared `command_language` on `ThermalPrinterProfile` so profile language stops being inferred from its own print program, a user-facing rename for "Raw ESC/POS raster (GS v 0)", and a `/printing/` card button that reaches the native sheet **while connected** (Part V) — without it the only route to "Print test label" is to unpair and re-pair.
 - **Push notifications:** the backend side of `BACKEND_SPEC.md` Part 2 is **implemented** (`auctions/notifications.py` notify_user choke point, `send_push_to_user` + `promo_push_notifications` tasks, `UserData.push_notifications_instead_of_email`, `PushNotificationSent`, firebase-admin) but inert by design until (a) `FIREBASE_CREDENTIALS_JSON` is set on the deployment and (b) devices report real FCM tokens. App plumbing exists (`fcm_token` sent on device registration when present, `devices/unregister/` called on sign-out) but `PushService.currentToken()` is a stub returning null until a Firebase project + `firebase_messaging` are wired (the plan delivers the public Firebase client config via `/api/mobile/config/`, not a bundled `google-services.json`). Until both land, every notification falls back to email (`user_prefers_push()` is false for everyone). **Full setup checklist + config-endpoint decision: `PUSH.md`.**
 - **Square Tap to Pay (runtime):** Backend endpoints are done; charging still needs a real NFC device on API 31+ and Square production approval (sandbox works for the full flow). Not exercisable in CI.
 - ~~Offline sync backend~~ — landed (`offline/snapshot/` + `offline/sync/` in `auctions/mobile/`).

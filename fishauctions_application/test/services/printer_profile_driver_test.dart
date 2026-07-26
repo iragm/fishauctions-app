@@ -28,7 +28,9 @@ class _FakeTransport implements PrinterTransport {
   @override
   Future<void> write(List<int> bytes) async {
     writes.add(List<int>.from(bytes));
-    if (_eq(bytes, const [0x10, 0xff, 0x40])) {
+    if (_eq(bytes, const [0x10, 0xff, 0x40]) ||
+        _eq(bytes, const [0x1b, 0x21, 0x3f])) {
+      // D11s `10 ff 40` and TSPL `<ESC>!?` both answer with one status byte.
       scheduleMicrotask(() => _emit([statusByte]));
     } else if (_eq(bytes, const [0x10, 0xff, 0xfe, 0x45]) ||
         _eq(bytes, const [0x10, 0xff, 0xf1, 0x45])) {
@@ -73,6 +75,7 @@ void main() {
       expect(profiles.map((p) => p.slug), [
         'd11s-aiyin',
         'd11s-lujiang',
+        'tspl-raster',
         'escpos-raster',
       ]);
       for (final p in profiles) {
@@ -181,6 +184,155 @@ void main() {
         (w) => w.length >= 3 && _FakeTransport._eq(w.sublist(0, 3), anyDensity),
       );
       expect(startedPrinting, isFalse);
+    });
+  });
+
+  // The VEVOR Y486BT (and TSC-compatible 4x6 printers generally) speak TSPL,
+  // not ESC/POS: an ASCII command stream with the bitmap inlined, and — the
+  // detail that inverts everything — a bit value of *0* prints a black dot.
+  group('TSPL print program', () {
+    test('matches Y486BT names but not a D11s', () {
+      final tspl = _profile('tspl-raster');
+      expect(tspl.matchesName('Y486BT_AB10'), isTrue);
+      expect(tspl.matchesName('Y486BT_AB10-BLE'), isTrue);
+      expect(tspl.matchesName('D11s_5C32'), isFalse);
+      // 4" head at 203 dpi, and TSPL's inverted ink polarity.
+      expect(tspl.printWidthPx, 832);
+      expect(tspl.dpi, 203);
+      expect(tspl.invertRaster, isTrue);
+      // The Y486BT is a Feasycom FSC-BT986 running Microchip's transparent
+      // UART. Its ids must be pinned: the service's first *writable*
+      // characteristic is the module's control channel, so discovery would
+      // send label data somewhere that reconfigures the radio.
+      expect(tspl.serviceUuid, '49535343-fe7d-4ae5-8fa9-9fafd205e455');
+      expect(
+        tspl.writeCharacteristicUuid,
+        '49535343-8841-43f4-a8d4-ecbe34729bb3',
+      );
+      expect(
+        tspl.notifyCharacteristicUuid,
+        '49535343-1e4d-4bd9-ba61-23c647249616',
+      );
+    });
+
+    test('emits SIZE/CLS, an inline BITMAP, then PRINT', () async {
+      final t = _FakeTransport();
+      addTearDown(t.dispose);
+      final warning = await PrinterProfileDriver(
+        t,
+        _profile('tspl-raster'),
+      ).printLabel(_bitmap(rows: 1), labelWidthMm: 101.6, labelHeightMm: 152.4);
+
+      // No `await` step: TSPL has no completion ack, so a clean run must not
+      // claim it "couldn't confirm the print finished".
+      expect(warning, isNull);
+
+      final text = t.writes.map(String.fromCharCodes).toList();
+      expect(
+        text,
+        contains(
+          'SIZE 101.6 mm,152.4 mm\r\nDIRECTION 0\r\n'
+          'REFERENCE 0,0\r\nCLS\r\n',
+        ),
+      );
+      // BITMAP x,y,width_in_BYTES,height_in_DOTS,mode — then raw bytes.
+      expect(text, contains('BITMAP 0,0,12,1,0,'));
+      expect(text.last, '\r\nPRINT 1,1\r\n');
+    });
+
+    test('inverts the raster, because TSPL prints on a 0 bit', () async {
+      final t = _FakeTransport();
+      addTearDown(t.dispose);
+      // An all-zero bitmap is a blank (all-white) label.
+      await PrinterProfileDriver(
+        t,
+        _profile('tspl-raster'),
+      ).printLabel(_bitmap(bytesPerRow: 4, rows: 1));
+
+      // ...so every bit must reach the printer set, or the label comes out
+      // solid black and burns through the roll.
+      expect(t.writes, contains(equals([0xff, 0xff, 0xff, 0xff])));
+    });
+
+    test('decodes TSPL status, including a jam', () async {
+      Future<ProfilePrinterStatus> read(int byte) {
+        final t = _FakeTransport(statusByte: byte);
+        addTearDown(t.dispose);
+        return PrinterProfileDriver(t, _profile('tspl-raster')).readStatus();
+      }
+
+      expect((await read(0x00)).blocker, isNull);
+      expect((await read(0x01)).coverOpen, isTrue);
+      expect((await read(0x02)).paperJam, isTrue);
+      expect((await read(0x04)).outOfPaper, isTrue);
+      expect((await read(0x20)).printing, isTrue);
+      // With the lid shut, the specific faults still report themselves.
+      expect((await read(0x04)).blocker?.message, contains('out of labels'));
+      expect((await read(0x02)).blocker?.message, contains('jam'));
+    });
+
+    test('an open lid is reported as an open lid, not as empty', () async {
+      // Measured on a VEVOR Y486BT: lid open, roll loaded → 0x07. TSPL's
+      // status byte is an enumeration ("out of ribbon and head opened"), so
+      // read as a bitmask it also sets out_of_paper (0x04) and paper_jam
+      // (0x02). Telling someone to load labels that are already in the
+      // printer is the worst possible answer, so cover-open wins.
+      final t = _FakeTransport(statusByte: 0x07);
+      addTearDown(t.dispose);
+      final status = await PrinterProfileDriver(
+        t,
+        _profile('tspl-raster'),
+      ).readStatus();
+
+      expect(status.coverOpen, isTrue);
+      expect(status.blocker?.message, contains('cover is open'));
+    });
+  });
+
+  // Reading the language off a profile's own bytes is what lets an unknown
+  // printer be matched from what it answered, instead of asking a volunteer
+  // to choose between "TSPL" and "Raw ESC/POS raster (GS v 0)".
+  group('command language inferred from the print program', () {
+    test('identifies each bundled profile', () {
+      expect(_profile('tspl-raster').inferredLanguage, 'tspl');
+      expect(_profile('escpos-raster').inferredLanguage, 'escpos');
+      expect(_profile('d11s-aiyin').inferredLanguage, 'd11s');
+      expect(_profile('d11s-lujiang').inferredLanguage, 'd11s');
+    });
+
+    test('finds bytes nested inside repeat_per_copy', () {
+      // The ESC/POS raster header only appears inside the per-copy block, so a
+      // scan that didn't recurse would report no language at all.
+      final profile = parsePrinterProfiles('''
+        {"profiles": [{
+          "slug": "nested", "name": "Nested", "schema_version": 1,
+          "print_program": [
+            {"repeat_per_copy": [
+              {"tx": "1d 76 30 00 {u16le:width_bytes} {u16le:height_px}"},
+              {"tx_raster": true}
+            ]}
+          ]
+        }]}
+      ''').single;
+      expect(profile.inferredLanguage, 'escpos');
+    });
+
+    test('a program with nothing distinctive reports no language', () {
+      final profile = parsePrinterProfiles('''
+        {"profiles": [{
+          "slug": "plain", "name": "Plain", "schema_version": 1,
+          "print_program": [{"tx_raster": true}]
+        }]}
+      ''').single;
+      expect(profile.inferredLanguage, isNull);
+    });
+
+    test('probe matches report as deviceInfo on the wire', () {
+      // `matched_by` is a strict ChoiceField; an unknown value 400s the whole
+      // report, so `probe` has to ride under an accepted name for now.
+      expect(ProfileMatch.probe.wireName, 'deviceInfo');
+      expect(ProfileMatch.bleName.wireName, 'bleName');
+      expect(ProfileMatch.manual.wireName, 'manual');
     });
   });
 
