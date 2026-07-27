@@ -96,6 +96,21 @@
             android:name="flutterEmbedding"
             android:value="2" />
 
+        <!-- Push notification appearance. Android draws a notification icon as a
+             *mask* — every non-transparent pixel is filled with the tint colour —
+             so ic_notification is a white-on-transparent fish silhouette, not the
+             launcher artwork. Without this meta-data FCM falls back to the
+             launcher icon, which is opaque and renders as a white square.
+             Applies only to the notification block the OS displays itself
+             (background/terminated); foreground messages are drawn in-app as a
+             SnackBar by webview_screen.dart. -->
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_icon"
+            android:resource="@drawable/ic_notification" />
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_color"
+            android:resource="@color/notification_color" />
+
         <!-- ARCore dependency type. MUST be inside <application> — meta-data is
              invalid at manifest root, where it's silently dropped from the
              merged manifest and Google Play then rejects the bundle with "The
