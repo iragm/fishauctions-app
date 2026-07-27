@@ -118,16 +118,11 @@ class PrinterProfileService {
   /// picking one of several TSPL profiles at random would drive it wrong. One
   /// candidate means there is nothing to get wrong; more than one is a real
   /// question, and those are the only ones worth putting to the user.
-  Future<PrinterProfile?> matchByLanguage(String? language) async {
-    if (language == null || language.isEmpty) {
-      return null;
-    }
-    final matches = [
-      for (final profile in await candidates())
-        if (profile.inferredLanguage == language) profile,
-    ];
-    return matches.length == 1 ? matches.single : null;
-  }
+  ///
+  /// Generic fallback rows are excluded, and that exclusion is what keeps the
+  /// rule honest — see [matchProfileForLanguage], which owns the rule.
+  Future<PrinterProfile?> matchByLanguage(String? language) async =>
+      matchProfileForLanguage(await candidates(), language);
 
   /// Every profile this build can offer, in preference order: the server's
   /// list (live or cached) first, then any bundled seed it doesn't include —

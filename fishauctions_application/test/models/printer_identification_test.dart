@@ -12,6 +12,7 @@ PrinterProfile _profile(
   List<String> models = const [],
   List<String> manufacturers = const [],
   String service = '',
+  List<dynamic> printProgram = const [],
 }) => parsePrinterProfiles(
   jsonEncode({
     'profiles': [
@@ -25,10 +26,34 @@ PrinterProfile _profile(
           'manufacturer_patterns': manufacturers,
           'service_uuid': service,
         },
+        'print_program': printProgram,
       },
     ],
   }),
 ).single;
+
+/// A profile whose print program is unmistakably one language, so
+/// [matchProfileForLanguage] has something to read.
+PrinterProfile _speaking(
+  String slug,
+  String language, {
+  List<String> names = const ['^x'],
+}) => _profile(
+  slug,
+  names: names,
+  printProgram: switch (language) {
+    'tspl' => [
+      {'tx_text': 'SIZE {width_mm} mm,{height_mm} mm\r\nBITMAP 0,0,'},
+    ],
+    'escpos' => [
+      {'tx': '1d 76 30 00 {u16le:width_bytes} {u16le:height_px}'},
+    ],
+    'zpl' => [
+      {'tx_text': '^XA^GFA,'},
+    ],
+    _ => throw ArgumentError(language),
+  },
+);
 
 void main() {
   group('normalizeGattUuid', () {
@@ -147,6 +172,75 @@ void main() {
         ], const PrinterDeviceInfo(bleName: 'Mystery Printer')),
         isNull,
       );
+    });
+  });
+
+  group('isGenericFallback', () {
+    test('a profile declaring no way to be recognised is a fallback', () {
+      expect(_profile('raw').isGenericFallback, isTrue);
+    });
+
+    test('any one identifying signal is enough to not be a fallback', () {
+      expect(_profile('a', names: ['^d11']).isGenericFallback, isFalse);
+      expect(_profile('b', models: ['^y486']).isGenericFallback, isFalse);
+      expect(
+        _profile('c', manufacturers: ['aiyin']).isGenericFallback,
+        isFalse,
+      );
+      expect(_profile('d', service: '18f0').isGenericFallback, isFalse);
+    });
+  });
+
+  group('matchProfileForLanguage', () {
+    test('picks the only profile speaking the language', () {
+      final profiles = [_speaking('tspl-a', 'tspl'), _speaking('zpl-a', 'zpl')];
+      expect(matchProfileForLanguage(profiles, 'tspl')?.slug, 'tspl-a');
+      expect(matchProfileForLanguage(profiles, 'zpl')?.slug, 'zpl-a');
+    });
+
+    test('two profiles speaking it is a real question for the user', () {
+      final profiles = [
+        _speaking('tspl-a', 'tspl'),
+        _speaking('tspl-b', 'tspl'),
+      ];
+      expect(matchProfileForLanguage(profiles, 'tspl'), isNull);
+    });
+
+    test('a language nothing speaks matches nothing', () {
+      expect(matchProfileForLanguage([_speaking('a', 'tspl')], 'cpcl'), isNull);
+      expect(matchProfileForLanguage([_speaking('a', 'tspl')], null), isNull);
+      expect(matchProfileForLanguage([_speaking('a', 'tspl')], ''), isNull);
+    });
+
+    test('the generic fallback is never auto-selected by language', () {
+      // The regression this guards: escpos-raster is the only ESC/POS profile,
+      // so "exactly one speaks it" would hand it every printer that answers
+      // DLE EOT — driven at that row's placeholder 384px head, with no GATT
+      // ids, silently.
+      final fallback = _profile(
+        'escpos-raster',
+        printProgram: const [
+          {'tx': '1d 76 30 00 {u16le:width_bytes} {u16le:height_px}'},
+        ],
+      );
+      expect(fallback.isGenericFallback, isTrue);
+      expect(fallback.inferredLanguage, 'escpos');
+      expect(matchProfileForLanguage([fallback], 'escpos'), isNull);
+    });
+
+    test('a real ESC/POS profile alongside the fallback still matches', () {
+      // The exclusion must not make ESC/POS unmatchable — only unmatchable
+      // *by the placeholder row*.
+      final profiles = [
+        _profile(
+          'escpos-raster',
+          printProgram: const [
+            {'tx': '1d 76 30 00 {u16le:width_bytes}'},
+          ],
+        ),
+        _speaking('real-escpos', 'escpos', names: ['^acme']),
+      ];
+      expect(matchProfileForLanguage(profiles, 'escpos')?.slug, 'real-escpos');
     });
   });
 

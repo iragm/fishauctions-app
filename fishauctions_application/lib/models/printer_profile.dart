@@ -73,7 +73,13 @@ class PrinterProfile {
   /// The command-program schema version this build can interpret. Profiles
   /// with a newer `schema_version` are ignored on parse — the backend bumps a
   /// profile's version when it uses step types an older app can't run.
-  static const supportedSchemaVersion = 1;
+  ///
+  /// **v2 exists to be unused for a while.** It adds what ZPL needs — a
+  /// `{total_bytes}` placeholder, a hex-encoded `tx_raster`, and exact-value
+  /// status maps — and shipping the interpreter *before* any profile uses it
+  /// is the entire point: a v2 row authored next year then works on the app
+  /// people already have. Ship the reader first, write the row later.
+  static const supportedSchemaVersion = 2;
 
   final String slug;
   final String name;
@@ -120,6 +126,23 @@ class PrinterProfile {
 
   /// Whether [bleName] matches any of this profile's name patterns.
   bool matchesName(String bleName) => _matchesAny(bleNamePatterns, bleName);
+
+  /// True when the profile declares no way to recognise a printer at all — no
+  /// name, model or manufacturer patterns, and no service UUID.
+  ///
+  /// Such a profile is a *manual* option, not a match candidate: the raw
+  /// ESC/POS row exists so a user with an unknown printer has something to
+  /// try, and its 384 px printhead and blank GATT ids are placeholders, not
+  /// facts about anyone's hardware. Every automatic path must therefore skip
+  /// it — [matchProfileForDeviceInfo] already does so implicitly (empty
+  /// patterns match nothing, a blank service UUID claims nothing), and
+  /// language matching has to do so explicitly, because "answers ESC/POS" is
+  /// true of a great many printers this profile would drive at the wrong size.
+  bool get isGenericFallback =>
+      bleNamePatterns.isEmpty &&
+      modelPatterns.isEmpty &&
+      manufacturerPatterns.isEmpty &&
+      serviceUuid.isEmpty;
 
   /// Which command language this profile speaks, read off its own print
   /// program.
@@ -307,4 +330,35 @@ enum ProfileMatch {
     return (claimants.first, ProfileMatch.serviceUuid);
   }
   return null;
+}
+
+/// Picks the profile for a printer that answered a `PrinterProbe` query in
+/// [language], or null when the answer isn't decisive.
+///
+/// Decisive means **exactly one non-fallback profile speaks it**. Both halves
+/// carry weight:
+///
+///  * *Exactly one* — knowing a printer speaks TSPL says nothing about its
+///    printhead width or GATT ids, so choosing between several TSPL profiles
+///    would be a coin flip with a wrong-looking label on the other side.
+///  * *Non-fallback* — a profile that declares no way to recognise a printer
+///    ([PrinterProfile.isGenericFallback]) is a manual option whose numbers
+///    are placeholders. Counting it would make `escpos-raster` the unique
+///    ESC/POS speaker and hand it every printer that answers `DLE EOT`.
+///
+/// A companion to [matchProfileForDeviceInfo]; [profiles] is in preference
+/// order.
+PrinterProfile? matchProfileForLanguage(
+  List<PrinterProfile> profiles,
+  String? language,
+) {
+  if (language == null || language.isEmpty) {
+    return null;
+  }
+  final matches = [
+    for (final profile in profiles)
+      if (profile.inferredLanguage == language && !profile.isGenericFallback)
+        profile,
+  ];
+  return matches.length == 1 ? matches.single : null;
 }

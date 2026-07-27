@@ -33,6 +33,7 @@ class ProfilePrinterStatus {
   bool get paperJam => flags.contains('paper_jam');
   bool get lowBattery => flags.contains('low_battery');
   bool get overheated => flags.contains('overheated');
+  bool get noRibbon => flags.contains('no_ribbon');
 
   /// A user-facing reason printing can't start right now, or null if it can.
   /// Low battery is a warning, not a blocker, so it isn't returned here.
@@ -55,9 +56,12 @@ class ProfilePrinterStatus {
   /// and a printer that is both empty *and* open asks to be closed first,
   /// which it needs anyway.
   ///
-  /// The `status_flags` schema can only express bitmasks, so this ordering is
-  /// how the enumeration is survived; `BACKEND_SPEC.md` covers giving profiles
-  /// a real value-map instead.
+  /// Schema v1's `status_flags` could only express bitmasks, so this ordering
+  /// is how the enumeration is survived there. Schema v2 profiles can instead
+  /// give an exact `values` map (`{"07": ["cover_open", "no_ribbon"]}`), which
+  /// says what the printer actually means and needs no ordering trick — see
+  /// [PrinterProfileDriver._decodeStatus]. The ordering stays for every v1 row
+  /// still in the wild.
   PrinterException? get blocker {
     if (coverOpen) {
       return const PrinterException(
@@ -81,6 +85,11 @@ class ProfilePrinterStatus {
         'try again.',
       );
     }
+    if (noRibbon) {
+      return const PrinterException(
+        'The printer is out of ribbon. Load a new ribbon, then try again.',
+      );
+    }
     return null;
   }
 }
@@ -91,6 +100,13 @@ class ProfilePrinterStatus {
 /// placeholders, `tx_raster` (the packed 1-bit bitmap), `delay_ms`, `await`
 /// (wait for a notify frame), and `repeat_per_copy`. No app release is needed
 /// for a new printer — its byte sequences live in a Django admin row.
+///
+/// Schema v2 adds what the languages this app hasn't met yet need, so that
+/// meeting them stays a data task: a `{total_bytes}` placeholder and
+/// `{u32le:…}` width (ZPL `^GF` carries a raster length no v1 placeholder can
+/// express), a hex-encoded `tx_raster` (ZPL `^GFA`, CPCL `EG`), and exact
+/// `status_flags.values` maps for printers whose status byte is an
+/// enumeration rather than a bitmask.
 class PrinterProfileDriver {
   PrinterProfileDriver(this._transport, this.profile);
 
@@ -251,7 +267,7 @@ class PrinterProfileDriver {
           latin1.encode(_substituteText(step['tx_text'] as String, ctx)),
         );
       } else if (step.containsKey('tx_raster')) {
-        await _transport.write(ctx.rasterOrThrow(_invalidProfile));
+        await _transport.write(_encodeRaster(step['tx_raster'], ctx));
       } else if (step.containsKey('delay_ms')) {
         await Future<void>.delayed(
           Duration(milliseconds: (step['delay_ms'] as num).toInt()),
@@ -270,6 +286,38 @@ class PrinterProfileDriver {
         throw _invalidProfile();
       }
     }
+  }
+
+  /// The packed raster in the wire form this step asked for.
+  ///
+  /// `{"tx_raster": true}` (schema v1) sends the bytes raw, which is what every
+  /// binary raster command wants — ESC/POS `GS v 0`, TSPL `BITMAP`, ZPL
+  /// `^GFB`. Schema v2 allows `{"tx_raster": {"encoding": "hex"}}` for the
+  /// languages whose graphics command carries the bitmap as *ASCII hex* rather
+  /// than bytes: ZPL `^GFA` and CPCL `EG` both do, and neither can be driven
+  /// without it. Hex doubles the bytes on the wire, so it is opt-in per
+  /// profile, never a default.
+  List<int> _encodeRaster(dynamic spec, _ProgramContext ctx) {
+    final raster = ctx.rasterOrThrow(_invalidProfile);
+    final encoding = switch (spec) {
+      true => 'binary',
+      Map() => spec['encoding'] as String? ?? 'binary',
+      // `{"tx_raster": false}` is a step that does nothing, which is an
+      // authoring mistake rather than an instruction to skip the label body.
+      _ => throw _invalidProfile(),
+    };
+    return switch (encoding) {
+      'binary' => raster,
+      // Uppercase: ZPL's own documentation and every ^GFA example use it, and
+      // some older firmware parsers are documented as case-sensitive here.
+      'hex' => latin1.encode(
+        raster
+            .map((b) => b.toRadixString(16).padLeft(2, '0'))
+            .join()
+            .toUpperCase(),
+      ),
+      _ => throw _invalidProfile(),
+    };
   }
 
   Future<void> _awaitFrame(
@@ -328,6 +376,20 @@ class PrinterProfileDriver {
       return ProfilePrinterStatus.ready;
     }
     final status = frame[index];
+    // Schema v2: an exact value → conditions map, which beats a bitmask
+    // whenever the printer answers with an enumeration instead of independent
+    // bits. TSPL is the worked example — `<ESC>!?` answers 07 for "no ribbon
+    // AND head open", not 0x04|0x02|0x01 — and it is what a profile authored
+    // from `PrinterCharacterization`'s captures carries, because those record
+    // the byte each physical state actually produced.
+    final values = profile.statusFlags['values'];
+    if (values is Map) {
+      final exact =
+          values[status.toRadixString(16).padLeft(2, '0')] ?? values['$status'];
+      if (exact is List) {
+        return ProfilePrinterStatus({for (final f in exact) '$f'});
+      }
+    }
     final flags = <String>{};
     final specs = profile.statusFlags['flags'];
     if (specs is Map) {
@@ -360,9 +422,15 @@ class PrinterProfileDriver {
 
   // ── Placeholder substitution ──────────────────────────────────────────────
 
+  /// Placeholders that may appear as a bare `{name}` in a `tx` hex template,
+  /// i.e. the ones that are a single byte by construction. Dimensions and
+  /// lengths are not: they belong in `{u16le:…}` or `{u32le:…}`.
+  static const _bareBytePlaceholders = {'density', 'paper_type', 'copies'};
+
   /// Compiles a `tx` template ("1d 76 30 00 {u16le:width_bytes} …") to bytes.
   /// Whitespace separates tokens; each token is hex bytes or a placeholder
-  /// (`{name}` → one byte, `{u16le:name}` → two bytes little-endian).
+  /// (`{name}` → one byte, `{u16le:name}` → two bytes little-endian,
+  /// `{u32le:name}` → four, schema v2).
   List<int> _compileHex(String template, _ProgramContext ctx) {
     final bytes = <int>[];
     for (final token in template.trim().split(RegExp(r'\s+'))) {
@@ -376,7 +444,26 @@ class PrinterProfileDriver {
           bytes
             ..add(value & 0xff)
             ..add((value >> 8) & 0xff);
+        } else if (name.startsWith('u32le:')) {
+          // Schema v2. A whole-raster byte count overflows 16 bits on any
+          // real label — a 4″ × 6″ at 203 dpi is ~270 kB — so a length field
+          // that size needs its own width.
+          final value = ctx.intValue(name.substring(6), _invalidProfile);
+          for (var shift = 0; shift < 32; shift += 8) {
+            bytes.add((value >> shift) & 0xff);
+          }
         } else {
+          // A bare placeholder renders as a single byte, so only the
+          // genuinely byte-sized values may use one. Rejecting the dimensions
+          // outright — rather than when they happen to exceed 255 — is
+          // deliberate: a size-dependent check would let a profile authored
+          // against a small test label pass, then truncate a length field on
+          // the first real 4×6 and print half a label for reasons nobody
+          // could see. Wrong is better found at authoring time, identically
+          // every time, which is also what lets the backend's validator agree.
+          if (!_bareBytePlaceholders.contains(name)) {
+            throw _invalidProfile();
+          }
           bytes.add(ctx.intValue(name, _invalidProfile).clamp(0, 255));
         }
       } else {
@@ -487,6 +574,12 @@ class _ProgramContext {
         'density' => density,
         'paper_type' => paperType,
         'copies' => copies,
+        // Schema v2. The size of the whole packed raster, which several
+        // graphics commands demand up front and none of them can derive:
+        // ZPL's `^GFa,{total_bytes},{total_bytes},{width_bytes},` is the
+        // reason this exists. The schema has no arithmetic, so a profile
+        // cannot compute it from width_bytes × height_px itself.
+        'total_bytes' => widthBytes * heightPx,
         // width_mm/height_mm are fractional — meaningless as a raw byte.
         _ => throw invalid(),
       };

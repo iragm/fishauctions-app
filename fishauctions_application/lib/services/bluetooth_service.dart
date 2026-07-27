@@ -353,6 +353,20 @@ class BluetoothService implements PrinterTransport {
   Map<String, PrinterReply> get lastProbeReplies => _lastProbeReplies;
   Map<String, PrinterReply> _lastProbeReplies = const {};
 
+  /// Runs [PrinterProbe]'s sweep over the *already open* link and remembers the
+  /// answers as [lastProbeReplies].
+  ///
+  /// [identify] probes as part of deciding what an unknown printer is, but a
+  /// printer recognised by its BLE name never goes down that path — so nothing
+  /// has asked it anything by the time the user offers to help characterise
+  /// it. This is that missing sweep, on a link that is already up.
+  Future<Map<String, PrinterReply>> probe() async {
+    if (!isConnected) {
+      return const {};
+    }
+    return _lastProbeReplies = await PrinterProbe.run(this);
+  }
+
   /// Opens a link to [device] purely to ask it what it is, then closes it
   /// again. Connecting is the only way to reach GATT — a BLE advertisement
   /// carries a name and service ids, not a model number — so this is what the
@@ -694,14 +708,29 @@ class BluetoothService implements PrinterTransport {
     return null;
   }
 
-  /// Dumps the printer's whole GATT tree to the log. A new printer model is
-  /// supported by writing a profile, and a profile has to name the service and
-  /// characteristics to talk over — this is where those ids come from, so it's
-  /// logged for every connection rather than hidden behind a debug flag.
+  /// The GATT tree of the last device [_openLink] connected to: every service,
+  /// its characteristics, and their properties.
+  ///
+  /// Reported to the backend rather than only logged, because these ids *are*
+  /// the profile. A profile's `service_uuid` / `write_characteristic_uuid` /
+  /// `notify_characteristic_uuid` can only be filled in by someone who can see
+  /// this tree, and the Y486BT taught us that guessing it wrong is silent — the
+  /// label goes to a serial module's control channel and simply never prints.
+  /// Before this, the tree existed only in a logcat buffer on a phone in
+  /// someone else's hand.
+  List<Map<String, dynamic>> get lastGattTree => _lastGattTree;
+  List<Map<String, dynamic>> _lastGattTree = const [];
+
+  /// Snapshots the printer's whole GATT tree, and logs it. A new printer model
+  /// is supported by writing a profile, and a profile has to name the service
+  /// and characteristics to talk over — this is where those ids come from, so
+  /// it's captured for every connection rather than hidden behind a debug flag.
   void _logGatt(BluetoothDevice device) {
+    final tree = <Map<String, dynamic>>[];
     final lines = <String>[];
     for (final s in device.servicesList) {
       lines.add('  service ${s.serviceUuid.str}');
+      final chars = <Map<String, dynamic>>[];
       for (final c in s.characteristics) {
         final p = c.properties;
         final props = [
@@ -710,10 +739,19 @@ class BluetoothService implements PrinterTransport {
           if (p.writeWithoutResponse) 'writeNR',
           if (p.notify) 'notify',
           if (p.indicate) 'indicate',
-        ].join(',');
-        lines.add('    char ${c.characteristicUuid.str} [$props]');
+        ];
+        chars.add({
+          'uuid': c.characteristicUuid.str.toLowerCase(),
+          'properties': props,
+        });
+        lines.add('    char ${c.characteristicUuid.str} [${props.join(',')}]');
       }
+      tree.add({
+        'uuid': s.serviceUuid.str.toLowerCase(),
+        'characteristics': chars,
+      });
     }
+    _lastGattTree = tree;
     _log.i(
       'Printer GATT ${device.remoteId.str} '
       '"${device.platformName}" mtu=${device.mtuNow}\n${lines.join('\n')}',

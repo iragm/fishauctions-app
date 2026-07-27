@@ -79,7 +79,15 @@ void main() {
         'escpos-raster',
       ]);
       for (final p in profiles) {
-        expect(p.schemaVersion, PrinterProfile.supportedSchemaVersion);
+        // v1 specifically, not "whatever this build supports": these mirror
+        // the backend's seed rows, which are v1, and none of them needs a v2
+        // feature. Pinning them to supportedSchemaVersion instead would mean
+        // every schema bump silently claims the seeds were rewritten.
+        expect(p.schemaVersion, 1);
+        expect(
+          p.schemaVersion,
+          lessThanOrEqualTo(PrinterProfile.supportedSchemaVersion),
+        );
         expect(p.printProgram, isNotEmpty);
       }
     });
@@ -409,4 +417,194 @@ void main() {
       );
     });
   });
+
+  // Schema v2 exists so the languages this app hasn't met yet can be added as
+  // Django rows rather than app releases. Nothing bundled uses it — these
+  // tests are the only thing keeping the interpreter honest until a real v2
+  // row lands, which is exactly the point of shipping the reader early.
+  group('schema v2', () {
+    test('a v2 profile is accepted; a v3 one is still dropped', () {
+      final parsed = parsePrinterProfiles('''
+        {"profiles": [
+          {"slug": "v2", "name": "V2", "schema_version": 2,
+           "print_program": [{"tx": "00"}]},
+          {"slug": "v3", "name": "V3", "schema_version": 3,
+           "print_program": [{"tx": "00"}]}
+        ]}
+      ''');
+      expect(parsed.map((p) => p.slug), ['v2']);
+    });
+
+    test('total_bytes is the whole packed raster, for ZPL ^GF', () async {
+      final t = _FakeTransport();
+      addTearDown(t.dispose);
+      // The shape of a real ZPL graphics command: a byte count no v1
+      // placeholder could express, then the raster as ASCII hex.
+      final profile = _v2('''
+        [{"tx_text": "^XA^GFA,{total_bytes},{total_bytes},{width_bytes},"},
+         {"tx_raster": {"encoding": "hex"}},
+         {"tx_text": "^XZ"}]
+      ''');
+      await PrinterProfileDriver(
+        t,
+        profile,
+      ).printLabel(_bitmap(bytesPerRow: 3, rows: 4));
+      expect(
+        String.fromCharCodes(t.writes.first),
+        // 3 bytes per row x 4 rows = 12.
+        '^XA^GFA,12,12,3,',
+      );
+    });
+
+    test('a hex-encoded raster goes out as uppercase ASCII hex', () async {
+      final t = _FakeTransport();
+      addTearDown(t.dispose);
+      final profile = _v2('[{"tx_raster": {"encoding": "hex"}}]');
+      final bitmap = LabelBitmap(
+        bytesPerRow: 2,
+        rows: 1,
+        data: Uint8List.fromList([0xAB, 0x0F]),
+      );
+      await PrinterProfileDriver(t, profile).printLabel(bitmap);
+      expect(String.fromCharCodes(t.writes.single), 'AB0F');
+    });
+
+    test('an explicit binary encoding still sends raw bytes', () async {
+      final t = _FakeTransport();
+      addTearDown(t.dispose);
+      final profile = _v2('[{"tx_raster": {"encoding": "binary"}}]');
+      final bitmap = LabelBitmap(
+        bytesPerRow: 2,
+        rows: 1,
+        data: Uint8List.fromList([0xAB, 0x0F]),
+      );
+      await PrinterProfileDriver(t, profile).printLabel(bitmap);
+      expect(t.writes.single, [0xAB, 0x0F]);
+    });
+
+    test('u32le renders a four-byte little-endian length', () async {
+      final t = _FakeTransport();
+      addTearDown(t.dispose);
+      final profile = _v2('[{"tx": "1b {u32le:total_bytes}"}]');
+      await PrinterProfileDriver(
+        t,
+        profile,
+      ).printLabel(_bitmap(bytesPerRow: 100, rows: 1000));
+      // 100,000 bytes = 0x000186A0.
+      expect(t.writes.single, [0x1b, 0xA0, 0x86, 0x01, 0x00]);
+    });
+
+    test('a dimension as a bare hex byte is rejected, not truncated', () async {
+      // Silently clamping a length field to 255 produces a printer that
+      // half-prints and a profile author with no idea why. Rejected for every
+      // label size, not just the ones that overflow, so the mistake can't hide
+      // behind a small test label.
+      final t = _FakeTransport();
+      addTearDown(t.dispose);
+      for (final name in ['total_bytes', 'width_bytes', 'height_px']) {
+        final profile = _v2('[{"tx": "1b {$name}"}]');
+        await expectLater(
+          () => PrinterProfileDriver(t, profile).printLabel(_bitmap()),
+          throwsA(isA<PrinterException>()),
+          reason: '{$name} is not a single byte',
+        );
+      }
+    });
+
+    test('the genuinely byte-sized placeholders still work bare', () async {
+      final t = _FakeTransport();
+      addTearDown(t.dispose);
+      final profile = _v2('[{"tx": "1b {density} {paper_type}"}]');
+      await PrinterProfileDriver(
+        t,
+        profile,
+      ).printLabel(_bitmap(), density: 2, paperType: 3);
+      expect(t.writes.single, [0x1b, 0x02, 0x03]);
+    });
+
+    test('an unknown raster encoding is a profile error', () async {
+      final t = _FakeTransport();
+      addTearDown(t.dispose);
+      final profile = _v2('[{"tx_raster": {"encoding": "base64"}}]');
+      await expectLater(
+        () => PrinterProfileDriver(t, profile).printLabel(_bitmap()),
+        throwsA(isA<PrinterException>()),
+      );
+    });
+
+    test('an exact status value map beats bitmask decoding', () async {
+      // The TSPL case that motivated the whole feature: 0x07 means "head open
+      // AND no ribbon", and a bitmask reading also lights up out_of_paper
+      // (0x04) and paper_jam (0x02) — telling the user to load labels that
+      // are already loaded.
+      final t = _FakeTransport(statusByte: 0x07);
+      addTearDown(t.dispose);
+      final profile = parsePrinterProfiles('''
+        {"profiles": [{
+          "slug": "v2-status", "name": "V2 status", "schema_version": 2,
+          "print_program": [{"tx_raster": true}],
+          "status_program": [{"tx": "1b 21 3f"}],
+          "status_flags": {"byte": 0,
+            "values": {"00": [], "01": ["cover_open"],
+                       "07": ["cover_open", "no_ribbon"]},
+            "flags": {"cover_open": "01", "paper_jam": "02",
+                      "out_of_paper": "04"}}
+        }]}
+      ''').single;
+      final status = await PrinterProfileDriver(t, profile).readStatus();
+      expect(status.flags, {'cover_open', 'no_ribbon'});
+      expect(status.outOfPaper, isFalse);
+      expect(status.paperJam, isFalse);
+      expect(status.blocker?.message, contains('cover is open'));
+    });
+
+    test('a value the map does not list falls back to the bitmask', () async {
+      final t = _FakeTransport(statusByte: 0x04);
+      addTearDown(t.dispose);
+      final profile = parsePrinterProfiles('''
+        {"profiles": [{
+          "slug": "v2-partial", "name": "V2 partial", "schema_version": 2,
+          "print_program": [{"tx_raster": true}],
+          "status_program": [{"tx": "1b 21 3f"}],
+          "status_flags": {"byte": 0, "values": {"00": []},
+            "flags": {"out_of_paper": "04"}}
+        }]}
+      ''').single;
+      expect(
+        (await PrinterProfileDriver(t, profile).readStatus()).outOfPaper,
+        isTrue,
+      );
+    });
+
+    test('no_ribbon blocks printing with its own message', () async {
+      final t = _FakeTransport(statusByte: 0x06);
+      addTearDown(t.dispose);
+      final profile = parsePrinterProfiles('''
+        {"profiles": [{
+          "slug": "v2-ribbon", "name": "V2 ribbon", "schema_version": 2,
+          "print_program": [{"tx_raster": true}],
+          "status_program": [{"tx": "1b 21 3f"}],
+          "status_flags": {"byte": 0, "values": {"06": ["no_ribbon"]}}
+        }]}
+      ''').single;
+      await expectLater(
+        () => PrinterProfileDriver(t, profile).printLabel(_bitmap()),
+        throwsA(
+          isA<PrinterException>().having(
+            (e) => e.message,
+            'message',
+            contains('out of ribbon'),
+          ),
+        ),
+      );
+    });
+  });
 }
+
+/// A schema v2 profile carrying [printProgram] and nothing else.
+PrinterProfile _v2(String printProgram) => parsePrinterProfiles('''
+  {"profiles": [{
+    "slug": "v2", "name": "V2", "schema_version": 2,
+    "print_program": $printProgram
+  }]}
+''').single;

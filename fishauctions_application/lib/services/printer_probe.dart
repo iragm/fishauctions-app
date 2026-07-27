@@ -67,16 +67,28 @@ class PrinterProbe {
     (name: 'd11s_status', language: 'd11s', bytes: const [0x10, 0xff, 0x40]),
   ];
 
-  /// Sends every query in turn over [transport] and returns the ones that got
-  /// an answer, keyed by query name. Queries that go unanswered are simply
-  /// absent — that silence is itself the useful signal, and reporting a map of
-  /// empty strings would only make the record harder to read.
+  /// The status/identity queries only — the ones worth re-asking once the
+  /// printer has been put into a known physical state (see
+  /// `PrinterCharacterization`). Re-sending the *whole* list at every step of
+  /// a guided capture would take half a minute per state and mostly re-record
+  /// silence.
+  static List<PrinterQuery> get statusQueries => [
+    for (final q in queries)
+      if (q.name.endsWith('_status')) q,
+  ];
+
+  /// Sends every query in [only] (default: all of [queries]) in turn over
+  /// [transport] and returns the ones that got an answer, keyed by query name.
+  /// Queries that go unanswered are simply absent — that silence is itself the
+  /// useful signal, and reporting a map of empty strings would only make the
+  /// record harder to read.
   ///
   /// Never throws: a probe is diagnostics running inside a pairing flow, and
   /// a printer that dislikes one of these must not break the pairing.
   static Future<Map<String, PrinterReply>> run(
     PrinterTransport transport, {
     Duration timeout = perQueryTimeout,
+    List<PrinterQuery>? only,
   }) async {
     final results = <String, PrinterReply>{};
     // Subscribe once for the whole sweep: several of these printers answer a
@@ -85,7 +97,7 @@ class PrinterProbe {
     StreamSubscription<Uint8List>? sub;
     try {
       sub = transport.notifications.listen(frames.add);
-      for (final query in queries) {
+      for (final query in only ?? queries) {
         if (!transport.isConnected) {
           break;
         }

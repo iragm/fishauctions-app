@@ -11,11 +11,13 @@ import '../providers/printer_provider.dart';
 import '../services/bluetooth_service.dart';
 import '../services/label_prefs_service.dart';
 import '../services/label_raster.dart';
+import '../services/printer_characterization.dart';
 import '../services/printer_probe.dart';
 import '../services/printer_profile_driver.dart';
 import '../services/printer_profile_service.dart';
 import '../services/printer_report_service.dart';
 import '../services/printer_test_label.dart';
+import 'printer_characterize_sheet.dart';
 
 /// The native "connect a Bluetooth printer" flow, shown as a modal bottom
 /// sheet *over* the current page — the `/printing/` web page stays the one
@@ -48,9 +50,43 @@ class PrinterConnectSheet extends ConsumerStatefulWidget {
       _PrinterConnectSheetState();
 }
 
+/// One row in the "available devices" list.
+///
+/// A BLE scan in an auction hall returns everything in the room — phones,
+/// earbuds, a car — and Android's bonded list adds every device the phone has
+/// ever paired with. So the list needs enough information to *rank* itself,
+/// not just render: [named] separates a device the user can recognise from a
+/// bare MAC address, and [bonded] flags the entries that came from the OS's
+/// pairing list rather than from the air.
+class _DeviceEntry {
+  const _DeviceEntry({
+    required this.device,
+    required this.name,
+    required this.named,
+    required this.bonded,
+  });
+
+  final BluetoothDevice device;
+  final String name;
+
+  /// The device advertised a name; false means [name] is its MAC address.
+  final bool named;
+
+  /// Came from the OS's already-paired list. Worth saying out loud: on Android
+  /// that list is mostly *classic* (BR/EDR) pairings, and a label printer
+  /// paired in Settings lands there — where a BLE connect can only ever time
+  /// out. Telling the user which entries those are beats explaining it in an
+  /// error message 15 seconds later.
+  final bool bonded;
+}
+
 class _PrinterConnectSheetState extends ConsumerState<PrinterConnectSheet> {
   // Discovered + known printers, keyed by BLE remote id (de-dups scan repeats).
-  final Map<String, ({BluetoothDevice device, String name})> _devices = {};
+  // `named` records whether the device actually advertised a name, because a
+  // row showing a MAC address is a row the user cannot recognise; `bonded` is
+  // the OS's already-paired list, which on Android includes classic pairings
+  // this app can't print over (see [_DeviceEntry]).
+  final Map<String, _DeviceEntry> _devices = {};
   List<PrinterProfile> _profiles = const [];
   bool _scanning = false;
   bool _connecting = false;
@@ -63,6 +99,13 @@ class _PrinterConnectSheetState extends ConsumerState<PrinterConnectSheet> {
   // When set, the error has a concrete fix the user can take from here.
   bool _needsBluetoothOn = false;
   bool _needsSettings = false;
+
+  // What the last connect learned about the printer, kept so the guided
+  // capture can report the same identity the pairing did rather than re-read
+  // it (and so it works for a printer matched on its BLE name, where nothing
+  // read the device at all).
+  PrinterDeviceInfo? _lastInfo;
+  ProfileMatch _lastMatch = ProfileMatch.bleName;
 
   StreamSubscription<List<ScanResult>>? _scanResultsSub;
   StreamSubscription<bool>? _scanStateSub;
@@ -149,7 +192,7 @@ class _PrinterConnectSheetState extends ConsumerState<PrinterConnectSheet> {
 
     // Known/bonded printers first — instant, and enough to reconnect.
     for (final d in await BluetoothService.instance.knownDevices()) {
-      _addDevice(d, d.platformName);
+      _addDevice(d, d.platformName, bonded: true);
     }
     if (!mounted) {
       return;
@@ -200,9 +243,48 @@ class _PrinterConnectSheetState extends ConsumerState<PrinterConnectSheet> {
     }
   }
 
-  void _addDevice(BluetoothDevice device, String name) {
+  void _addDevice(BluetoothDevice device, String name, {bool bonded = false}) {
     final id = device.remoteId.str;
-    _devices[id] = (device: device, name: name.isNotEmpty ? name : id);
+    // A scan repeat can carry the name an earlier, nameless advertisement
+    // lacked — keep the better of the two rather than the latest.
+    final existing = _devices[id];
+    if (existing != null && existing.named && name.isEmpty) {
+      return;
+    }
+    _devices[id] = _DeviceEntry(
+      device: device,
+      name: name.isNotEmpty ? name : id,
+      named: name.isNotEmpty,
+      bonded: bonded || (existing?.bonded ?? false),
+    );
+  }
+
+  /// The device list in the order worth showing it.
+  ///
+  /// Ranked, not filtered: filtering by name or service UUID would hide
+  /// exactly the unknown printers this flow exists to onboard. So everything
+  /// stays visible and the ones the user is most likely to want float up —
+  /// recognised printers first, then anything with a name, then the bare MAC
+  /// addresses that are almost never a printer. Ties keep discovery order, so
+  /// the list doesn't reshuffle under the user's finger mid-scan.
+  List<_DeviceEntry> get _sortedDevices {
+    // Bucketed rather than sorted: concatenating preserves insertion order
+    // within each rank for free (bonded first, then the order the scan found
+    // them), where a comparator sort would need an explicit tiebreak to stop
+    // the list reshuffling under the user's finger mid-scan.
+    final recognised = <_DeviceEntry>[];
+    final named = <_DeviceEntry>[];
+    final unnamed = <_DeviceEntry>[];
+    for (final entry in _devices.values) {
+      if (_matchProfile(entry.name) != null) {
+        recognised.add(entry);
+      } else if (entry.named) {
+        named.add(entry);
+      } else {
+        unnamed.add(entry);
+      }
+    }
+    return [...recognised, ...named, ...unnamed];
   }
 
   Future<void> _turnOnBluetooth() async {
@@ -325,6 +407,10 @@ class _PrinterConnectSheetState extends ConsumerState<PrinterConnectSheet> {
                   'Make sure it is powered on and in range.';
       });
     } else {
+      // Remember how this printer was resolved: it decides whether the guided
+      // capture is worth offering, and it is what the report says.
+      _lastInfo = info;
+      _lastMatch = match;
       unawaited(_report(info, name: name, profile: resolved, match: match));
       // Deliberately does *not* close the sheet on success. A connection only
       // proves the link is open, not that the profile drives this printer —
@@ -333,9 +419,16 @@ class _PrinterConnectSheetState extends ConsumerState<PrinterConnectSheet> {
       // the only moment the user is holding the printer and expecting to fuss
       // with it.
       setState(() {
-        _notice =
-            'Connected with the "${resolved.name}" profile. Print a test '
-            'label to confirm it works before you need it.';
+        _notice = match == ProfileMatch.manual
+            // Nothing recognised this printer, so the profile is the user's
+            // own guess. Say so, and point at the two things that fix it:
+            // proving the guess, and telling us enough to add a real profile.
+            ? 'Connected using the "${resolved.name}" profile — we didn\'t '
+                  'recognise this printer, so that was a guess. Print a test '
+                  'label to check it, and tap "Improve support" to send us '
+                  'what it is.'
+            : 'Connected with the "${resolved.name}" profile. Print a test '
+                  'label to confirm it works before you need it.';
       });
     }
   }
@@ -462,6 +555,51 @@ class _PrinterConnectSheetState extends ConsumerState<PrinterConnectSheet> {
 
   Future<void> _unpair() async {
     await ref.read(printerProvider.notifier).forget();
+  }
+
+  PrinterProfile? _profileBySlug(String? slug) {
+    for (final profile in _profiles) {
+      if (profile.slug == slug) {
+        return profile;
+      }
+    }
+    return null;
+  }
+
+  /// Opens the guided capture that turns this printer into a support request.
+  ///
+  /// Makes sure the link is up and the probe sweep has run first: a printer
+  /// matched on its BLE name was never asked anything, and the capture's whole
+  /// value is the *comparison* between a known-good reading and the ones the
+  /// user induces, which needs to be in the same language.
+  Future<void> _characterize() async {
+    setState(() {
+      _error = null;
+      _notice = null;
+    });
+    try {
+      final notifier = ref.read(printerProvider.notifier);
+      final printer = await notifier.ensureConnected();
+      if (BluetoothService.instance.lastProbeReplies.isEmpty) {
+        await BluetoothService.instance.probe();
+      }
+      final info =
+          _lastInfo ??
+          await BluetoothService.instance.readDeviceInfo(name: printer.name);
+      if (!mounted) {
+        return;
+      }
+      await PrinterCharacterizeSheet.show(
+        context,
+        info: info,
+        profile: _profileBySlug(printer.profileSlug),
+        match: _lastMatch,
+      );
+    } on PrinterException catch (e) {
+      _failTest(e.message);
+    } on Object catch (e) {
+      _failTest('Could not reach the printer ($e). Make sure it is on.');
+    }
   }
 
   /// How tall a test label to print when the user's label size is unknown —
@@ -625,6 +763,17 @@ class _PrinterConnectSheetState extends ConsumerState<PrinterConnectSheet> {
                         onPressed: _testing ? null : _unpair,
                         child: const Text('Unpair'),
                       ),
+                      // Only when it would teach us something: a printer whose
+                      // profile already decodes its status has no codes left
+                      // to collect, and offering a diagnostics wizard to a
+                      // user who is simply printing labels is noise.
+                      if (PrinterCharacterization.isUseful(
+                        _profileBySlug(saved.profileSlug),
+                      ))
+                        TextButton(
+                          onPressed: _testing ? null : _characterize,
+                          child: const Text('Improve support'),
+                        ),
                       TextButton(
                         onPressed: _testing ? null : _testPrint,
                         child: Text(
@@ -706,12 +855,24 @@ class _PrinterConnectSheetState extends ConsumerState<PrinterConnectSheet> {
                       'No devices found. Make sure the printer is on.',
                     ),
                   ),
-                ..._devices.values.map((entry) {
+                ..._sortedDevices.map((entry) {
                   final match = _matchProfile(entry.name);
                   return ListTile(
-                    leading: const Icon(Icons.bluetooth),
+                    leading: Icon(
+                      match != null ? Icons.print : Icons.bluetooth,
+                      color: match != null
+                          ? Theme.of(context).colorScheme.primary
+                          : null,
+                    ),
                     title: Text(entry.name),
-                    subtitle: Text(match?.name ?? entry.device.remoteId.str),
+                    subtitle: Text(
+                      [
+                        if (match != null) match.name,
+                        if (entry.bonded) 'Already paired with this phone',
+                        if (match == null && entry.named)
+                          entry.device.remoteId.str,
+                      ].join(' · '),
+                    ),
                     enabled: !_connecting,
                     onTap: () => _connect(entry.device, entry.name),
                   );

@@ -219,7 +219,11 @@ POST /api/mobile/printers/observed/
   new row belongs in.
 
 **Until this lands** the app still sends the fields; DRF drops unknown keys, so
-nothing breaks and nothing is recorded.
+nothing breaks and nothing is recorded. **That silent drop is the reason this
+is the highest-value item in Part U**: the app has been collecting exactly the
+evidence needed to author profiles, and the server has been discarding it on
+arrival. Part Y adds three more fields to the same payload and depends on this
+one being accepted first.
 
 ### U2. `matched_by` needs a `probe` choice
 
@@ -406,6 +410,225 @@ process, so a deployment without the endpoint behaves exactly as today.
   Bluetooth card wanting to be findable without scrolling matters more than it
   used to (and Part V's "reach the sheet while connected" is the other half of
   that).
+
+---
+
+## Part X — Command-program schema v2 (the app side has landed)
+
+**The app already interprets v2** (`PrinterProfile.supportedSchemaVersion = 2`,
+shipped 2026-07-26). Nothing uses it yet, and that is deliberate: an app can
+only run a schema it was built with, so the reader has to ship *before* the
+first row that needs it or the row costs a release after all. Everything below
+is additive — every v1 row keeps working unchanged, and v1 remains the correct
+`schema_version` for a profile that needs none of it.
+
+Bump a profile to `schema_version: 2` **only** when it uses one of these.
+Older app builds will then correctly ignore it rather than mis-drive a printer.
+
+### X1. `{total_bytes}` placeholder + `{u32le:…}` width
+
+**This is what unblocks ZPL, i.e. Zebra, i.e. the largest label-printer family
+we currently cannot support at all.** ZPL's graphics command is:
+
+```
+^GFa,{total_bytes},{total_bytes},{width_bytes},<data>
+```
+
+`total_bytes` is `width_bytes × height_px`, and the schema has no arithmetic,
+so no v1 profile can express it. Same shape appears in CPCL and several vendor
+protocols.
+
+- New scalar placeholder `total_bytes`, valid in `tx_text` (ASCII decimal) and
+  in `{u32le:total_bytes}` (four-byte little-endian).
+- New `u32le` function alongside `u16le`. `U32LE_PLACEHOLDERS = {total_bytes,
+  width_bytes, height_px, width_px}` — 16 bits overflows on a real raster
+  (a 4″ × 6″ at 203 dpi is ~270 kB).
+
+**Validator change with teeth:** a *bare* `{name}` in a `tx` hex template
+renders as a single byte, so only genuinely byte-sized values may appear there.
+The app now rejects `{total_bytes}`, `{width_bytes}`, `{height_px}` and
+`{width_px}` in that position **unconditionally** — not only when the value
+happens to exceed 255. A size-dependent check would let a profile authored
+against a small test label validate and then truncate a length field on the
+first 4×6, printing half a label for a reason nobody can see. Please mirror
+this in `_check_placeholders` so the admin form rejects it at authoring time:
+
+```python
+BARE_BYTE_PLACEHOLDERS = frozenset({"density", "paper_type", "copies"})
+# every other scalar must be used via u16le:/u32le: inside a `tx`
+```
+
+### X2. `tx_raster` with an encoding
+
+```jsonc
+{"tx_raster": true}                       // v1, unchanged: raw bytes
+{"tx_raster": {"encoding": "binary"}}     // v2, same thing, explicit
+{"tx_raster": {"encoding": "hex"}}        // v2: uppercase ASCII hex
+```
+
+ZPL `^GFA` and CPCL `EG` carry the bitmap as ASCII hex rather than bytes and
+cannot be driven without this. Hex doubles the bytes on the wire, so it stays
+opt-in per profile. Validator: accept `true` or an object whose `encoding` is
+`binary`/`hex`; reject `false` (a step that does nothing is a typo, not an
+instruction to omit the label body).
+
+### X3. `status_flags.values` — exact codes instead of a bitmask
+
+**This is the one that pays for the Part Y capture flow**, and it fixes a real
+wart in the current TSPL row.
+
+```jsonc
+"status_flags": {
+  "byte": 0,
+  "values": {                       // NEW: exact status byte → conditions
+    "00": [],
+    "01": ["cover_open"],
+    "02": ["paper_jam"],
+    "03": ["paper_jam", "cover_open"],
+    "04": ["out_of_paper"],
+    "05": ["out_of_paper", "cover_open"],
+    "06": ["no_ribbon"],
+    "07": ["no_ribbon", "cover_open"]
+  },
+  "flags": {"cover_open": "01", "paper_jam": "02"}   // kept as the fallback
+}
+```
+
+Lookup order in the app: exact `values` match (hex key, `"0a"` style — a
+decimal string key is also accepted) → else the `flags` bitmask → else ready.
+So a partial `values` map is fine.
+
+**Why:** TSPL's `<ESC>!?` answers an *enumeration*, not independent bits. A
+Y486BT with nothing but its lid open answers `07`, which a bitmask reading
+decodes as out-of-paper **and** jammed **and** open — telling the user to load
+labels that are sitting right there. The app currently survives this by
+checking `cover_open` first (every odd value in that table means head open),
+which is a real trick that works but only for this one table. `values` states
+the truth instead.
+
+Recognised condition names: `cover_open`, `out_of_paper`, `paper_jam`,
+`overheated`, `low_battery`, `printing`, and **`no_ribbon`** (new — the app now
+has a message for it: "The printer is out of ribbon.").
+
+The `tspl-raster` seed row in Part T should carry the `values` map above.
+
+---
+
+## Part Y — Turning an unknown printer into a profile automatically
+
+The ask this answers: *pick a printer → it either works, or we collect
+everything we can and generate a request to add it.* Part U covers what the app
+can learn by **asking** the printer. This part covers the one thing no query can
+discover — **what its status byte means** — plus getting the rest somewhere a
+human can act on it.
+
+**The app side has landed** (`lib/services/printer_characterization.dart`,
+`lib/widgets/printer_characterize_sheet.dart`). A "Improve support" button in
+the connect sheet walks the user through four physical states, capturing the
+printer's status reply in each:
+
+| step id | user does | means |
+|---|---|---|
+| `ready` | labels loaded, cover closed | (no conditions) |
+| `cover_open` | opens cover, labels still in | `cover_open` |
+| `no_labels_cover_open` | takes the roll out | `cover_open`, `out_of_paper` |
+| `no_labels` | closes cover, still empty | `out_of_paper` |
+
+Because each state's meaning is known in advance, the byte it produces is a
+*derivation*, not a guess — the app computes the `status_flags.values` map from
+X3 and sends it pre-built. Working this out for the Y486BT took someone with the
+hardware and an afternoon; this is that afternoon as four button presses, done
+by whoever happens to own the printer.
+
+### Y1. Accept the extra fields on `printers/observed/`
+
+All optional, all additive to the Part U1 payload:
+
+```jsonc
+POST /api/mobile/printers/observed/
+{
+  // … Part U1 fields (ble_name, model, probe_replies, probed_language, …)
+
+  "gatt": [                          // full service/characteristic tree
+    {"uuid": "49535343-fe7d-4ae5-8fa9-9fafd205e455",
+     "characteristics": [
+       {"uuid": "49535343-8841-43f4-a8d4-ecbe34729bb3",
+        "properties": ["write", "writeNR"]},
+       {"uuid": "49535343-1e4d-4bd9-ba61-23c647249616",
+        "properties": ["notify"]}
+     ]}
+  ],
+
+  "status_captures": {               // per state, per query
+    "ready":                {"tspl_status": {"hex": "00", "ascii": "."}},
+    "cover_open":           {"tspl_status": {"hex": "01", "ascii": "."}},
+    "no_labels_cover_open": {"tspl_status": {"hex": "05", "ascii": "."}},
+    "no_labels":            {"tspl_status": {"hex": "04", "ascii": "."}}
+  },
+
+  "derived_status_values": {         // ready to paste into a profile row
+    "00": [], "01": ["cover_open"],
+    "05": ["cover_open", "out_of_paper"], "04": ["out_of_paper"]
+  },
+
+  "status_ambiguities": [            // present only when the printer can't
+    "01: cover_open and no_labels_cover_open are indistinguishable"
+  ]
+}
+```
+
+**Backend work:**
+- `ObservedPrinter.gatt = models.JSONField(default=list, blank=True)`
+- `ObservedPrinter.status_captures = models.JSONField(default=dict, blank=True)`
+- `ObservedPrinter.derived_status_values = models.JSONField(default=dict, blank=True)`
+- `ObservedPrinter.status_ambiguities = models.JSONField(default=list, blank=True)`
+- `characterized = models.BooleanField(default=False)` — set when
+  `status_captures` is non-empty. This is the admin's work queue filter:
+  a characterized row has everything needed to write a profile.
+- Same leniency as the rest of the endpoint: cap the JSON size, never 400.
+
+**`gatt` matters on its own.** A profile's `service_uuid` /
+`write_characteristic_uuid` / `notify_characteristic_uuid` can only be filled
+in by someone who can see this tree, and picking them wrong is *silent* — the
+Y486BT's first writable characteristic is its radio module's control channel,
+so labels went nowhere. Until now that tree existed only in a logcat buffer on
+the user's phone.
+
+### Y2. Admin action: "Draft a profile from this observation"
+
+The payoff. On a characterized `ObservedPrinter`, one action that creates a
+disabled `ThermalPrinterProfile` pre-filled from the row:
+
+| profile field | from |
+|---|---|
+| `slug` / `name` | model or BLE name, slugified — editable |
+| `model_patterns` | `^` + the reported model, escaped |
+| `manufacturer_patterns` | the reported manufacturer |
+| `service_uuid`, `write_characteristic_uuid`, `notify_characteristic_uuid` | `gatt`: the vendor service, its writable characteristic, its notify characteristic (skipping `1800`/`1801`/`180a`/`180f`) |
+| `command_language` | `probed_language` (Part U3) |
+| `print_program`, `status_program` | the language's template (see below) |
+| `status_flags` | `{"byte": 0, "values": derived_status_values}` |
+| `schema_version` | 2 when the template or status map needs it |
+| `notes` | the raw `probe_replies` + any `status_ambiguities`, verbatim |
+| `enabled` | **False** — a human confirms, then the user's next print picks it up |
+
+Keep a small dict of per-language `print_program` templates (the TSPL one is
+Part T's; ESC/POS is the `escpos-raster` row's; ZPL is now expressible with
+X1+X2). `print_width_px` and `dpi` are the only fields that still need human
+judgement, and they can be read off the printer's spec sheet.
+
+Left disabled by default because a drafted profile is a hypothesis: the person
+who submitted it is the one holding the printer, and **"Print test label"** in
+the app is what confirms it.
+
+### Y3. Optional, later: tell the user when their printer lands
+
+An `ObservedPrinter` knows its `user`. When a profile whose `model_patterns`
+match a previously-`manual` observation is enabled, that user's next connect
+will silently start matching properly — but a notification ("your printer is
+supported now, reconnect it on the printing page") closes a loop that otherwise
+looks to them like nothing happened. Rides the Part 2 push pipeline; skip until
+that is live.
 
 ---
 

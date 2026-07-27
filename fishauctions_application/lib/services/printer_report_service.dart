@@ -4,6 +4,7 @@ import 'package:logger/logger.dart';
 import '../models/printer_device_info.dart';
 import '../models/printer_profile.dart';
 import 'api_service.dart';
+import 'printer_characterization.dart';
 import 'printer_probe.dart';
 
 final _log = Logger();
@@ -36,11 +37,20 @@ class PrinterReportService {
   /// between a report saying "some printer called FSC-BT986" and one saying
   /// "answers TSPL `<ESC>!?` with 00, ignores ESC/POS and ZPL" — the latter is
   /// enough to write a working profile without owning the hardware.
+  ///
+  /// [gatt] is the device's full service/characteristic tree, which is where a
+  /// profile's GATT ids come from and is otherwise visible only in a logcat
+  /// buffer on the user's phone. [characterization], when the user completed
+  /// the guided capture, carries the status byte each physical printer state
+  /// produces — i.e. the one thing no amount of querying can discover on its
+  /// own, and the input to a profile's `status_flags.values`.
   Future<void> report(
     PrinterDeviceInfo info, {
     required PrinterProfile? profile,
     required ProfileMatch match,
     Map<String, PrinterReply> probeReplies = const {},
+    List<Map<String, dynamic>> gatt = const [],
+    PrinterCharacterizationResult? characterization,
   }) async {
     if (_unavailable) {
       return;
@@ -59,6 +69,11 @@ class PrinterReportService {
             },
             'probed_language': PrinterProbe.languageFrom(probeReplies),
           },
+          if (gatt.isNotEmpty) 'gatt': gatt,
+          // Overwrites probe_replies/probed_language with the characterization
+          // run's own, which is correct: they came from the same sweep, and it
+          // also carries the per-state captures they belong with.
+          if (characterization != null) ...characterization.toJson(),
         },
       );
     } on DioException catch (e) {
