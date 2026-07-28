@@ -108,7 +108,7 @@ dependencies {
     // version in sync with squareSdkVersion in the plugin's android/build.gradle
     // (currently 2.5.0); the Square maven repo is declared in the root
     // android/build.gradle.kts.
-    implementation("com.squareup.sdk:mobile-payments-sdk:2.5.0")
+    implementation("com.squareup.sdk:mobile-payments-sdk:2.6.0")
 
     // AR lot mode's camera pipeline (ar/): ARCore owns the camera for
     // visual-inertial pose tracking (replaces the pedometer's coarse
@@ -116,6 +116,6 @@ dependencies {
     // detection — the same detection engine the mobile_scanner package used
     // for this screen, so detection quality is unchanged. See
     // ar/ArSessionManager.kt for why these two must share one camera client.
-    implementation("com.google.ar:core:1.49.0")
+    implementation("com.google.ar:core:1.54.0")
     implementation("com.google.mlkit:barcode-scanning:17.3.0")
 }
