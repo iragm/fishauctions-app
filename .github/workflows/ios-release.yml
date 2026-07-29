@@ -197,10 +197,25 @@ jobs:
           --build-number=${{ github.run_number }}
           --build-name=$BUILD_NAME
 
-      # The archive is built UNSIGNED on purpose; every signature this build
-      # ships is applied by the export step below. That split exists because
-      # `xcodebuild archive` under automatic signing insists on a *development*
-      # profile, which this team cannot have.
+      # The archive is AD-HOC signed on purpose; the real signature is applied by
+      # the export step below. That split exists because `xcodebuild archive`
+      # under automatic signing insists on a *development* profile, which this
+      # team cannot have.
+      #
+      # Archive-then-resign is how Xcode has always worked: the archive is signed
+      # for development, and choosing a distribution method at export re-signs it.
+      # Ad-hoc (`CODE_SIGN_IDENTITY=-`) satisfies the first half without a
+      # provisioning profile — and therefore without a registered device — while
+      # still producing a properly signed bundle for the export to re-sign. It
+      # also doesn't trip the "conflicting provisioning settings" error that a
+      # real identity does under CODE_SIGN_STYLE=Automatic, because ad-hoc has no
+      # profile to conflict over. This is what Xcode Cloud does; credit to
+      # https://developer.apple.com/forums/thread/756119 for working it out.
+      #
+      # NOT `CODE_SIGNING_ALLOWED=NO`. A fully unsigned archive is the recipe for
+      # exporting an *unsigned* IPA, and it pairs with `signingStyle: manual` +
+      # empty signing keys in ExportOptions; `signingStyle: automatic` expects a
+      # normally-signed bundle to re-sign.
       #
       # Observed across three runs, so it's worth writing down: under
       # CODE_SIGN_STYLE=Automatic, Xcode resolves the archive's profile from
@@ -224,25 +239,23 @@ jobs:
       # argument, but it means minting and storing a distribution cert + profile
       # ourselves — the exact maintenance this pipeline was built to avoid.
       #
-      # So: skip signing at archive time. CODE_SIGNING_ALLOWED=NO turns off
-      # provisioning resolution too, so no profile is looked up and no device is
-      # needed. -exportArchive then signs the app and every embedded framework
-      # with an App Store distribution profile, which contains no device list and
-      # so has nothing to be blocked on. No signing settings are passed here at
-      # all (no DEVELOPMENT_TEAM, no CODE_SIGN_STYLE) — with signing off they are
-      # inert at best, and a leftover CODE_SIGN_STYLE=Automatic is what invites
-      # Xcode to go looking for a profile again.
-      - name: Archive (unsigned — export does the signing)
+      # No -allowProvisioningUpdates / -authenticationKey* here: ad-hoc signing
+      # never talks to App Store Connect, so this step needs no credentials and
+      # the export below is the only thing that reaches Apple.
+      - name: Archive (ad-hoc signed — export re-signs for distribution)
         if: ${{ inputs.distribute }}
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           xcodebuild -workspace ios/Runner.xcworkspace \
             -scheme Runner \
             -configuration Release \
             -destination 'generic/platform=iOS' \
             -archivePath "$RUNNER_TEMP/Runner.xcarchive" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_IDENTITY=- \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            CODE_SIGN_STYLE=Automatic \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
             archive
 
       # This is where signing actually happens, for the whole app bundle at once.

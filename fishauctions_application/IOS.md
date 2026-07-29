@@ -156,16 +156,24 @@ updates the SPM minimum deployment, and runs `pod install` for the
 CocoaPods-only plugins — `square_mobile_payments_sdk` ships no `Package.swift`)
 and then archives/exports with `xcodebuild` itself.
 
-**The archive is built unsigned and `-exportArchive` applies every signature.**
-That looks odd and is load-bearing: `xcodebuild archive` under automatic signing
-demands a *development* provisioning profile, and Apple will not issue one to a
-team with **zero registered devices** — which is every team that doesn't own a
-Mac or an iPhone yet. An App Store distribution profile, by contrast, contains
-no device list, so doing all the signing at export sidesteps the requirement
-entirely. The archive step therefore passes `CODE_SIGNING_ALLOWED=NO`
-(`CODE_SIGNING_REQUIRED=NO`, `CODE_SIGN_IDENTITY=""`) and **no signing settings
-whatsoever** — no `DEVELOPMENT_TEAM`, no `CODE_SIGN_STYLE`. Adding either back
-re-arms provisioning resolution and the device requirement returns.
+**The archive is ad-hoc signed and `-exportArchive` applies the real
+signature.** That looks odd and is load-bearing. Archive-then-resign is simply
+how Xcode works — the archive is signed for *development*, and choosing a
+distribution method at export re-signs it — but Apple will not issue a
+development profile to a team with **zero registered devices**, which is every
+team that doesn't own a Mac or an iPhone yet. Ad-hoc signing
+(`CODE_SIGN_IDENTITY=-`, `AD_HOC_CODE_SIGNING_ALLOWED=YES`, alongside
+`CODE_SIGN_STYLE=Automatic` + `DEVELOPMENT_TEAM`) satisfies the archive half
+with no provisioning profile and therefore no device, while still producing a
+properly signed bundle for the export to re-sign. It's also the one identity
+that doesn't trip the conflict described below, because ad-hoc has no profile to
+conflict over. This is what Xcode Cloud does; the recipe comes from
+[Apple DevForums 756119](https://developer.apple.com/forums/thread/756119).
+
+**Don't "simplify" that to `CODE_SIGNING_ALLOWED=NO`.** A fully unsigned archive
+is the recipe for exporting an *unsigned* IPA and pairs with
+`signingStyle: manual` + empty signing keys; `signingStyle: automatic` expects a
+normally-signed bundle to re-sign.
 
 Four runs established that there is no way to make a signed archive work here,
 so don't re-try these:
@@ -190,10 +198,12 @@ so don't re-try these:
    `CODE_SIGN_IDENTITY` is `Apple Development`, the same kind of identity
    wanting the same kind of profile. Same error as (1).
 
-The remaining alternative is **manual** signing — a distribution certificate and
-App Store profile we mint and store as secrets ourselves. That works with no
-devices, and is the fallback if export-time signing ever fails, but it
-reintroduces exactly the certificate maintenance this pipeline exists to avoid.
+Registering one device would also fix it — and is the answer Apple DTS gives —
+but a UDID requires a Mac or an iPhone, which is the thing we don't have yet.
+The other alternative is **manual** signing: a distribution certificate and App
+Store profile minted and stored as secrets ourselves. That works with no devices
+and is the fallback if export-time signing ever fails, but it reintroduces
+exactly the certificate maintenance this pipeline exists to avoid.
 
 `ExportOptions.plist` asks for `method=app-store` + `signingStyle=automatic`,
 and the export step gets the API key flags, so Xcode creates/fetches the
