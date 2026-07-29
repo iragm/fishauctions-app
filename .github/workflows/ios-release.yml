@@ -258,6 +258,33 @@ jobs:
             DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
             archive
 
+      # App Store Connect reports ITMS-90035/90205/90206 by *email*, minutes after
+      # a successful upload, so a broken build looks like a green run — that's how
+      # build 7 shipped. Square's setup phase (ios/Podfile, post_integrate) is
+      # what removes these, and its own guard means a phase that never ran fails
+      # silently. Check the archive instead of finding out later: both conditions
+      # below are rejections on upload, so failing here costs nothing and saves a
+      # round trip.
+      - name: Verify Square framework was cleaned up
+        if: ${{ inputs.distribute }}
+        run: |
+          fw="$RUNNER_TEMP/Runner.xcarchive/Products/Applications/Runner.app/Frameworks/SquareMobilePaymentsSDK.framework"
+          if [ ! -d "$fw" ]; then
+            echo "::error::SquareMobilePaymentsSDK.framework is not in the archive at all."
+            exit 1
+          fi
+          bad=0
+          if [ -d "$fw/Frameworks" ]; then
+            echo "::error::Nested Frameworks still present (ITMS-90205/90206) — Square's setup phase did not run. Check it is the LAST build phase on Runner; see IOS.md."
+            bad=1
+          fi
+          if [ -e "$fw/setup" ]; then
+            echo "::error::The setup executable is still present (ITMS-90035) — Square's setup phase did not run."
+            bad=1
+          fi
+          [ "$bad" = 0 ] && echo "Square framework is clean."
+          exit $bad
+
       # This is where signing actually happens, for the whole app bundle at once.
       # ExportOptions asks for method=app-store + signingStyle=automatic, so the
       # API key below lets Xcode create/fetch the distribution certificate and
