@@ -237,10 +237,26 @@ Cloud signing can only *use* an app record; it can't invent one. In order:
    under the icon); Primary Language English (U.S.); Bundle ID = the identifier
    from step 2; SKU any private string, e.g. `auction-fish-ios`; Full access.
 4. **App Store Connect API key**: Users and Access → Integrations → App Store
-   Connect API → Team Keys → Generate. Role **App Manager**. Download the
-   `.p8` **once** (Apple never shows it again). Key ID and Issuer ID are on
-   that page. If the archive later fails with a permissions error creating a
-   certificate, regenerate the key as **Admin**.
+   Connect API → Team Keys → Generate. Role **Admin** — nothing less works, see
+   below. Download the `.p8` **once** (Apple never shows it again). Key ID and
+   Issuer ID are on that page.
+
+   **Admin is not a suggestion.** Certificates, Identifiers & Profiles is a
+   separate permission area that only Admin and Account Holder reach over the
+   API, so cloud signing — which *creates* the distribution certificate — fails
+   under any lesser role with:
+
+   ```
+   error: exportArchive Cloud signing permission error
+   error: exportArchive No signing certificate "iOS Distribution" found
+   ```
+
+   That is what an App Manager key produces, and there is no way to grant a key
+   the "Access to Cloud Managed Distribution Certificate" setting that exists
+   for human users ([DevForums 698117](https://developer.apple.com/forums/thread/698117)).
+   A key's role also **cannot be edited after creation** — revoke it and
+   generate a new one, then update `APPSTORE_API_KEY_ID` and
+   `APPSTORE_API_PRIVATE_KEY` (the Issuer ID is per-team and doesn't change).
 5. Repo secrets (Settings → Secrets and variables → Actions):
    `APPSTORE_API_KEY_ID`, `APPSTORE_API_ISSUER_ID`, `APPSTORE_API_PRIVATE_KEY`
    (the whole `.p8`, `-----BEGIN…` lines included), `APPLE_TEAM_ID` (10 chars,
