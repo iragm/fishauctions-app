@@ -170,25 +170,103 @@ jobs:
           </dict></plist>
           PLIST
 
-      # flutter build ipa archives then exports; with automatic signing it adds
-      # -allowProvisioningUpdates and uses the staged API key. DEVELOPMENT_TEAM
-      # is forced via the Flutter→Xcode env passthrough so the archive signs.
-      - name: Build signed IPA
+      # NOT `flutter build ipa`. That command passes -allowProvisioningUpdates
+      # (ios/mac.dart, commands/build_ios.dart) but never the
+      # -authenticationKey* flags — and `man xcodebuild` is explicit that
+      # -allowProvisioningUpdates "requires a developer account to have been
+      # added in Xcode's Accounts preference pane OR an App Store Connect
+      # authentication key to be specified via the -authenticationKeyPath,
+      # -authenticationKeyID, and -authenticationKeyIssuerID parameters". A
+      # fresh runner has no Xcode account, and a .p8 sitting in ~/private_keys
+      # with nothing naming it is invisible, so cloud signing fails with "No
+      # Accounts: Add a new account in Accounts settings" / "No profiles for
+      # 'com.fishauctions.app' were found". flutter_tools exposes no way to add
+      # xcodebuild flags, hence the split below.
+      #
+      # --config-only does the whole Flutter-side setup and stops before
+      # xcodebuild: it writes Generated.xcconfig (dart-defines, build
+      # name/number), updates the SPM package's minimum deployment, and runs
+      # pod install for the CocoaPods-only plugins (square_mobile_payments_sdk
+      # ships no Package.swift). --no-codesign here only skips Flutter's own
+      # signing-identity probe — the archive below is what signs.
+      - name: Configure Xcode project (dart-defines, version, pods)
         if: ${{ inputs.distribute }}
-        env:
-          FLUTTER_XCODE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_TEAM_ID }}
         run: >
-          flutter build ipa --release
+          flutter build ios --config-only --release --no-codesign
           --dart-define=FLAVOR=${{ inputs.flavor }}
           --build-number=${{ github.run_number }}
           --build-name=$BUILD_NAME
-          --export-options-plist=ios/ExportOptions.plist
+
+      - name: Archive
+        if: ${{ inputs.distribute }}
+        env:
+          APPSTORE_API_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
+          APPSTORE_API_ISSUER_ID: ${{ secrets.APPSTORE_API_ISSUER_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          xcodebuild -workspace ios/Runner.xcworkspace \
+            -scheme Runner \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/Runner.xcarchive" \
+            -allowProvisioningUpdates \
+            -allowProvisioningDeviceRegistration \
+            -authenticationKeyPath "$HOME/private_keys/AuthKey_${APPSTORE_API_KEY_ID}.p8" \
+            -authenticationKeyID "$APPSTORE_API_KEY_ID" \
+            -authenticationKeyIssuerID "$APPSTORE_API_ISSUER_ID" \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
+            CODE_SIGN_STYLE=Automatic \
+            archive
+
+      - name: Export signed IPA
+        if: ${{ inputs.distribute }}
+        env:
+          APPSTORE_API_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
+          APPSTORE_API_ISSUER_ID: ${{ secrets.APPSTORE_API_ISSUER_ID }}
+        run: |
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/Runner.xcarchive" \
+            -exportOptionsPlist ios/ExportOptions.plist \
+            -exportPath "$RUNNER_TEMP/ipa" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$HOME/private_keys/AuthKey_${APPSTORE_API_KEY_ID}.p8" \
+            -authenticationKeyID "$APPSTORE_API_KEY_ID" \
+            -authenticationKeyIssuerID "$APPSTORE_API_ISSUER_ID"
+
+      # xcodebuild names the .ipa itself (from the archive's product), and
+      # nothing here can predict which of PRODUCT_NAME / CFBundleName /
+      # CFBundleDisplayName it picks — flutter_tools prints "$path/*.ipa" for
+      # the same reason. So glob it rather than hardcode a filename that breaks
+      # the day one of those three changes.
+      - name: Locate the exported IPA
+        if: ${{ inputs.distribute }}
+        run: |
+          ipa=$(find "$RUNNER_TEMP/ipa" -maxdepth 1 -name '*.ipa' | head -1)
+          if [ -z "$ipa" ]; then
+            echo "::error::xcodebuild -exportArchive produced no .ipa."
+            ls -la "$RUNNER_TEMP/ipa" || true
+            exit 1
+          fi
+          echo "Exported $ipa"
+          echo "IPA_PATH=$ipa" >> "$GITHUB_ENV"
 
       - name: Upload to TestFlight
         if: ${{ inputs.distribute }}
         uses: apple-actions/upload-testflight-build@v5
         with:
-          app-path: fishauctions_application/build/ios/ipa/fishauctions_application.ipa
+          app-path: ${{ env.IPA_PATH }}
           issuer-id: ${{ secrets.APPSTORE_API_ISSUER_ID }}
           api-key-id: ${{ secrets.APPSTORE_API_KEY_ID }}
           api-private-key: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
+
+      # Kept for post-mortems: an app-store-method IPA can't be sideloaded, but
+      # having the exact uploaded artifact beats re-running the build to inspect
+      # what shipped.
+      - name: Upload IPA artifact
+        if: ${{ inputs.distribute }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ios-ipa-${{ github.sha }}
+          path: ${{ env.IPA_PATH }}
+          if-no-files-found: error
+          retention-days: 14

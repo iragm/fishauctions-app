@@ -129,28 +129,39 @@ Implemented here; no further app work needed to light up Android:
 iOS push additionally needs (all deferrable until you build for iPhone):
 - [ ] Xcode **Runner** target capabilities: **Push Notifications** + **Background
       Modes → Remote notifications**. (Editing `Runner.entitlements` /
-      project — do alongside the Tap to Pay entitlement in `IOS.md`.)
+      project — do alongside the Tap to Pay entitlement in `IOS.md`.) Until this
+      lands, `getToken()` fails on the missing `aps-environment` entitlement and
+      `PushService` goes inert — but `requestPermission()` has *already* fired
+      the iOS notification prompt by then. Harmless, slightly confusing in beta;
+      it's the one reason to hold off setting `FIREBASE_IOS_*` on staging until
+      the entitlement exists.
 - [ ] The APNs key uploaded in Part A.
 
-**Signing is CI-only (no Mac).** `ios-release.yml` signs via an **App Store
-Connect API key** + Xcode **automatic cloud signing** — no hand-made
-certificate or provisioning profile. Create the key and set four repo secrets:
+**Registering the iOS app in Firebase:** the **App Store ID** field is
+optional — it's only used for Dynamic Links and store attribution, and it
+doesn't exist until the App Store Connect record does. Leave it blank; nothing
+in the push path reads it. What matters is the bundle id and the four harvested
+values.
 
-- [ ] App Store Connect → **Users and Access** → **Integrations** (Keys) → *App
-      Store Connect API* → **Generate API Key**, role **App Manager** →
-      **download the `.p8` once**. Note the **Key ID** and the **Issuer ID**
-      (shown above the table).
-- [ ] Find your **Team ID**: <https://developer.apple.com/account> → Membership.
-- [ ] Register the app: App Store Connect → **Apps** → **+** → new app, bundle
-      id `com.fishauctions.app` (creates the TestFlight record cloud signing
-      targets).
-- [ ] Set repo secrets (Settings → Secrets and variables → Actions):
-      `APPSTORE_API_KEY_ID`, `APPSTORE_API_ISSUER_ID`,
-      `APPSTORE_API_PRIVATE_KEY` (paste the whole `.p8`), `APPLE_TEAM_ID`.
-- [ ] Run **iOS Release** with `distribute: true`. First run is the shakeout
-      (cloud signing + the app record must exist).
+**Both Firebase projects register the same iOS bundle id**
+(`com.fishauctions.app`), unlike Android where the flavors give staging and
+prod distinct package names. That's legal — different Firebase projects may
+claim the same bundle id — and it works here because the app never bundles
+`GoogleService-Info.plist`: which project a build talks to is decided at
+runtime by whichever deployment's `/api/mobile/config/` it fetched, and
+`PushService`'s id guard passes either way. The consequence is the same one
+`IOS.md` notes for flavors generally: staging and prod iOS builds can't coexist
+on one iPhone, so what a build points at is fixed at build time by the
+workflow's `flavor` input. The APNs key is per-Apple-team, so upload the same
+`.p8` to both projects.
 
-Until then, run it with `distribute` **off** for the free unsigned
+**Signing is CI-only (no Mac).** `ios-release.yml` signs via an App Store
+Connect API key + Xcode automatic cloud signing. The four secrets, the Apple
+Developer / App ID / App Store Connect record prerequisites, and why the
+workflow drives `xcodebuild` directly instead of `flutter build ipa` all live
+in **`IOS.md` → Distribution** — kept in one place so the two files can't drift.
+
+Until then, run the workflow with `distribute` **off** for the free unsigned
 compile-check (verifies `AppDelegate.swift` + plugins build on Apple toolchain).
 
 ## Part D — Backend handoff (prompt for `iragm/fishauctions`)

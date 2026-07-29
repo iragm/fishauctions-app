@@ -39,9 +39,11 @@ error path.
   # release: point -keystore/-alias/-storepass at the release keystore
   ```
 
-- **iOS OAuth client** — bundle id `com.fishauctions.app`, plus the
-  `GIDClientID` / reversed-client-id URL scheme in `Info.plist`. See
-  [`IOS.md`](IOS.md).
+- **iOS OAuth client** — created, bundle id `com.fishauctions.app`; its
+  `GIDClientID` and reversed-client-id URL scheme are committed in
+  `ios/Runner/Info.plist` (public by construction — see [`IOS.md`](IOS.md) for
+  why that's not a secret). Untested on hardware; iOS OAuth clients need no
+  SHA-1, so the signing-cert failure below is Android-only.
 
 ### The two ways this fails silently
 

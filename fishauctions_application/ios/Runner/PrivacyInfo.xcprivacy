@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  App-level privacy manifest for the Runner target.
+
+  Why this file exists: AppDelegate.swift caches the Square application id in
+  UserDefaults, which is one of Apple's "required reason" APIs. Without a
+  declaration, every App Store Connect upload comes back with
+  "ITMS-91053: Missing API declaration". Plugins ship their own manifests
+  (permission_handler_apple, firebase, etc.); this one covers only what the
+  app target itself calls — re-check it if native code starts reading file
+  timestamps, disk space, system boot time, or the active keyboard list.
+
+  NSPrivacyCollectedDataTypes is deliberately absent. The App Store privacy
+  "nutrition label" is answered in the App Store Connect questionnaire, which
+  is authoritative; an empty array here would instead assert that the app
+  collects nothing, which is not true (accounts, location for auction
+  distances, lot photos all go to the backend).
+-->
+<plist version="1.0">
+<dict>
+	<key>NSPrivacyTracking</key>
+	<false/>
+	<key>NSPrivacyTrackingDomains</key>
+	<array/>
+	<key>NSPrivacyAccessedAPITypes</key>
+	<array>
+		<dict>
+			<!-- AppDelegate.swift: the cached Square application id, so the SDK
+			     can initialize early in didFinishLaunching where Square wants
+			     it, instead of waiting on /api/mobile/config/. Read and written
+			     only by this app. -->
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>CA92.1</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

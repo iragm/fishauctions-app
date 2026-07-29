@@ -62,6 +62,38 @@
 	<string>????</string>
 	<key>CFBundleVersion</key>
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
+	<!-- Native Google sign-in (google_sign_in). Two values, both necessarily
+	     static — unlike serverClientId, which SocialAuthService reads from
+	     /api/mobile/config/ so one binary serves any deployment:
+
+	       GIDClientID        the *iOS* OAuth client (Google Cloud console →
+	                          Credentials → OAuth client ID → iOS, bundle id
+	                          com.fishauctions.app), in the same Cloud project
+	                          as the web client whose id the backend sends —
+	                          the ID token's audience has to line up.
+	       CFBundleURLSchemes the same id with the domain reversed. The OS
+	                          resolves this at install time to route the OAuth
+	                          callback back into the app, so it could never be
+	                          runtime config; GIDClientID is kept alongside it
+	                          rather than split across two mechanisms, since a
+	                          fork has to edit this file either way.
+
+	     A fork pointing at its own deployment replaces both strings. Callback
+	     delivery goes through scene(_:openURLContexts:) under Flutter 3.44's
+	     SceneDelegate, not application(_:open:options:) — see IOS.md. -->
+	<key>GIDClientID</key>
+	<string>1028419796918-0glbi1lhnfk32pg60v57lmv0qc6nv90g.apps.googleusercontent.com</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>com.googleusercontent.apps.1028419796918-0glbi1lhnfk32pg60v57lmv0qc6nv90g</string>
+			</array>
+		</dict>
+	</array>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>UIApplicationSceneManifest</key>
