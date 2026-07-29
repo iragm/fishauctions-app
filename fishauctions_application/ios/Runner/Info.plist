@@ -42,6 +42,14 @@
 	     (card-present fraud signal). -->
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Show the distance to each auction, and confirm where Tap to Pay charges happen.</string>
+	<!-- The app never requests Always authorization — CheckinService and the
+	     auction-distance banner are both when-in-use only. This key is here
+	     because App Store Connect scans for API *references*, not calls, and
+	     geolocator/Square link against the always-authorization APIs:
+	     ITMS-90683 on build 8 asked for it by name. Same string as above, since
+	     an escalation the app can't trigger has nothing extra to explain. -->
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>Show the distance to each auction, and confirm where Tap to Pay charges happen.</string>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
