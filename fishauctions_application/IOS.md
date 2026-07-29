@@ -216,6 +216,38 @@ it from the archive's product and nothing predicts whether that resolves to
 `CFBundleDisplayName` (`auction.fish`) — flutter_tools prints `"$path/*.ipa"`
 for the same reason.
 
+### `ios/Podfile` exists only for Square's setup phase — don't delete it
+
+`SquareMobilePaymentsSDK.framework` ships nested frameworks and a `setup`
+executable inside the framework. Both are illegal in an App Store binary, so the
+upload is **rejected during processing** — the build succeeds, TestFlight
+accepts the file, and the failure arrives by email minutes later:
+
+```
+ITMS-90035  …/SquareMobilePaymentsSDK.framework/setup is not properly signed
+ITMS-90205  …/SquareMobilePaymentsSDK.framework contains disallowed nested bundles
+ITMS-90206  …/SquareMobilePaymentsSDK.framework contains disallowed file 'Frameworks'
+```
+
+Square's fix is to run that `setup` executable as a build phase, and it must run
+**after** `[CP] Embed Pods Frameworks` (which is what puts the framework in the
+bundle) — Square documents it as "must be the last build phase". That's the
+whole reason this project has a Podfile: Flutter otherwise generates the stock
+one, and deleting ours silently restores the rejection.
+
+The phase is added from a **`post_integrate`** hook, not `post_install` and not
+`project.pbxproj`. CocoaPods appends its own phases during user-project
+integration, which happens *after* `post_install` — so a phase added any earlier
+sits ahead of the embed phase, finds no framework, no-ops, and the rejection
+comes back looking exactly the same. Don't "simplify" it into the pbxproj.
+
+Don't hand-roll the cleanup with `rm -rf` either: the nested frameworks are real
+dependencies, and deciding which get hoisted into the app's own `Frameworks`
+directory versus dropped is the setup script's job.
+
+Related build setting: `ENABLE_USER_SCRIPT_SANDBOXING = NO` (already set in all
+three configs) — Square's script can't run under script sandboxing.
+
 ### Apple-side prerequisites for the first signed build
 
 Cloud signing can only *use* an app record; it can't invent one. In order:

@@ -1,0 +1,119 @@
+# Flutter's standard iOS Podfile, plus the Square setup phase at the bottom.
+#
+# This file only exists because of that phase. Flutter generates a Podfile on
+# demand when there isn't one, so deleting this brings back the stock template —
+# and, silently, the App Store rejection it works around.
+
+# Uncomment this line to define a global platform for your project
+# platform :ios, '13.0'
+
+# CocoaPods analytics sends network stats synchronously affecting flutter build latency.
+ENV['COCOAPODS_DISABLE_STATS'] = 'true'
+
+project 'Runner', {
+  'Debug' => :debug,
+  'Profile' => :release,
+  'Release' => :release,
+}
+
+def flutter_root
+  generated_xcode_build_settings_path = File.expand_path(File.join('..', 'Flutter', 'Generated.xcconfig'), __FILE__)
+  unless File.exist?(generated_xcode_build_settings_path)
+    raise "#{generated_xcode_build_settings_path} must exist. If you're running pod install manually, make sure flutter pub get is executed first"
+  end
+
+  File.foreach(generated_xcode_build_settings_path) do |line|
+    matches = line.match(/FLUTTER_ROOT\=(.*)/)
+    return matches[1].strip if matches
+  end
+  raise "FLUTTER_ROOT not found in #{generated_xcode_build_settings_path}. Try deleting Generated.xcconfig, then run flutter pub get"
+end
+
+require File.expand_path(File.join('packages', 'flutter_tools', 'bin', 'podhelper'), flutter_root)
+
+flutter_ios_podfile_setup
+
+target 'Runner' do
+  use_frameworks!
+
+  flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
+  target 'RunnerTests' do
+    inherit! :search_paths
+  end
+end
+
+post_install do |installer|
+  installer.pods_project.targets.each do |target|
+    flutter_additional_ios_build_settings(target)
+  end
+end
+
+# ── Square Mobile Payments SDK setup phase ────────────────────────────────────
+#
+# SquareMobilePaymentsSDK.framework ships with nested frameworks and a `setup`
+# executable inside it. Both are illegal in an App Store binary, and App Store
+# Connect rejects the upload during processing (not at build time, so nothing
+# local catches it):
+#
+#   ITMS-90035 Runner.app/Frameworks/SquareMobilePaymentsSDK.framework/setup
+#              is not properly signed
+#   ITMS-90205 …/SquareMobilePaymentsSDK.framework contains disallowed nested bundles
+#   ITMS-90206 …/SquareMobilePaymentsSDK.framework contains disallowed file 'Frameworks'
+#
+# Square's fix is to run that `setup` executable as a build phase; it cleans up
+# after itself. Do NOT hand-roll the cleanup with `rm -rf` — the nested
+# frameworks are real dependencies, and it's the setup script's job to know
+# whether each one is hoisted into the app's own Frameworks directory or dropped.
+#
+# The phase has to run AFTER "[CP] Embed Pods Frameworks", which is what copies
+# the framework into the app bundle — Square documents this as "must be the last
+# build phase". CocoaPods appends its phases during user-project integration, so
+# a phase committed into project.pbxproj, or added from `post_install`, lands
+# *before* them: the framework isn't in the bundle yet, the script no-ops, and
+# the rejection comes back looking identical. `post_integrate` is the hook that
+# runs after integration ("not all changes have been saved to disk" in
+# post_install, per CocoaPods' own guidance), so it's the only place this
+# ordering actually holds.
+SQUARE_SETUP_PHASE_NAME = 'Square Mobile Payments SDK setup'.freeze
+
+# Guarded on the file existing so a Debug/simulator build, or any future build
+# that doesn't pull the pod, doesn't fail on a missing script.
+SQUARE_SETUP_SCRIPT = <<~SH.freeze
+  SETUP="${BUILT_PRODUCTS_DIR}/${FRAMEWORKS_FOLDER_PATH}/SquareMobilePaymentsSDK.framework/setup"
+  if [ -x "$SETUP" ]; then
+    "$SETUP"
+  else
+    echo "note: no SquareMobilePaymentsSDK setup script at $SETUP, skipping"
+  fi
+SH
+
+post_integrate do |installer|
+  installer.aggregate_targets.map(&:user_project).compact.uniq.each do |project|
+    changed = false
+
+    project.targets.each do |target|
+      next unless target.name == 'Runner'
+
+      phase = target.shell_script_build_phases.find { |p| p.name == SQUARE_SETUP_PHASE_NAME }
+      if phase.nil?
+        phase = target.new_shell_script_build_phase(SQUARE_SETUP_PHASE_NAME)
+        changed = true
+      end
+
+      if phase.shell_path != '/bin/sh' || phase.shell_script != SQUARE_SETUP_SCRIPT
+        phase.shell_path = '/bin/sh'
+        phase.shell_script = SQUARE_SETUP_SCRIPT
+        changed = true
+      end
+
+      # Re-assert "last" on every install: a repeat `pod install` over a dirty
+      # checkout can otherwise leave the phase stranded mid-list.
+      unless target.build_phases.last == phase
+        target.build_phases.move(phase, target.build_phases.count - 1)
+        changed = true
+      end
+    end
+
+    project.save if changed
+  end
+end
