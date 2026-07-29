@@ -197,43 +197,29 @@ jobs:
           --build-number=${{ github.run_number }}
           --build-name=$BUILD_NAME
 
-      # Why the signing identity arrives as an xcconfig instead of an xcodebuild
-      # argument — two failures, in order:
+      # Nothing here pins CODE_SIGN_IDENTITY, and nothing should. Under
+      # CODE_SIGN_STYLE=Automatic, Xcode owns the identity/profile choice — it
+      # picks Apple Development for a Debug build and Apple Distribution for a
+      # Release archive — and it *errors out* on any manually specified identity
+      # rather than honouring it ("Runner has conflicting provisioning settings.
+      # Runner is automatically signed for development, but a conflicting code
+      # signing identity Apple Distribution has been manually specified").
       #
-      # 1. The Flutter template pins `"CODE_SIGN_IDENTITY[sdk=iphoneos*]" =
-      #    "iPhone Developer"` in all three PROJECT-level configs (still true in
-      #    Flutter 3.44's template). That's a *development* identity, so
-      #    automatic signing tried to mint an "iOS App Development" profile —
-      #    which requires a registered device — and died with "Your team has no
-      #    devices from which to generate a provisioning profile". A CI runner
-      #    never has a device attached, and an App Store archive doesn't want
-      #    development signing anyway.
-      # 2. Overriding it as `xcodebuild CODE_SIGN_IDENTITY=...` then applied to
-      #    EVERY target in the workspace, including SPM package targets:
-      #    "GoogleUtilities_GoogleUtilities-UserDefaults has conflicting
-      #    provisioning settings ... automatically signed for development, but a
-      #    conflicting code signing identity Apple Distribution has been
-      #    manually specified". Resource bundles have no business being
-      #    distribution-signed, and xcodebuild cannot scope a setting to one
-      #    target.
+      # This bit three times before landing, so: the Flutter template ships
+      # `"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Developer"` in all three
+      # project-level configs (still true in 3.44). That pin forced *development*
+      # signing on the Release archive, so automatic signing went looking for an
+      # "iOS App Development" profile, which requires a registered device, and
+      # failed with "Your team has no devices from which to generate a
+      # provisioning profile" — on a runner that will never have one. Overriding
+      # the identity, whether as an xcodebuild argument (which leaks to every SPM
+      # package target: "GoogleUtilities_…-UserDefaults has conflicting
+      # provisioning settings") or scoped to the Runner target via an xcconfig,
+      # only moves the conflict — automatic signing rejects a specified identity
+      # at any scope. The fix is to delete the pin (done, in project.pbxproj) and
+      # let automatic signing do its job. Deleting it also fixes local Mac
+      # builds, which had the same development-only pin.
       #
-      # Flutter/Release.xcconfig is the base configuration of the *Runner
-      # target's* Release and Profile configs only, and a target-level xcconfig
-      # outranks project-level build settings — so writing the identity there
-      # beats the template pin while staying invisible to RunnerTests and to
-      # every SPM package. It's `#include?`d, so its absence locally leaves a
-      # Mac checkout signing for development exactly as before.
-      #
-      # DEVELOPMENT_TEAM and CODE_SIGN_STYLE stay on the command line on
-      # purpose: the SPM targets do need those to sign themselves automatically.
-      - name: Force distribution signing on the Runner target
-        if: ${{ inputs.distribute }}
-        run: |
-          cat > ios/Flutter/CI.xcconfig <<'XCCONFIG'
-          CODE_SIGN_IDENTITY = Apple Distribution
-          CODE_SIGN_IDENTITY[sdk=iphoneos*] = Apple Distribution
-          XCCONFIG
-
       # -allowProvisioningDeviceRegistration is deliberately absent: registering
       # devices is a development-signing concern and only muddies the intent.
       - name: Archive

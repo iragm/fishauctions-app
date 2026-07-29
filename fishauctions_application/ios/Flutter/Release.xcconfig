@@ -1,7 +1,1 @@
 #include "Generated.xcconfig"
-// Optional, CI-only, and absent locally — hence `#include?` rather than
-// `#include`. ios-release.yml writes Flutter/CI.xcconfig before archiving to
-// force distribution signing on the Runner target; see the Archive step there
-// for why it can't be an xcodebuild command-line setting. Must stay last so it
-// wins over anything included above.
-#include? "CI.xcconfig"
