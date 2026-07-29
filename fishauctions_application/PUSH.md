@@ -127,15 +127,29 @@ Implemented here; no further app work needed to light up Android:
 ## Part C — iOS specifics + Mac-less signing
 
 iOS push additionally needs (all deferrable until you build for iPhone):
-- [ ] Xcode **Runner** target capabilities: **Push Notifications** + **Background
-      Modes → Remote notifications**. (Editing `Runner.entitlements` /
-      project — do alongside the Tap to Pay entitlement in `IOS.md`.) Until this
-      lands, `getToken()` fails on the missing `aps-environment` entitlement and
-      `PushService` goes inert — but `requestPermission()` has *already* fired
-      the iOS notification prompt by then. Harmless, slightly confusing in beta;
-      it's the one reason to hold off setting `FIREBASE_IOS_*` on staging until
-      the entitlement exists.
-- [ ] The APNs key uploaded in Part A.
+- [x] Xcode **Runner** target capabilities: **Push Notifications** + **Background
+      Modes → Remote notifications** — done 2026-07-29 without Xcode:
+      `ios/Runner/Runner.entitlements` (`aps-environment: production`, used by
+      Release/Profile) and `RunnerDebug.entitlements` (`development`, Debug),
+      wired via `CODE_SIGN_ENTITLEMENTS` in all three Runner configs, plus
+      `UIBackgroundModes: [remote-notification]` in `Info.plist`. Push
+      Notifications is enabled on the App ID, which is what lets cloud signing
+      mint a profile carrying the entitlement. Tap to Pay's entitlement is still
+      out, pending Apple's grant — see `IOS.md`.
+
+      The per-configuration split is deliberate: the single `development` file
+      Xcode writes relies on the app-store export rewriting the value, and if
+      that rewrite doesn't happen the failure is silent — tokens on sandbox,
+      sends to production, nothing delivered, no error anywhere.
+- [ ] The APNs key uploaded in Part A. **This is the only remaining iOS step**
+      and the only place the `.p8` goes — it is not a GitHub secret and not a
+      backend env var.
+
+> **Apple now offers two APNs key flavours**: *Sandbox & Production* and
+> *Sandbox only*. Upload the **Sandbox & Production** one; a sandbox-only key
+> silently fails to deliver to TestFlight/App Store builds, which register
+> production tokens. One key serves every app **and both Firebase projects** —
+> it's scoped to the Apple team, not to a project. (Apple caps you at 2 keys.)
 
 **Registering the iOS app in Firebase:** the **App Store ID** field is
 optional — it's only used for Dynamic Links and store attribution, and it
@@ -166,7 +180,19 @@ compile-check (verifies `AppDelegate.swift` + plugins build on Apple toolchain).
 
 ## Part D — Backend handoff (prompt for `iragm/fishauctions`)
 
-Copy this to implement server-side (do **not** edit that repo from here):
+**Items 1 and 2 are implemented and live.** Verified 2026-07-29 by fetching
+`/api/mobile/config/` on both deployments: each returns a complete `firebase`
+block with **both** `android` and `ios` populated (staging
+`fishauctions-staging`, prod `auction-1708296065675`). So the iOS apps are
+already registered in both Firebase projects and Part A's harvesting is done.
+
+Note the backend did **not** use the per-value env vars suggested below. It
+reads `FIREBASE_ANDROID_CONFIG_FILE` / `FIREBASE_IOS_CONFIG_FILE` — filesystem
+paths to the raw `google-services.json` / `GoogleService-Info.plist` — and
+derives the values itself (`fishauctions/settings.py:484`). There is no
+`FIREBASE_IOS_API_KEY` etc. to set.
+
+Kept below as the historical spec (do **not** edit that repo from here):
 
 > **1. Serve the Firebase client config from `/api/mobile/config/`.**
 > In `MobileConfigView.get` (`auctions/mobile/views.py`, ~line 566) add a
