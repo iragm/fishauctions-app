@@ -197,6 +197,22 @@ jobs:
           --build-number=${{ github.run_number }}
           --build-name=$BUILD_NAME
 
+      # CODE_SIGN_IDENTITY is overridden on the command line because the Flutter
+      # project template pins `"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone
+      # Developer"` in all three project-level configs (project.pbxproj — a
+      # leftover from an older template). That's a *development* identity, so
+      # automatic signing dutifully tried to mint an "iOS App Development"
+      # profile, which requires at least one registered device, and the archive
+      # died with "Your team has no devices from which to generate a
+      # provisioning profile" + "No profiles for 'com.fishauctions.app' were
+      # found" — on a CI runner that will never have a device attached, and for
+      # a build that wants App Store distribution signing anyway.
+      #
+      # Command-line build settings outrank everything in the project including
+      # conditional variants, so this wins no matter what the template does; the
+      # pin is left in place so local `flutter run` on a Mac is unaffected.
+      # -allowProvisioningDeviceRegistration is deliberately absent: registering
+      # devices is a development-signing concern and only muddies the intent.
       - name: Archive
         if: ${{ inputs.distribute }}
         env:
@@ -210,12 +226,12 @@ jobs:
             -destination 'generic/platform=iOS' \
             -archivePath "$RUNNER_TEMP/Runner.xcarchive" \
             -allowProvisioningUpdates \
-            -allowProvisioningDeviceRegistration \
             -authenticationKeyPath "$HOME/private_keys/AuthKey_${APPSTORE_API_KEY_ID}.p8" \
             -authenticationKeyID "$APPSTORE_API_KEY_ID" \
             -authenticationKeyIssuerID "$APPSTORE_API_ISSUER_ID" \
             DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
             CODE_SIGN_STYLE=Automatic \
+            CODE_SIGN_IDENTITY="Apple Distribution" \
             archive
 
       - name: Export signed IPA

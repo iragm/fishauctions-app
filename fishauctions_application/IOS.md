@@ -156,6 +156,18 @@ updates the SPM minimum deployment, and runs `pod install` for the
 CocoaPods-only plugins — `square_mobile_payments_sdk` ships no `Package.swift`)
 and then archives/exports with `xcodebuild` itself.
 
+**The archive forces `CODE_SIGN_IDENTITY="Apple Distribution"`,** because
+`project.pbxproj` still carries the old Flutter template's
+`"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Developer"` in all three
+project-level configs. That's a *development* identity, so automatic signing
+went looking for an "iOS App Development" profile — which requires a registered
+device — and the first signed run died with *"Your team has no devices from
+which to generate a provisioning profile"*. A CI runner will never have a
+device attached, and an App Store archive doesn't want development signing in
+the first place. The command-line override outranks the project (including
+conditional variants), and the pin is left alone so local `flutter run` on a
+Mac still resolves a development identity normally.
+
 The exported `.ipa` filename is **globbed, never hardcoded**: xcodebuild names
 it from the archive's product and nothing predicts whether that resolves to
 `PRODUCT_NAME` (`Runner`), `CFBundleName` (`fishauctions_application`) or
