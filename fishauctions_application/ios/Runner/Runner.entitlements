@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Release/Profile builds are TestFlight and App Store builds, whose device
+	     tokens are production APNs tokens — so this says production rather than
+	     the `development` Xcode would write. Xcode's app-store export is
+	     supposed to rewrite this itself, but a wrong value here fails silently:
+	     tokens register against the sandbox, Firebase sends to production, and
+	     nothing arrives with no error anywhere. Being explicit costs one line.
+	     Debug builds get RunnerDebug.entitlements instead.
+
+	     Tap to Pay's com.apple.developer.proximity-reader.payment.acceptance
+	     goes here too — but only AFTER Apple grants it. Adding it early means
+	     cloud signing can't build a profile that carries it and every export
+	     fails. -->
+	<key>aps-environment</key>
+	<string>production</string>
+</dict>
+</plist>

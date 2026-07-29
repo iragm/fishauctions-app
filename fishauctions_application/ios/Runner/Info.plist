@@ -50,6 +50,13 @@
 	     an escalation the app can't trigger has nothing extra to explain. -->
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
 	<string>Show the distance to each auction, and confirm where Tap to Pay charges happen.</string>
+	<!-- FCM data messages while backgrounded: without this, iOS only wakes the
+	     app for the display half of the backend's notification+data payload and
+	     the background handler never runs. -->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>remote-notification</string>
+	</array>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
