@@ -197,51 +197,59 @@ jobs:
           --build-number=${{ github.run_number }}
           --build-name=$BUILD_NAME
 
-      # Nothing here pins CODE_SIGN_IDENTITY, and nothing should. Under
-      # CODE_SIGN_STYLE=Automatic, Xcode owns the identity/profile choice — it
-      # picks Apple Development for a Debug build and Apple Distribution for a
-      # Release archive — and it *errors out* on any manually specified identity
-      # rather than honouring it ("Runner has conflicting provisioning settings.
-      # Runner is automatically signed for development, but a conflicting code
-      # signing identity Apple Distribution has been manually specified").
+      # The archive is built UNSIGNED on purpose; every signature this build
+      # ships is applied by the export step below. That split exists because
+      # `xcodebuild archive` under automatic signing insists on a *development*
+      # profile, which this team cannot have.
       #
-      # This bit three times before landing, so: the Flutter template ships
+      # Observed across three runs, so it's worth writing down: under
+      # CODE_SIGN_STYLE=Automatic, Xcode resolves the archive's profile from
+      # CODE_SIGN_IDENTITY, and every value it will accept there is a
+      # development one. The Flutter template pins
       # `"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Developer"` in all three
-      # project-level configs (still true in 3.44). That pin forced *development*
-      # signing on the Release archive, so automatic signing went looking for an
-      # "iOS App Development" profile, which requires a registered device, and
-      # failed with "Your team has no devices from which to generate a
-      # provisioning profile" — on a runner that will never have one. Overriding
-      # the identity, whether as an xcodebuild argument (which leaks to every SPM
-      # package target: "GoogleUtilities_…-UserDefaults has conflicting
-      # provisioning settings") or scoped to the Runner target via an xcconfig,
-      # only moves the conflict — automatic signing rejects a specified identity
-      # at any scope. The fix is to delete the pin (done, in project.pbxproj) and
-      # let automatic signing do its job. Deleting it also fixes local Mac
-      # builds, which had the same development-only pin.
+      # project-level configs (still true in 3.44), so the archive asked for an
+      # "iOS App Development" profile — which Apple only issues to a team with
+      # at least one registered device — and died with "Your team has no devices
+      # from which to generate a provisioning profile", on a runner that will
+      # never have one. Deleting the pin (done, in project.pbxproj) did not help:
+      # Xcode's default iOS identity is "Apple Development", which is the same
+      # kind of identity and wants the same kind of profile. And the value that
+      # *would* work can't be set — automatic signing treats a specified
+      # identity as a contradiction and refuses to build, whether it's passed as
+      # an xcodebuild argument (where it also leaks to every SPM package target:
+      # "GoogleUtilities_…-UserDefaults has conflicting provisioning settings")
+      # or scoped to Runner alone via an xcconfig ("Runner is automatically
+      # signed for development, but a conflicting code signing identity Apple
+      # Distribution has been manually specified"). Manual signing would end the
+      # argument, but it means minting and storing a distribution cert + profile
+      # ourselves — the exact maintenance this pipeline was built to avoid.
       #
-      # -allowProvisioningDeviceRegistration is deliberately absent: registering
-      # devices is a development-signing concern and only muddies the intent.
-      - name: Archive
+      # So: skip signing at archive time. CODE_SIGNING_ALLOWED=NO turns off
+      # provisioning resolution too, so no profile is looked up and no device is
+      # needed. -exportArchive then signs the app and every embedded framework
+      # with an App Store distribution profile, which contains no device list and
+      # so has nothing to be blocked on. No signing settings are passed here at
+      # all (no DEVELOPMENT_TEAM, no CODE_SIGN_STYLE) — with signing off they are
+      # inert at best, and a leftover CODE_SIGN_STYLE=Automatic is what invites
+      # Xcode to go looking for a profile again.
+      - name: Archive (unsigned — export does the signing)
         if: ${{ inputs.distribute }}
-        env:
-          APPSTORE_API_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
-          APPSTORE_API_ISSUER_ID: ${{ secrets.APPSTORE_API_ISSUER_ID }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           xcodebuild -workspace ios/Runner.xcworkspace \
             -scheme Runner \
             -configuration Release \
             -destination 'generic/platform=iOS' \
             -archivePath "$RUNNER_TEMP/Runner.xcarchive" \
-            -allowProvisioningUpdates \
-            -authenticationKeyPath "$HOME/private_keys/AuthKey_${APPSTORE_API_KEY_ID}.p8" \
-            -authenticationKeyID "$APPSTORE_API_KEY_ID" \
-            -authenticationKeyIssuerID "$APPSTORE_API_ISSUER_ID" \
-            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
-            CODE_SIGN_STYLE=Automatic \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
             archive
 
+      # This is where signing actually happens, for the whole app bundle at once.
+      # ExportOptions asks for method=app-store + signingStyle=automatic, so the
+      # API key below lets Xcode create/fetch the distribution certificate and
+      # the App Store provisioning profile in the cloud — neither of which
+      # requires a registered device.
       - name: Export signed IPA
         if: ${{ inputs.distribute }}
         env:

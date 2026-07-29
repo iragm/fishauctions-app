@@ -156,30 +156,49 @@ updates the SPM minimum deployment, and runs `pod install` for the
 CocoaPods-only plugins — `square_mobile_payments_sdk` ships no `Package.swift`)
 and then archives/exports with `xcodebuild` itself.
 
-**`CODE_SIGN_IDENTITY` is not set anywhere, deliberately — don't add it back.**
-Under `CODE_SIGN_STYLE=Automatic`, Xcode owns the identity and profile choice
-(Apple Development for a Debug build, Apple Distribution for a Release archive)
-and it *errors out* on a manually specified identity rather than honouring it.
+**The archive is built unsigned and `-exportArchive` applies every signature.**
+That looks odd and is load-bearing: `xcodebuild archive` under automatic signing
+demands a *development* provisioning profile, and Apple will not issue one to a
+team with **zero registered devices** — which is every team that doesn't own a
+Mac or an iPhone yet. An App Store distribution profile, by contrast, contains
+no device list, so doing all the signing at export sidesteps the requirement
+entirely. The archive step therefore passes `CODE_SIGNING_ALLOWED=NO`
+(`CODE_SIGNING_REQUIRED=NO`, `CODE_SIGN_IDENTITY=""`) and **no signing settings
+whatsoever** — no `DEVELOPMENT_TEAM`, no `CODE_SIGN_STYLE`. Adding either back
+re-arms provisioning resolution and the device requirement returns.
 
-The Flutter template ships
-`"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Developer"` in all three
-project-level configs — still true in 3.44 — and **those three lines have been
-deleted from `project.pbxproj`.** They pinned the Release archive to a
-*development* identity, so automatic signing went looking for an "iOS App
-Development" profile, which requires a registered device, and the first signed
-run died with *"Your team has no devices from which to generate a provisioning
-profile"* on a runner that will never have one. Deleting them fixes local Mac
-builds too, which carried the same development-only pin.
+Four runs established that there is no way to make a signed archive work here,
+so don't re-try these:
 
-Overriding the identity instead of deleting the pin fails in two further ways,
-both burned through on real runs: as an xcodebuild command-line setting it
-leaks to **every target in the workspace** (*"GoogleUtilities_…-UserDefaults
-has conflicting provisioning settings"* — SPM resource bundles have no business
-being distribution-signed, and xcodebuild can't scope a setting to one target),
-and scoped to the Runner target via an xcconfig it simply relocates the
-conflict onto Runner itself. Automatic signing rejects a specified identity at
-any scope. `DEVELOPMENT_TEAM` and `CODE_SIGN_STYLE` on the command line are
-fine and necessary — the SPM targets need them to sign themselves.
+1. The Flutter template pins
+   `"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Developer"` in all three
+   project-level configs (still true in 3.44). That pinned the Release archive
+   to a *development* identity → *"No profiles for 'com.fishauctions.app' were
+   found: Xcode couldn't find any iOS App Development provisioning profiles"* +
+   *"Your team has no devices from which to generate a provisioning profile."*
+2. Overriding the identity as an xcodebuild command-line setting leaks it to
+   **every target in the workspace** → *"GoogleUtilities_…-UserDefaults has
+   conflicting provisioning settings"*. xcodebuild cannot scope a build setting
+   to one target.
+3. Scoping the override to Runner via an xcconfig just relocates the same
+   conflict → *"Runner is automatically signed for development, but a
+   conflicting code signing identity Apple Distribution has been manually
+   specified."* Automatic signing rejects a specified identity at **any** scope.
+4. Deleting the template's three pins (done — they're gone from
+   `project.pbxproj`, which also fixes local Mac builds that carried the same
+   development-only pin) changes nothing on its own: Xcode's default iOS
+   `CODE_SIGN_IDENTITY` is `Apple Development`, the same kind of identity
+   wanting the same kind of profile. Same error as (1).
+
+The remaining alternative is **manual** signing — a distribution certificate and
+App Store profile we mint and store as secrets ourselves. That works with no
+devices, and is the fallback if export-time signing ever fails, but it
+reintroduces exactly the certificate maintenance this pipeline exists to avoid.
+
+`ExportOptions.plist` asks for `method=app-store` + `signingStyle=automatic`,
+and the export step gets the API key flags, so Xcode creates/fetches the
+distribution certificate and App Store profile in the cloud and signs the app
+plus every embedded framework in one pass.
 
 The exported `.ipa` filename is **globbed, never hardcoded**: xcodebuild names
 it from the archive's product and nothing predicts whether that resolves to
