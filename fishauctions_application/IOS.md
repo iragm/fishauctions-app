@@ -156,17 +156,33 @@ updates the SPM minimum deployment, and runs `pod install` for the
 CocoaPods-only plugins — `square_mobile_payments_sdk` ships no `Package.swift`)
 and then archives/exports with `xcodebuild` itself.
 
-**The archive forces `CODE_SIGN_IDENTITY="Apple Distribution"`,** because
-`project.pbxproj` still carries the old Flutter template's
-`"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Developer"` in all three
-project-level configs. That's a *development* identity, so automatic signing
-went looking for an "iOS App Development" profile — which requires a registered
-device — and the first signed run died with *"Your team has no devices from
-which to generate a provisioning profile"*. A CI runner will never have a
-device attached, and an App Store archive doesn't want development signing in
-the first place. The command-line override outranks the project (including
-conditional variants), and the pin is left alone so local `flutter run` on a
-Mac still resolves a development identity normally.
+**The archive forces distribution signing through an xcconfig, not an
+xcodebuild argument** — the workflow writes `ios/Flutter/CI.xcconfig` (gitignored)
+setting `CODE_SIGN_IDENTITY = Apple Distribution`, and `Flutter/Release.xcconfig`
+picks it up with `#include?`. Two failures produced that shape, and both come
+back if it's "simplified":
+
+1. `project.pbxproj` still carries the Flutter template's
+   `"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Developer"` in all three
+   **project-level** configs (still true in 3.44's template). It's a
+   *development* identity, so automatic signing went looking for an "iOS App
+   Development" profile — which requires a registered device — and the first
+   signed run died with *"Your team has no devices from which to generate a
+   provisioning profile"*. A CI runner never has a device attached.
+2. Overriding it as an xcodebuild command-line setting then hit **every target
+   in the workspace**, including SPM packages: *"GoogleUtilities_…-UserDefaults
+   has conflicting provisioning settings … automatically signed for
+   development, but a conflicting code signing identity Apple Distribution has
+   been manually specified."* Resource bundles shouldn't be distribution-signed,
+   and xcodebuild can't scope a build setting to one target.
+
+`Flutter/Release.xcconfig` is the base configuration of the **Runner target's**
+Release and Profile configs only, and a target-level xcconfig outranks
+project-level build settings — so it beats the template pin while staying
+invisible to RunnerTests and to every SPM package. Being `#include?`d, its
+absence on a Mac checkout leaves local development signing untouched.
+`DEVELOPMENT_TEAM` and `CODE_SIGN_STYLE` stay on the command line deliberately:
+the SPM targets do need those to sign themselves.
 
 The exported `.ipa` filename is **globbed, never hardcoded**: xcodebuild names
 it from the archive's product and nothing predicts whether that resolves to

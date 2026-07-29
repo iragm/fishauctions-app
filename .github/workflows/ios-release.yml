@@ -197,20 +197,43 @@ jobs:
           --build-number=${{ github.run_number }}
           --build-name=$BUILD_NAME
 
-      # CODE_SIGN_IDENTITY is overridden on the command line because the Flutter
-      # project template pins `"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone
-      # Developer"` in all three project-level configs (project.pbxproj — a
-      # leftover from an older template). That's a *development* identity, so
-      # automatic signing dutifully tried to mint an "iOS App Development"
-      # profile, which requires at least one registered device, and the archive
-      # died with "Your team has no devices from which to generate a
-      # provisioning profile" + "No profiles for 'com.fishauctions.app' were
-      # found" — on a CI runner that will never have a device attached, and for
-      # a build that wants App Store distribution signing anyway.
+      # Why the signing identity arrives as an xcconfig instead of an xcodebuild
+      # argument — two failures, in order:
       #
-      # Command-line build settings outrank everything in the project including
-      # conditional variants, so this wins no matter what the template does; the
-      # pin is left in place so local `flutter run` on a Mac is unaffected.
+      # 1. The Flutter template pins `"CODE_SIGN_IDENTITY[sdk=iphoneos*]" =
+      #    "iPhone Developer"` in all three PROJECT-level configs (still true in
+      #    Flutter 3.44's template). That's a *development* identity, so
+      #    automatic signing tried to mint an "iOS App Development" profile —
+      #    which requires a registered device — and died with "Your team has no
+      #    devices from which to generate a provisioning profile". A CI runner
+      #    never has a device attached, and an App Store archive doesn't want
+      #    development signing anyway.
+      # 2. Overriding it as `xcodebuild CODE_SIGN_IDENTITY=...` then applied to
+      #    EVERY target in the workspace, including SPM package targets:
+      #    "GoogleUtilities_GoogleUtilities-UserDefaults has conflicting
+      #    provisioning settings ... automatically signed for development, but a
+      #    conflicting code signing identity Apple Distribution has been
+      #    manually specified". Resource bundles have no business being
+      #    distribution-signed, and xcodebuild cannot scope a setting to one
+      #    target.
+      #
+      # Flutter/Release.xcconfig is the base configuration of the *Runner
+      # target's* Release and Profile configs only, and a target-level xcconfig
+      # outranks project-level build settings — so writing the identity there
+      # beats the template pin while staying invisible to RunnerTests and to
+      # every SPM package. It's `#include?`d, so its absence locally leaves a
+      # Mac checkout signing for development exactly as before.
+      #
+      # DEVELOPMENT_TEAM and CODE_SIGN_STYLE stay on the command line on
+      # purpose: the SPM targets do need those to sign themselves automatically.
+      - name: Force distribution signing on the Runner target
+        if: ${{ inputs.distribute }}
+        run: |
+          cat > ios/Flutter/CI.xcconfig <<'XCCONFIG'
+          CODE_SIGN_IDENTITY = Apple Distribution
+          CODE_SIGN_IDENTITY[sdk=iphoneos*] = Apple Distribution
+          XCCONFIG
+
       # -allowProvisioningDeviceRegistration is deliberately absent: registering
       # devices is a development-signing concern and only muddies the intent.
       - name: Archive
@@ -231,7 +254,6 @@ jobs:
             -authenticationKeyIssuerID "$APPSTORE_API_ISSUER_ID" \
             DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
             CODE_SIGN_STYLE=Automatic \
-            CODE_SIGN_IDENTITY="Apple Distribution" \
             archive
 
       - name: Export signed IPA
