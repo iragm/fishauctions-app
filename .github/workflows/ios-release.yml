@@ -322,6 +322,19 @@ jobs:
           echo "Exported $ipa"
           echo "IPA_PATH=$ipa" >> "$GITHUB_ENV"
 
+      # `wait-for-processing` defaults to true: after uploading, the action polls
+      # App Store Connect until the build finishes processing. Worth keeping —
+      # it's the only in-CI signal that the upload was actually *accepted* — but
+      # know its failure mode: App Store Connect JWTs are capped at 20 minutes and
+      # the action mints one and never refreshes it, so a poll that runs longer
+      # dies with
+      #
+      #   Failed to query builds for processing state. (401) NOT_AUTHORIZED
+      #
+      # That is NOT a credentials problem. It means the upload succeeded and
+      # processing didn't finish inside 20 minutes — which is what a *rejected*
+      # build looks like, since the state it's waiting for never arrives. Check
+      # the ITMS email and App Store Connect before touching any secret.
       - name: Upload to TestFlight
         if: ${{ inputs.distribute }}
         uses: apple-actions/upload-testflight-build@v5
