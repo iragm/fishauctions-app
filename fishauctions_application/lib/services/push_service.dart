@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
@@ -21,6 +23,21 @@ class PushMessage {
   final String url;
 }
 
+/// The outcome of [PushService.enable] — what to tell the user next.
+enum PushEnableResult {
+  /// Permission granted and a token is registered: push is live.
+  enabled,
+
+  /// The user said no. Re-asking is possible on Android (a second decline is
+  /// permanent) but pointless on iOS after the first, so callers point at the
+  /// system settings instead of prompting again.
+  denied,
+
+  /// This deployment/build has no push config, or Firebase failed to come up —
+  /// nothing to enable. The backend keeps emailing.
+  unavailable,
+}
+
 /// Push notifications (FCM), for BACKEND_SPEC.md Part 2.
 ///
 /// Wired against the runtime Firebase client config from `/api/mobile/config/`
@@ -30,6 +47,19 @@ class PushMessage {
 /// backend, whose config targets the staging package, gets no push instead of a
 /// mismatched registration). When inert, [currentToken] stays null, device
 /// registration omits `fcm_token`, and the backend keeps emailing.
+///
+/// **[init] never prompts.** It brings Firebase and the message listeners up
+/// and reads the token only if notification permission *already* exists, so a
+/// cold start is silent; the OS dialog is raised by [enable], from a place in
+/// the app where the user just asked for notifications (see
+/// `PushPromptService`). An install-time prompt for something the user hasn't
+/// been offered yet is the single most-dismissed dialog in any app, and a
+/// dismissal is permanent on iOS.
+///
+/// The token is also deliberately withheld until permission exists: the backend
+/// treats "has a `MobileDevice` row with an `fcm_token`" as "this user can
+/// receive push" (it's what un-disables the preferences toggle), and a token
+/// from a phone that will drop every notification makes that read wrong.
 ///
 /// The backend sends a `notification`+`data` message: the OS displays it in the
 /// background/terminated states (both platforms), so there is no background
@@ -42,9 +72,18 @@ class PushService {
   String? _token;
   bool _initialized = false;
 
+  /// True once Firebase is up for this build — i.e. push *could* work if the
+  /// user allows notifications. False while inert (no config for this
+  /// deployment/platform/package, or init failed), in which case there is
+  /// nothing to offer and no prompt should ever be shown.
+  bool get isConfigured => _initialized;
+
   /// Set once at startup so a refreshed token re-registers the device. Kept as
   /// a callback (not a direct AuthService call) to avoid an import cycle.
-  void Function()? onTokenChanged;
+  /// Awaited by [enable] — the backend won't accept the "push instead of email"
+  /// preference until the account has a device carrying a token, so the
+  /// registration has to land before that write, not race it.
+  Future<void> Function()? onTokenChanged;
 
   /// A destination for the WebView from a notification **tap** (background or
   /// terminated tap, or the "View" action on a foreground banner). The shell
@@ -71,10 +110,72 @@ class PushService {
     return route;
   }
 
+  /// Whether the OS currently allows this app to show notifications. False when
+  /// push is inert (nothing has been asked), when the user declined, or when
+  /// notifications were switched off in system settings later. Never prompts.
+  Future<bool> hasPermission() async {
+    if (!_initialized) {
+      return false;
+    }
+    try {
+      final settings = await FirebaseMessaging.instance
+          .getNotificationSettings();
+      return _isAllowed(settings.authorizationStatus);
+    } on Object catch (e) {
+      debugPrint('Push: reading notification settings failed: $e');
+      return false;
+    }
+  }
+
+  /// Raises the OS notification permission dialog (if it hasn't been answered
+  /// yet), then picks up the FCM token and hands it to [onTokenChanged] so the
+  /// device re-registers. Call this only from a place where the user has just
+  /// asked for notifications.
+  ///
+  /// Safe to call when already granted — no second dialog, and it repairs a
+  /// missing token (e.g. permission granted in system settings after launch).
+  Future<PushEnableResult> enable() async {
+    if (!_initialized) {
+      return PushEnableResult.unavailable;
+    }
+    try {
+      final messaging = FirebaseMessaging.instance;
+      // Prompts on iOS and Android 13+; a no-op that reports `authorized`
+      // below that. A second call after a decline returns the stored answer
+      // rather than re-prompting, which is why callers offer system settings.
+      final settings = await messaging.requestPermission();
+      if (!_isAllowed(settings.authorizationStatus)) {
+        return PushEnableResult.denied;
+      }
+      _token = await messaging.getToken();
+      if (_token == null) {
+        // Permission is there but FCM has no token yet (an APNs registration
+        // that hasn't landed, or Play Services trouble). onTokenRefresh will
+        // deliver it and re-register; nothing more to do here.
+        debugPrint('Push: permission granted but no token yet.');
+      }
+      await onTokenChanged?.call();
+      return PushEnableResult.enabled;
+    } on Object catch (e) {
+      debugPrint('Push: enable failed: $e');
+      return PushEnableResult.unavailable;
+    }
+  }
+
+  /// iOS reports `provisional` for quiet-delivery authorization, which does
+  /// deliver notifications; both platforms use `authorized` for the normal
+  /// case.
+  static bool _isAllowed(AuthorizationStatus status) =>
+      status == AuthorizationStatus.authorized ||
+      status == AuthorizationStatus.provisional;
+
   /// Idempotent. Initializes Firebase + FCM from [config] when — and only when
   /// — this deployment ships a complete push config for this platform *and*
   /// this build's applicationId/bundle id. Any failure leaves push inert
   /// (email fallback); it never throws.
+  ///
+  /// Deliberately silent: no permission dialog, and no token unless the OS
+  /// already allows notifications. [enable] is what asks.
   Future<void> init(AppConfig config) async {
     if (_initialized) {
       return;
@@ -103,12 +204,16 @@ class PushService {
         ),
       );
       final messaging = FirebaseMessaging.instance;
-      // Prompts on iOS and Android 13+; a no-op (returns authorized) elsewhere.
-      await messaging.requestPermission();
-      _token = await messaging.getToken();
+      // Only read the token when the OS is already going to deliver — see the
+      // class doc. `enable()` fills it in after a grant.
+      if (_isAllowed(
+        (await messaging.getNotificationSettings()).authorizationStatus,
+      )) {
+        _token = await messaging.getToken();
+      }
       messaging.onTokenRefresh.listen((refreshed) {
         _token = refreshed;
-        onTokenChanged?.call();
+        unawaited(onTokenChanged?.call() ?? Future<void>.value());
       });
       FirebaseMessaging.onMessage.listen(_onForegroundMessage);
       FirebaseMessaging.onMessageOpenedApp.listen(_routeFrom);

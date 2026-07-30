@@ -12,15 +12,22 @@ import '../models/ar_models.dart';
 import '../services/ar_api.dart';
 import '../services/ar_camera_service.dart';
 import '../services/ar_session.dart';
+import '../services/checkin_service.dart';
+import '../services/location_service.dart';
 import '../utils/ar_geometry.dart';
 import '../utils/lot_qr.dart';
 import '../utils/platform_bridge.dart';
 import '../widgets/ar_camera_view.dart';
 
-/// AR lot mode: a live camera view that recognizes lot-label QR codes and
+/// Lot scanning: a live camera view that recognizes lot-label QR codes and
 /// overlays what they are. Reached from the web's app-only buttons —
 /// `fishauctions://ar/<auction_slug>` on the auction rules page, plus
-/// `?locate=<lot_pk>` from a lot page's "Locate with AR".
+/// `?locate=<lot_pk>` from a lot page's "Find this lot".
+///
+/// Called "Lot scanning" everywhere the user can see it; "AR" survives only in
+/// identifiers, the deep-link scheme and the `/api/mobile/ar/*` endpoints, none
+/// of which are user-facing. The feature is about finding lots — the augmented
+/// reality is the technique, not the point.
 ///
 ///  * Few labels in frame → name chips at each code (with the lot photo when
 ///    only one or two are up); many → dots. A watched lot's marker is a star,
@@ -180,7 +187,16 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
   }
 
   Future<void> _initCamera() async {
-    final status = await Permission.camera.request();
+    // A platform failure here (a mangled manifest, a permission service that
+    // won't answer) must land on the explainer, not an unhandled async error
+    // over a black screen.
+    PermissionStatus status;
+    try {
+      status = await Permission.camera.request();
+    } on Object catch (e) {
+      debugPrint('Lot scanning: camera permission request failed: $e');
+      status = PermissionStatus.denied;
+    }
     if (!mounted) {
       return;
     }
@@ -229,6 +245,42 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
       (_) => _sweep(),
     );
     setState(() => _access = _CameraAccess.granted);
+    unawaited(_offerLocation());
+  }
+
+  /// Ask for location once the scanner is actually up.
+  ///
+  /// Someone on this screen is standing in an auction hall, which is the one
+  /// moment location genuinely earns its prompt: the position lets the server
+  /// recognize that they've arrived and check them in (`CheckinService`), and
+  /// it seeds the distance figures the auction and lot pages show when they go
+  /// back to browsing. The rest of the app deliberately never prompts —
+  /// there's a soft banner on the listings pages and nothing at all at launch
+  /// — so this is the only place in the app that raises the dialog directly,
+  /// and it does so *after* the camera view has painted so the context is
+  /// visible behind it rather than a black screen.
+  ///
+  /// Declining costs nothing: scanning, the overlay, the map and locate mode
+  /// are all built from camera geometry and never used GPS.
+  Future<void> _offerLocation() async {
+    // Give the camera passthrough a beat to appear, and never stack this on
+    // top of the camera dialog the user just answered.
+    await Future<void>.delayed(const Duration(milliseconds: 700));
+    if (!mounted || _access != _CameraAccess.granted) {
+      return;
+    }
+    if (await LocationService.instance.hasPermission()) {
+      // Already granted — still worth a ping; they may have just walked in.
+      unawaited(CheckinService.instance.ping());
+      return;
+    }
+    if (!await LocationService.instance.canPrompt()) {
+      return; // permanently denied — the OS dialog would never appear
+    }
+    final position = await LocationService.instance.requestAndGetPosition();
+    if (position != null) {
+      unawaited(CheckinService.instance.ping());
+    }
   }
 
   /// Handles one event from `ArCameraService.poseEvents()`: either a session
@@ -533,7 +585,7 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
     }
     final auctionTitle = _auction?.title;
     return (auctionTitle == null || auctionTitle.isEmpty)
-        ? 'AR Lots'
+        ? 'Lot scanning'
         : auctionTitle;
   }
 
@@ -555,7 +607,7 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
       ),
       _CameraAccess.denied => _PermissionExplainer(
         message:
-            'AR mode needs the camera to scan lot labels. Grant camera '
+            'Lot scanning needs the camera to read lot labels. Grant camera '
             'access to continue.',
         buttonLabel: 'Grant camera access',
         onPressed: _initCamera,
@@ -563,7 +615,7 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
       _CameraAccess.permanentlyDenied => const _PermissionExplainer(
         message:
             'Camera access is turned off for this app. Enable it in system '
-            'settings to use AR mode.',
+            'settings to scan lots.',
         buttonLabel: 'Open settings',
         onPressed: openAppSettings,
       ),
@@ -578,7 +630,7 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
       return _PermissionExplainer(
         message:
             _arStatusMessage ??
-            "AR mode couldn't start on this device. Please try again.",
+            "Lot scanning couldn't start on this device. Please try again.",
         buttonLabel: 'Go back',
         onPressed: () => context.pop(),
       );

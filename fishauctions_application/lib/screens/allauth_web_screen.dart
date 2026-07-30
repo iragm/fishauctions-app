@@ -1,15 +1,23 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../config/environment.dart';
 import '../config/theme.dart';
 import '../constants/app_constants.dart';
+import '../models/app_config.dart';
+import '../providers/config_provider.dart';
+import '../widgets/legal_links.dart';
 
 /// Hosts a single django-allauth account flow (signup or password reset) in a
 /// restricted WebView, so those flows stay exactly the server's — reCAPTCHA,
 /// email verification, throttling and all — without a native re-implementation.
+/// Also serves the terms/privacy pages the signup screen has to link to, which
+/// are read-only pages on the same host and want exactly the same containment.
 ///
 /// The app requires an account (there is no anonymous browsing), so this
 /// screen is part of the login trap: navigation is confined to the site's
@@ -22,23 +30,41 @@ import '../constants/app_constants.dart';
 /// The site mounts allauth at the root (`/login/`, `/signup/`,
 /// `/password/reset/`), not under `/accounts/` — django-allauth's default
 /// prefix, which this used to assume and 404'd on every path.
-class AllauthWebScreen extends StatefulWidget {
+class AllauthWebScreen extends ConsumerStatefulWidget {
   const AllauthWebScreen.signup({super.key})
     : title = 'Create account',
-      initialPath = '/signup/';
+      initialPath = '/signup/',
+      showLegalFooter = true;
 
   const AllauthWebScreen.passwordReset({super.key})
     : title = 'Reset password',
-      initialPath = '/password/reset/';
+      initialPath = '/password/reset/',
+      showLegalFooter = false;
+
+  /// A read-only legal page (terms, privacy policy) reached from the login or
+  /// signup screen. [initialPath] comes from `/api/mobile/config/` and is
+  /// always same-host and site-relative by then (see `AppConfig`).
+  const AllauthWebScreen.legal({
+    required this.title,
+    required this.initialPath,
+    super.key,
+  }) : showLegalFooter = false;
 
   final String title;
   final String initialPath;
 
+  /// Whether to draw the terms/privacy links under the page. On the signup
+  /// screen they're required — that's where the account is created, and Apple
+  /// expects the links at that point — and the Django template doesn't carry
+  /// them (BACKEND_SPEC.md Part L covers adding them server-side, at which
+  /// point these become a belt-and-braces duplicate rather than the only copy).
+  final bool showLegalFooter;
+
   @override
-  State<AllauthWebScreen> createState() => _AllauthWebScreenState();
+  ConsumerState<AllauthWebScreen> createState() => _AllauthWebScreenState();
 }
 
-class _AllauthWebScreenState extends State<AllauthWebScreen> {
+class _AllauthWebScreenState extends ConsumerState<AllauthWebScreen> {
   static final InAppWebViewSettings _settings = InAppWebViewSettings(
     userAgent: AppConstants.userAgent,
     useShouldOverrideUrlLoading: true,
@@ -48,7 +74,15 @@ class _AllauthWebScreenState extends State<AllauthWebScreen> {
     transparentBackground: true,
   );
 
+  InAppWebViewController? _controller;
   bool _loading = true;
+
+  /// Set when the page couldn't load at all — almost always no connectivity,
+  /// which is a real first-run case: someone installs the app on hotel wifi
+  /// that hasn't logged in yet and taps "Create account". The engine's own
+  /// error page is a bare "webpage not available" with no way back, so we
+  /// replace it with something that says what happened and offers a retry.
+  String? _loadError;
 
   Future<NavigationActionPolicy> _shouldOverrideUrlLoading(
     InAppWebViewController controller,
@@ -82,6 +116,13 @@ class _AllauthWebScreenState extends State<AllauthWebScreen> {
         (uri.path == widget.initialPath || inFlowPaths.contains(uri.path))) {
       return NavigationActionPolicy.ALLOW;
     }
+    // The terms/privacy pages, whether reached from this screen's native footer
+    // or from a link the signup template grows later. In place, not in the
+    // system browser: bouncing someone out of sign-up to read the terms and
+    // back is how you lose a half-filled form.
+    if (uri.host == webHost && _isLegalPath(uri.path)) {
+      return NavigationActionPolicy.ALLOW;
+    }
     if (uri.host == webHost && uri.path == '/login/') {
       // "Already have an account? Sign in" — route to the native login.
       if (mounted) {
@@ -92,6 +133,16 @@ class _AllauthWebScreenState extends State<AllauthWebScreen> {
     // Everything else leaves the account flow — open it outside the trap.
     await _openExternally(uri);
     return NavigationActionPolicy.CANCEL;
+  }
+
+  /// Whether [path] is one of this deployment's legal pages, per
+  /// `/api/mobile/config/` (with the `/tos/` fallback). Read from the provider
+  /// rather than hardcoded so a fork's own document paths are allowed too.
+  bool _isLegalPath(String path) {
+    final config = ref.read(configProvider).value;
+    final terms = config?.termsPath ?? AppConfig.defaultTermsPath;
+    final privacy = config?.privacyPath ?? '';
+    return path == terms || (privacy.isNotEmpty && path == privacy);
   }
 
   Future<bool> _onCreateWindow(
@@ -113,35 +164,111 @@ class _AllauthWebScreenState extends State<AllauthWebScreen> {
     }
   }
 
+  /// A main-frame load failure. Signing up is the one flow with no offline
+  /// fallback at all (there is no account yet, so nothing is cached), so all we
+  /// can offer is an honest explanation and a retry.
+  void _onLoadError(
+    InAppWebViewController controller,
+    WebResourceRequest request,
+    WebResourceError error,
+  ) {
+    if (!(request.isForMainFrame ?? true) || !mounted) {
+      return;
+    }
+    setState(() {
+      _loading = false;
+      _loadError =
+          'Couldn\'t reach ${Uri.parse(EnvironmentConfig.webBaseUrl).host}. '
+          'Check your connection and try again.';
+    });
+  }
+
+  Future<void> _retry() async {
+    setState(() {
+      _loadError = null;
+      _loading = true;
+    });
+    final controller = _controller;
+    if (controller == null) {
+      return;
+    }
+    await controller.loadUrl(
+      urlRequest: URLRequest(
+        url: WebUri('${EnvironmentConfig.webBaseUrl}${widget.initialPath}'),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(title: Text(widget.title)),
-    body: Stack(
+    body: Column(
       children: [
-        const ColoredBox(
-          color: AppTheme.scaffoldBackground,
-          child: SizedBox.expand(),
-        ),
-        InAppWebView(
-          initialSettings: _settings,
-          initialUrlRequest: URLRequest(
-            url: WebUri('${EnvironmentConfig.webBaseUrl}${widget.initialPath}'),
+        Expanded(
+          child: Stack(
+            children: [
+              const ColoredBox(
+                color: AppTheme.scaffoldBackground,
+                child: SizedBox.expand(),
+              ),
+              // Kept mounted underneath the error panel so a retry reuses the
+              // same controller (and whatever the user had typed, when the
+              // failure was a submit rather than the first load).
+              InAppWebView(
+                initialSettings: _settings,
+                initialUrlRequest: URLRequest(
+                  url: WebUri(
+                    '${EnvironmentConfig.webBaseUrl}${widget.initialPath}',
+                  ),
+                ),
+                onWebViewCreated: (c) => _controller = c,
+                onLoadStart: (c, url) {
+                  if (mounted) {
+                    setState(() {
+                      _loading = true;
+                      _loadError = null;
+                    });
+                  }
+                },
+                onLoadStop: (c, url) {
+                  if (mounted) {
+                    setState(() => _loading = false);
+                  }
+                },
+                onReceivedError: _onLoadError,
+                shouldOverrideUrlLoading: _shouldOverrideUrlLoading,
+                onCreateWindow: _onCreateWindow,
+              ),
+              if (_loadError case final message?) _errorPanel(message),
+              if (_loading) const LinearProgressIndicator(minHeight: 3),
+            ],
           ),
-          onLoadStart: (c, url) {
-            if (mounted) {
-              setState(() => _loading = true);
-            }
-          },
-          onLoadStop: (c, url) {
-            if (mounted) {
-              setState(() => _loading = false);
-            }
-          },
-          shouldOverrideUrlLoading: _shouldOverrideUrlLoading,
-          onCreateWindow: _onCreateWindow,
         ),
-        if (_loading) const LinearProgressIndicator(minHeight: 3),
+        if (widget.showLegalFooter)
+          const SafeArea(top: false, child: LegalLinks()),
       ],
+    ),
+  );
+
+  Widget _errorPanel(String message) => ColoredBox(
+    color: AppTheme.scaffoldBackground,
+    child: Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Icon(Icons.cloud_off, size: 48),
+            const SizedBox(height: 16),
+            Text(message, textAlign: TextAlign.center),
+            const SizedBox(height: 24),
+            FilledButton(
+              onPressed: () => unawaited(_retry()),
+              child: const Text('Try again'),
+            ),
+          ],
+        ),
+      ),
     ),
   );
 }

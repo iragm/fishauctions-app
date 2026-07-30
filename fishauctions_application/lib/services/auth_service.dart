@@ -9,6 +9,7 @@ import '../utils/secure_storage.dart';
 import 'api_service.dart';
 import 'last_page_service.dart';
 import 'offline_sync_service.dart';
+import 'push_prompt_service.dart';
 import 'push_service.dart';
 import 'social_auth_service.dart';
 import 'square_payment_service.dart';
@@ -100,6 +101,9 @@ class AuthService {
     // Where the last session was browsing is this account's business too —
     // the next sign-in starts at the home page, not someone else's lot.
     await LastPageService.instance.clear();
+    // "This phone already declined notifications" was an answer for the
+    // previous account, not the next one.
+    await PushPromptService.instance.clear();
     await _api.clearTokens();
     await _storage.delete(key: _keyCachedUser);
   }

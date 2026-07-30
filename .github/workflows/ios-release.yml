@@ -107,7 +107,9 @@ jobs:
           # Not installable (unsigned) — this is a build-verification artifact.
           path: fishauctions_application/build/ios/iphoneos/Runner.app
           if-no-files-found: error
-          retention-days: 14
+          # One day, matching android-release.yml: this is a public repo, so
+          # every run's artifacts are downloadable by anyone. See the note there.
+          retention-days: 1
 
       # ── Signed build + TestFlight (distribute == true) ─────────────────────
       # Mac-less signing via an App Store Connect API key + Xcode automatic
@@ -354,4 +356,6 @@ jobs:
           name: ios-ipa-${{ github.sha }}
           path: ${{ env.IPA_PATH }}
           if-no-files-found: error
-          retention-days: 14
+          # One day — see android-release.yml. TestFlight is the durable copy of
+          # a distributed build; this artifact only needs to outlive the run.
+          retention-days: 1

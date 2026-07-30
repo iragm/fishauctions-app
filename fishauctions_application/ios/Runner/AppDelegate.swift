@@ -55,6 +55,15 @@ import UIKit
         )
       case "getCameraFov":
         Self.handleGetCameraFov(result: result)
+      case "addPassToWallet":
+        // iOS-only: Android has no equivalent (Google Wallet passes are added
+        // by opening a save URL in the browser, which the WebView already
+        // routes externally). See WalletPassPresenter.swift.
+        let arguments = call.arguments as? [String: Any]
+        WalletPassPresenter.addPass(
+          data: arguments?["bytes"] as? FlutterStandardTypedData,
+          result: result
+        )
       default:
         result(FlutterMethodNotImplemented)
       }

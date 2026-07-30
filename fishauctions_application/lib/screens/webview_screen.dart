@@ -31,9 +31,11 @@ import '../services/label_prefs_service.dart';
 import '../services/label_print_service.dart';
 import '../services/last_page_service.dart';
 import '../services/location_service.dart';
+import '../services/notification_prefs_service.dart';
 import '../services/offline_store.dart';
 import '../services/offline_sync_service.dart';
 import '../services/printer_setup_prompt.dart';
+import '../services/push_prompt_service.dart';
 import '../services/push_service.dart';
 import '../services/shortcut_service.dart';
 import '../services/square_payment_service.dart';
@@ -82,7 +84,34 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   bool _canGoBack = false;
   // The soft location banner is offered at most once per app session, the first
   // time the user reaches a location-aware screen. See _maybeOfferLocation.
+  // Set only when a banner is actually shown, so an offer that a redirect stole
+  // before the user could read it still gets another chance on the next page.
   bool _locationOffered = false;
+
+  // Bumped on every main-frame load start. Contextual banners (location, push)
+  // are decided after a page settles, which involves awaits — and a page that
+  // immediately redirects would otherwise get a banner posted onto the *next*
+  // page, or shown for the few frames before _onLoadStart hides it again. Every
+  // offer captures this value and bails if it has moved on. This is the fix for
+  // "the location prompt appears briefly and then hides itself".
+  int _navGeneration = 0;
+
+  // The navigation a contextual banner has already claimed. Two of them (say a
+  // location offer and a notification offer on the same in-person lot page)
+  // would otherwise queue up in the messenger and greet the user one after the
+  // other.
+  int? _bannerGeneration;
+
+  /// How long a page must stay put before a contextual banner is allowed to
+  /// appear over it. Long enough to cover a server redirect or a JS
+  /// `location.replace`, short enough that the offer still feels like part of
+  /// arriving on the page.
+  static const Duration _bannerSettleDelay = Duration(milliseconds: 900);
+
+  /// Cap on how long an offer waits for a still-loading page to finish. Past
+  /// this the page is slow or broken and the offer is dropped — it can be made
+  /// again on the next navigation.
+  static const Duration _bannerSettleTimeout = Duration(seconds: 5);
 
   // ── Single sign-on bridging ───────────────────────────────────────────────
   // The router only mounts this screen for a signed-in native session, and a
@@ -159,11 +188,15 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   /// registration ran before push was ready). Also re-registers on future token
   /// refreshes. Best-effort: push stays inert on failure or when this
   /// deployment/build has no push config.
+  ///
+  /// This deliberately does **not** ask for the notification permission; that
+  /// happens contextually (see _maybeOfferPush). A token only exists here if
+  /// the user has already allowed notifications on a previous run.
   Future<void> _warmPush() async {
     try {
       final cfg = await ref.read(configProvider.future);
-      PushService.instance.onTokenChanged = () =>
-          unawaited(AuthService.instance.registerThisDevice());
+      PushService.instance.onTokenChanged =
+          AuthService.instance.registerThisDevice;
       await PushService.instance.init(cfg);
       if (PushService.instance.token != null) {
         unawaited(AuthService.instance.registerThisDevice());
@@ -171,6 +204,21 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     } on Object catch (e) {
       debugPrint('Push warm-up skipped: $e');
     }
+  }
+
+  /// If the deployment config never loaded (a cold start with no connectivity,
+  /// which at an auction hall is routine), everything keyed off it stays broken
+  /// for the whole process: Tap to Pay can't initialize, push stays inert, and
+  /// the notification offer would tell the user notifications "aren't available
+  /// on this device". Riverpod caches the failure, so re-ask on resume — by
+  /// which point the user has usually fixed the network themselves.
+  Future<void> _rewarmConfigIfFailed() async {
+    if (!ref.read(configProvider).hasError) {
+      return;
+    }
+    ref.invalidate(configProvider);
+    await _warmSquare();
+    await _warmPush();
   }
 
   /// Called once the InAppWebView exists. Registers the JS bridges, seeds the
@@ -211,6 +259,32 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
         callback: (_) async {
           await ref.read(printerProvider.notifier).forget();
           return _printerState();
+        },
+      )
+      // Notification opt-in, for the pages that know when it's worth asking —
+      // notably a lot page in an in-person auction, which the app can't
+      // recognize from a URL (BACKEND_SPEC.md Part N).
+      //   pushGetState()      → {supported, permitted, prefs_endpoint}
+      //   pushPromptOffer(r)  → soft banner, at most once per device; {offered}
+      //   pushEnable()        → the full opt-in now, for an explicit button tap
+      ..addJavaScriptHandler(
+        handlerName: 'pushGetState',
+        callback: (_) => _pushState(),
+      )
+      ..addJavaScriptHandler(
+        handlerName: 'pushPromptOffer',
+        callback: (args) async {
+          final surface = _pushSurfaceFrom(args.firstOrNull);
+          final before = _bannerGeneration;
+          await _maybeOfferPush(surface, _navGeneration);
+          return {'offered': _bannerGeneration != before};
+        },
+      )
+      ..addJavaScriptHandler(
+        handlerName: 'pushEnable',
+        callback: (args) async {
+          await _enablePushFromWeb(_pushSurfaceFrom(args.firstOrNull));
+          return _pushState();
         },
       );
     await _applyLocation(prompt: false, fresh: false);
@@ -527,6 +601,7 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       OfflineSyncService.instance.onAppResumed();
       // The user may have just walked into the auction hall.
       CheckinService.instance.onAppResumed();
+      unawaited(_rewarmConfigIfFailed());
     }
     // Going into the background is the moment before the process may be
     // reclaimed — take a last reading of where the user is, in case the page
@@ -584,11 +659,43 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     );
   }
 
+  /// Whether a banner queued during navigation [generation] may still be shown:
+  /// the page has to have stayed put for [_bannerSettleDelay] and no other
+  /// contextual banner may have claimed the same navigation.
+  ///
+  /// Without this a page that settles and then redirects (a login bounce, a
+  /// slug canonicalization, a `location.replace`) shows a banner for a few
+  /// frames before `_onLoadStart` hides it — a prompt that flashes and
+  /// disappears, which is worse than no prompt: the user sees that they were
+  /// asked something and has no way to answer it.
+  Future<bool> _claimBanner(int generation) async {
+    await Future<void>.delayed(_bannerSettleDelay);
+    // A page that queues an offer from its own JS (the `pushPromptOffer`
+    // bridge, fired on DOMContentLoaded) gets here before onLoadStop, so
+    // "still loading" has to mean *wait*, not *give up*. Bounded, because a
+    // page whose sub-resources never finish must not hold the offer forever.
+    final deadline = DateTime.now().add(_bannerSettleTimeout);
+    while (mounted &&
+        _loading &&
+        _navGeneration == generation &&
+        DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+    }
+    if (!mounted || _navGeneration != generation || _loading) {
+      return false;
+    }
+    if (_bannerGeneration == generation) {
+      return false;
+    }
+    _bannerGeneration = generation;
+    return true;
+  }
+
   /// The first time the user lands on a location-aware screen without location
   /// set, offer a soft, dismissible banner. Runs at most once per app session.
   /// If location is already granted we just refresh the cookies silently; if it
   /// was permanently denied we stay quiet (the banner couldn't re-prompt).
-  Future<void> _maybeOfferLocation(String path) async {
+  Future<void> _maybeOfferLocation(String path, int generation) async {
     if (_locationOffered || !LocationService.isLocationAwarePath(path)) {
       return;
     }
@@ -602,6 +709,9 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     if (!await LocationService.instance.canPrompt()) {
       _locationOffered = true; // permanently denied — nothing we can offer
       return;
+    }
+    if (!await _claimBanner(generation)) {
+      return; // superseded by a redirect or another offer — try the next page
     }
     _locationOffered = true;
     _showLocationBanner();
@@ -645,9 +755,167 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     }
   }
 
+  // ── Notification opt-in ───────────────────────────────────────────────────
+  //
+  // The OS notification dialog used to fire from PushService.init at shell
+  // mount — seconds after launch, before the user knew what they'd be notified
+  // about. It's now raised only from the two places where the answer means
+  // something: the preferences page (the notification settings screen, whose
+  // "app instead of email" checkbox the server disables until this phone has a
+  // live token) and a lot page in an in-person auction ("tell me when this is
+  // about to sell"). Both run the identical opt-in — see PushPromptService.
+
+  /// The web notification settings page. Matched app-side so the offer works
+  /// with no web change; the in-person lot page can't be recognized from a URL
+  /// and arrives through the `pushPromptOffer` JS bridge instead.
+  static bool _isPreferencesPath(String path) =>
+      path == '/preferences/' || path == '/preferences';
+
+  /// What the `pushGetState` / `pushEnable` bridge handlers resolve with, so a
+  /// page can render "notifications are on for this phone" without guessing.
+  Future<Map<String, Object?>> _pushState() async => {
+    'supported': PushService.instance.isConfigured,
+    'permitted': await PushService.instance.hasPermission(),
+    // False on a deployment without notifications/prefs/ — the page then owns
+    // the toggles and the app only handles the OS permission.
+    'prefs_endpoint': NotificationPrefsService.instance.isAvailable,
+  };
+
+  /// Maps the bridge's reason string onto a surface. Anything unrecognized (a
+  /// newer template, a typo) falls back to the lot wording, which is the only
+  /// surface the web has a reason to drive.
+  static PushPromptSurface _pushSurfaceFrom(Object? raw) =>
+      '$raw' == 'preferences'
+      ? PushPromptSurface.preferences
+      : PushPromptSurface.lotSellingSoon;
+
+  /// A web button asking for notifications outright — the user tapped "notify
+  /// me", so run the opt-in rather than asking them again in a banner.
+  Future<void> _enablePushFromWeb(PushPromptSurface surface) async {
+    await PushPromptService.instance.markOffered(surface);
+    await _enablePushFromBanner(surface);
+  }
+
+  Future<void> _maybeOfferPushForPath(String path, int generation) async {
+    if (!_isPreferencesPath(path)) {
+      return;
+    }
+    await _maybeOfferPush(PushPromptSurface.preferences, generation);
+  }
+
+  Future<void> _maybeOfferPush(
+    PushPromptSurface surface,
+    int generation,
+  ) async {
+    if (!await PushPromptService.instance.shouldOffer(surface)) {
+      return;
+    }
+    if (!await _claimBanner(generation)) {
+      return;
+    }
+    await PushPromptService.instance.markOffered(surface);
+    _showPushBanner(surface);
+  }
+
+  void _showPushBanner(PushPromptSurface surface) {
+    if (!mounted) {
+      return;
+    }
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showMaterialBanner(
+      MaterialBanner(
+        leading: const Icon(Icons.notifications_none),
+        content: Text(switch (surface) {
+          PushPromptSurface.preferences =>
+            'Get notifications on this phone instead of emails?',
+          PushPromptSurface.lotSellingSoon =>
+            'Get notified when lots you\'re watching are about to sell?',
+        }),
+        actions: [
+          TextButton(
+            onPressed: messenger.hideCurrentMaterialBanner,
+            child: const Text('Not now'),
+          ),
+          TextButton(
+            onPressed: () => unawaited(_enablePushFromBanner(surface)),
+            child: const Text('Enable'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Runs the opt-in and reports the outcome. A decline is a dead end unless we
+  /// say where the switch lives (iOS never re-prompts), and a grant the server
+  /// couldn't record needs the same signpost — so both point at
+  /// `/preferences/`, except when that's already the page underneath.
+  Future<void> _enablePushFromBanner(PushPromptSurface surface) async {
+    if (mounted) {
+      ScaffoldMessenger.of(context).hideCurrentMaterialBanner();
+    }
+    final outcome = await PushPromptService.instance.enable();
+    if (!mounted) {
+      return;
+    }
+    final onPreferences = surface == PushPromptSurface.preferences;
+    switch (outcome.result) {
+      case PushEnableResult.enabled when outcome.prefsWritten:
+        // The preferences page renders these very checkboxes — reload so it
+        // shows what just changed rather than a stale unchecked box.
+        if (onPreferences) {
+          await _controller?.reload();
+        }
+        _showSnack('Notifications are on for this phone.');
+      case PushEnableResult.enabled:
+        _showPushFollowUp(
+          'Notifications are allowed. Finish turning them on in your '
+          'preferences.',
+          onPreferences: onPreferences,
+        );
+      case PushEnableResult.denied:
+        _showPushFollowUp(
+          'Notifications are turned off for this app. You can turn them on in '
+          'your phone\'s settings.',
+          onPreferences: true, // the fix is in system settings, not on the page
+          settingsAction: true,
+        );
+      case PushEnableResult.unavailable:
+        _showSnack('Notifications aren\'t available on this device yet.');
+    }
+  }
+
+  void _showPushFollowUp(
+    String message, {
+    required bool onPreferences,
+    bool settingsAction = false,
+  }) {
+    if (!mounted) {
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        duration: const Duration(seconds: 8),
+        action: settingsAction
+            ? SnackBarAction(
+                label: 'Settings',
+                onPressed: () => unawaited(openAppSettings()),
+              )
+            : onPreferences
+            ? null
+            : SnackBarAction(
+                label: 'Preferences',
+                onPressed: () => _loadPath('/preferences/'),
+              ),
+      ),
+    );
+  }
+
   void _onLoadStart(InAppWebViewController controller, WebUri? url) {
-    // A new page load supersedes any location banner the user hasn't acted on,
-    // so it doesn't float over an unrelated screen.
+    // A new page load supersedes any contextual banner the user hasn't acted
+    // on, so it doesn't float over an unrelated screen — and invalidates any
+    // offer still settling for the page we're leaving (see _claimBanner).
+    _navGeneration++;
     if (mounted) {
       ScaffoldMessenger.of(context).hideCurrentMaterialBanner();
       setState(() => _loading = true);
@@ -658,15 +926,24 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   /// native offline fallback when there's offline auction data to fall back
   /// on; otherwise just offer a retry. This is the "connection lost mid-
   /// auction" entry point into offline mode.
-  void _onLoadError(
+  Future<void> _onLoadError(
     InAppWebViewController controller,
     WebResourceRequest request,
     WebResourceError error,
-  ) {
+  ) async {
     if (!(request.isForMainFrame ?? true) || !mounted) {
       return;
     }
     setState(() => _loading = false);
+    // `hasData` is a synchronous read of an asynchronously-loaded cache, so ask
+    // for the load first. It matters in exactly the case this banner exists
+    // for: launching in airplane mode fails the first page instantly — faster
+    // than OfflineSyncService's own ensureLoaded — and without this the
+    // "Offline mode" button would be missing precisely when it's needed.
+    await OfflineStore.instance.ensureLoaded();
+    if (!mounted) {
+      return;
+    }
     final hasOffline = OfflineStore.instance.hasData;
     final messenger = ScaffoldMessenger.of(context)
       ..hideCurrentMaterialBanner();
@@ -711,9 +988,13 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     if (url == null) {
       return;
     }
-    // On the auctions/lots screens, offer location in context (once per
-    // session). The home page and everything else never triggers this.
-    unawaited(_maybeOfferLocation(url.path));
+    // Contextual permission offers, each gated on the page settling first
+    // (_claimBanner) so nothing flashes on a redirect: location on the
+    // auctions/lots screens, notifications on the preferences page. The home
+    // page and everything else triggers neither.
+    final generation = _navGeneration;
+    unawaited(_maybeOfferLocation(url.path, generation));
+    unawaited(_maybeOfferPushForPath(url.path, generation));
     if (url.host == Uri.parse(EnvironmentConfig.webBaseUrl).host) {
       _rememberPage(url);
     }
@@ -1329,7 +1610,27 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       // DENY is PermissionResponse's default action.
       return PermissionResponse(resources: request.resources);
     }
-    final status = await Permission.camera.request();
+    PermissionStatus status;
+    try {
+      status = await Permission.camera.request();
+    } on Object catch (e) {
+      debugPrint('WebView camera permission request failed: $e');
+      status = PermissionStatus.denied;
+    }
+    if (!status.isGranted) {
+      // Denying leaves the page's scanner dark with no explanation —
+      // getUserMedia just rejects, and the check-in page can't tell a decline
+      // from a device with no camera. Say what happened, and offer the only
+      // actual fix once the OS has stopped asking.
+      _showSnack(
+        'Camera access is off for this app, so the barcode scanner can\'t '
+        'start.',
+        actionLabel: status.isPermanentlyDenied ? 'Settings' : null,
+        onAction: status.isPermanentlyDenied
+            ? () => unawaited(openAppSettings())
+            : null,
+      );
+    }
     return PermissionResponse(
       resources: request.resources,
       action: status.isGranted
@@ -1353,15 +1654,33 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     if (start == null || end == null) {
       return;
     }
-    await Add2Calendar.addEvent2Cal(
-      Event(
-        title: '${data['title'] ?? ''}',
-        description: '${data['details'] ?? ''}',
-        location: '${data['location'] ?? ''}',
-        startDate: start,
-        endDate: end,
-      ),
-    );
+    // A declined calendar permission (or a phone with no calendar app) makes
+    // this return false or throw, and the web button has already switched to
+    // "added" by then — so a silent failure reads as "the app added it and
+    // lost it". Tell the user, and point at the download that still works.
+    bool added;
+    try {
+      added = await Add2Calendar.addEvent2Cal(
+        Event(
+          title: '${data['title'] ?? ''}',
+          description: '${data['details'] ?? ''}',
+          location: '${data['location'] ?? ''}',
+          startDate: start,
+          endDate: end,
+        ),
+      );
+    } on Object catch (e) {
+      debugPrint('Add to calendar failed: $e');
+      added = false;
+    }
+    if (!added) {
+      _showSnack(
+        'Couldn\'t add that to your calendar. Check that this app is allowed '
+        'to access your calendar.',
+        actionLabel: 'Settings',
+        onAction: () => unawaited(openAppSettings()),
+      );
+    }
   }
 
   void _handleDeepLink(Uri uri) {

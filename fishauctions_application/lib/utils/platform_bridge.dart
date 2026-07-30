@@ -156,6 +156,35 @@ class PlatformBridge {
     }
   }
 
+  /// Hands a downloaded `.pkpass` to Apple's own "Add to Apple Wallet" sheet
+  /// (`PKAddPassesViewController`). iOS only.
+  ///
+  /// Returns what happened, so the caller can either say something useful or
+  /// fall back to opening the file with the OS:
+  ///
+  ///   `presented`   the Wallet sheet is up; the user finishes there
+  ///   `already`     the pass is already in their Wallet
+  ///   `unsupported` this device can't add passes — includes every non-iOS
+  ///                 platform and an older build without the channel method
+  ///   `invalid`     the bytes aren't a pass Wallet accepts
+  ///
+  /// Anything else should be treated as `unsupported`; the method never throws.
+  static Future<String> addPassToWallet(Uint8List bytes) async {
+    if (!Platform.isIOS) {
+      return 'unsupported';
+    }
+    try {
+      final result = await _channel.invokeMethod<String>('addPassToWallet', {
+        'bytes': bytes,
+      });
+      return result ?? 'unsupported';
+    } on PlatformException {
+      return 'unsupported';
+    } on MissingPluginException {
+      return 'unsupported';
+    }
+  }
+
   /// Initializes the Square Mobile Payments SDK with [applicationId] (the
   /// deployment's Square Application ID, from `/api/mobile/config/`). Must run
   /// once before any authorize()/charge() call — the Square Flutter plugin

@@ -16,18 +16,21 @@
 	<string>Connect to your label printer to print lot labels.</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
 	<string>Connect to your label printer to print lot labels.</string>
-	<!-- WebView camera: the barcode check-in scanner (getUserMedia) and photo
-	     capture for the web's image uploads. -->
+	<!-- Three real uses, all listed because Apple requires the string to describe
+	     what the app actually does with the camera: native lot scanning (ARKit +
+	     Vision read the QR codes on lot labels), the web check-in barcode scanner
+	     (getUserMedia), and photo capture for the web's lot-image uploads. -->
 	<key>NSCameraUsageDescription</key>
-	<string>Scan check-in barcodes and lot labels, and take photos of your lots.</string>
-	<!-- sensors_plus (AR lot mode): gravity/gyro steady the scan overlay and
-	     keep directions pointed the right way while you turn. Without this
-	     key iOS kills the app on first motion access. -->
+	<string>Read lot labels to identify and find lots, scan check-in barcodes, and take photos of your lots.</string>
+	<!-- ARKit + sensors_plus (lot scanning): gravity, gyro and visual-inertial
+	     tracking steady the scan overlay and keep the "find this lot" arrow
+	     pointed the right way while you turn. Without this key iOS kills the app
+	     on first motion access. -->
 	<key>NSMotionUsageDescription</key>
-	<string>Keep AR lot scanning steady and pointed the right way.</string>
-	<!-- WebView photo-library uploads: add-image-to-lot and club icon. -->
+	<string>Keep lot scanning steady and point you toward the lot you're looking for.</string>
+	<!-- WebView photo-library uploads: lot images and club icons. -->
 	<key>NSPhotoLibraryUsageDescription</key>
-	<string>Attach photos from your library to your lots.</string>
+	<string>Attach photos from your library to your lots and club profile.</string>
 	<!-- Native "add to calendar" bridge for auction pickup times.
 	     NSCalendarsUsageDescription covers iOS 16; the WriteOnly/FullAccess
 	     keys are the iOS 17+ replacements. -->
@@ -37,19 +40,24 @@
 	<string>Add auction pickup times to your calendar.</string>
 	<key>NSCalendarsFullAccessUsageDescription</key>
 	<string>Add auction pickup times to your calendar.</string>
-	<!-- Distances to auctions on the listings pages (soft, contextual prompt —
-	     never at app open), and required by Square during a Tap to Pay charge
-	     (card-present fraud signal). -->
+	<!-- Every use of location, in the order the user meets them: distances on the
+	     auction/lot listings (soft, contextual banner — never at app open),
+	     arriving at an in-person auction (CheckinService reports the position so
+	     the server can welcome you / check you in, and lets an auction admin pin
+	     the venue's location from their phone), and Square's card-present fraud
+	     signal during a Tap to Pay charge. Prompted contextually: from the
+	     listings banner, or on entering lot scanning. -->
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>Show the distance to each auction, and confirm where Tap to Pay charges happen.</string>
+	<string>Show the distance to auctions near you, check you in when you arrive at an in-person auction, and confirm where Tap to Pay charges happen.</string>
 	<!-- The app never requests Always authorization — CheckinService and the
-	     auction-distance banner are both when-in-use only. This key is here
-	     because App Store Connect scans for API *references*, not calls, and
-	     geolocator/Square link against the always-authorization APIs:
-	     ITMS-90683 on build 8 asked for it by name. Same string as above, since
-	     an escalation the app can't trigger has nothing extra to explain. -->
+	     auction-distance banner are both when-in-use only, and nothing runs in
+	     the background. This key is here because App Store Connect scans for API
+	     *references*, not calls, and geolocator/Square link against the
+	     always-authorization APIs: ITMS-90683 on build 8 asked for it by name.
+	     Same string as above, since an escalation the app can't trigger has
+	     nothing extra to explain. -->
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-	<string>Show the distance to each auction, and confirm where Tap to Pay charges happen.</string>
+	<string>Show the distance to auctions near you, check you in when you arrive at an in-person auction, and confirm where Tap to Pay charges happen.</string>
 	<!-- FCM data messages while backgrounded: without this, iOS only wakes the
 	     app for the display half of the backend's notification+data payload and
 	     the background handler never runs. -->

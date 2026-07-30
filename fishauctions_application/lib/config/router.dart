@@ -2,8 +2,10 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../models/app_config.dart';
 import '../models/label_prefs.dart';
 import '../providers/auth_provider.dart';
+import '../providers/config_provider.dart';
 import '../screens/allauth_web_screen.dart';
 import '../screens/ar_lots_screen.dart';
 import '../screens/login_screen.dart';
@@ -15,10 +17,32 @@ import '../screens/print_label_screen.dart';
 import '../screens/splash_screen.dart';
 import '../screens/webview_screen.dart';
 
-/// The screens an anonymous user is allowed on. Everything else requires an
-/// account — the app has no anonymous browsing, so the redirect below traps
-/// signed-out users on these until they sign in.
+/// The sign-in gate: the screens an anonymous user is allowed on, and — because
+/// they exist only to get an account — the screens a *signed-in* user is
+/// redirected away from. Everything else requires an account; the app has no
+/// anonymous browsing.
 const _gateLocations = {'/login', '/signup', '/password-reset'};
+
+/// Screens that work in either state, so the redirect leaves them alone both
+/// ways. The terms and privacy pages have to be readable at the point of
+/// account creation (an App Store requirement, and necessarily before there is
+/// an account) *and* afterwards, so they can't live in [_gateLocations] — that
+/// would eject a signed-in reader back to wherever they came from.
+const _publicLocations = {'/legal/terms', '/legal/privacy'};
+
+/// The web path behind `/legal/terms` / `/legal/privacy`, from the deployment
+/// config. Read (not watched) at route-build time: the pages are pushed by a
+/// tap, by which point config is long warm, and the terms path has a
+/// compile-time default for the case where it isn't. A deployment with no
+/// privacy policy has no link to this route in the first place
+/// (`AppConfig.hasPrivacyPolicy`), so the empty-string fallback is unreachable
+/// rather than a broken page.
+String _legalPath(Ref ref, {required bool terms}) {
+  final config = ref.read(configProvider).value;
+  return terms
+      ? (config?.termsPath ?? AppConfig.defaultTermsPath)
+      : (config?.privacyPath ?? '');
+}
 
 /// Only allow returning to in-app paths, never an attacker-supplied scheme.
 String _safeFrom(String? from) {
@@ -49,6 +73,9 @@ final routerProvider = Provider<GoRouter>((ref) {
       }
       final signedIn = auth.value != null;
       final onGate = _gateLocations.contains(location);
+      if (_publicLocations.contains(location)) {
+        return null;
+      }
       if (!signedIn) {
         if (onGate) {
           return null;
@@ -82,6 +109,25 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: '/password-reset',
         builder: (context, state) => const AllauthWebScreen.passwordReset(),
+      ),
+      // The deployment's terms and privacy policy, in the same restricted
+      // WebView as the account flows (a signed-out reader must not be able to
+      // wander into the site from here). Paths come from
+      // `/api/mobile/config/`, so a fork points at its own documents; terms
+      // falls back to the site's `/tos/`.
+      GoRoute(
+        path: '/legal/terms',
+        builder: (context, state) => AllauthWebScreen.legal(
+          title: 'Terms and Conditions',
+          initialPath: _legalPath(ref, terms: true),
+        ),
+      ),
+      GoRoute(
+        path: '/legal/privacy',
+        builder: (context, state) => AllauthWebScreen.legal(
+          title: 'Privacy Policy',
+          initialPath: _legalPath(ref, terms: false),
+        ),
       ),
       // The PDF/System print methods only. Bluetooth printing has no screen —
       // the shell runs it in the background over the page the user was on

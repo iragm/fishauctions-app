@@ -274,7 +274,14 @@ GET  /api/mobile/printers/profiles/                 # ThermalPrinterProfile rows
   `label_size_program`/`label_size_parse` plumbing stays for printers that do
   answer (ZPL `~HS`, some CPCL) — filling it in is a Django row edit.
 
-### AR Lot Mode
+### Lot Scanning (internally "AR")
+
+**Called "Lot scanning" in every user-facing string** (renamed 2026-07-29). "AR"
+survives only where users never read it: the `fishauctions://ar/<slug>` deep-link
+scheme, `/api/mobile/ar/*`, `?src=ar`, file and identifier names. The web copy
+still says "AR" in places — that's `BACKEND_SPEC.md` Part S, a template-only
+change needing no app release. The command palette still *matches* the queries
+"ar" and "augmented reality" as aliases.
 
 Camera screen (`ar_lots_screen.dart`) that scans lot-label QR codes
 (`https://<domain>/qr/<pk>/`) and overlays lot names — with the lot photo in
@@ -307,6 +314,16 @@ scanned cluster — or, when too few are visible, from the bearing/distance of
 the bearing-only resection (≥3 sighted mapped lots) with an assumed table
 height for its on-screen height. Locating **one** lot the user explicitly
 asked for is the only thing the map drives.
+
+**This is the only screen in the app that raises an OS permission dialog
+directly** (`_offerLocation`, 700 ms after the camera view paints, and only if
+location is undecided — never after a permanent denial). Someone on this screen
+is standing in an auction hall, which is where location finally earns the ask:
+the fix feeds `CheckinService.ping()` so the server can recognize the arrival and
+check them in, and seeds the distance figures the listings show later. Declining
+costs nothing — scanning, the overlay, the map and locate mode are all camera
+geometry and have never used GPS (`updateLocation`/`ArFrame.latitude` were
+removed 2026-07-24).
 
 **Removed 2026-07-25:** bottom **Watched** / **Recommended** checkboxes that
 put the same beacon on *any* mapped lot within 6 ft. The map isn't precise
@@ -386,9 +403,40 @@ POST /api/mobile/checkin/join/           # join + auto-checkin, returns rules_ur
 POST /api/mobile/checkin/set-location/   # admin: pin auction location to phone position
 ```
 
-**Backend status: NOT implemented yet** — full contract in `BACKEND_SPEC.md`
-Part 6. Until it lands the first ping 404s and disables the feature for the
-process (zero behavior change).
+**Backend status: implemented** — all three views are live in
+`auctions/mobile/urls.py` (this section previously said otherwise; that was
+stale). The app still self-disables pings on a 404, so an older deployment costs
+nothing. Note that check-in still only ever fires when location permission
+*already* exists — the two places that ask for it are the listings banner and
+entering lot scanning.
+
+### Notification opt-in (when the app asks)
+
+`PushService.init` no longer prompts (changed 2026-07-29). It brings Firebase and
+the message listeners up silently and reads the FCM token **only if the OS already
+allows notifications** — the second half matters because the backend treats "a
+`MobileDevice` row with an `fcm_token`" as "this user can receive push" (it's what
+un-disables the preferences checkbox), and a token from a phone that will drop
+every notification makes that read wrong.
+
+The dialog is raised from two places, both running the identical opt-in
+(`PushPromptService.enable` → OS permission → `devices/register/` → both
+`UserData` toggles):
+
+- **`/preferences/`** — matched from the URL in the shell, so it works with no web
+  change. Offered on every visit while permission is missing: that page *is* the
+  notification settings screen, and its "app instead of email" checkbox is
+  server-disabled until this phone has a token, so the app is supplying the
+  control the page is missing.
+- **A lot page in an in-person auction** — the app can't tell that from a URL and
+  doesn't guess. The page calls `pushPromptOffer('lot_selling_soon')` over the JS
+  bridge; offered at most once per device. `pushGetState` / `pushEnable` are also
+  exposed so a page can render its own control. `BACKEND_SPEC.md` Part N.
+
+Both toggles are written through `notifications/prefs/`
+(`notification_prefs_service.dart`, **not implemented yet** — Part N). Until it
+lands the OS half still completes and the user is pointed at `/preferences/` to
+finish; the app never claims success it didn't get.
 
 ### Payments (Square Tap to Pay)
 
@@ -488,7 +536,8 @@ verifies the app compiles and links.
 - ~~Printing backend endpoints~~ — landed (`printers/profiles/`, `labels/prefs/`, `labels/<pk>/?fmt=pdf`, `UserLabelPrefs.print_method`, the `/printing/` page's dropdown + BT card are live on staging). The app still degrades gracefully when offline: bundled printer profiles, print method defaults to PDF, prefs fetch returns null.
 - **Printer onboarding (`BACKEND_SPEC.md` Parts T/U/V/X/Y):** app side is done and verified on a VEVOR Y486BT, and now also ships the schema v2 interpreter and the guided characterization flow. Outstanding backend work, all small and all data: the **`tspl-raster` seed row** (Part T — the app bundles it, so the two are out of sync, and it means the one printer added since the profile mechanism landed was in fact added by app release), `probe_replies`/`probed_language` on `ObservedPrinter` plus a `probe` choice for `matched_by` (Part U — until then DRF drops both), a declared `command_language` on `ThermalPrinterProfile`, a user-facing rename for "Raw ESC/POS raster (GS v 0)", a `/printing/` card button that reaches the native sheet **while connected** (Part V) — without it the only route to "Print test label" is to unpair and re-pair — the v2 validator changes (Part X), and the characterization fields + "draft a profile" admin action (Part Y).
 - **Multi-lot printing + printed-marking (`BACKEND_SPEC.md` Part W):** app side landed 2026-07-26 — `fishauctions://print/?lots=…` is handled, so the template change is unblocked. Backend still owes: the bulk label buttons emitting that link when `user_print_method == 'bluetooth'` (plus letting `printredirect` carry the scheme, or gating in `LotLabelView.dispatch` instead), and `POST /api/mobile/labels/printed/`. Until the link lands, Bluetooth users still get a PDF sheet from the bulk buttons; until `labels/printed/` lands, natively printed labels stay "unprinted" on the website (the app's call self-disables on 404).
-- **Push notifications:** the backend side of `BACKEND_SPEC.md` Part 2 is **implemented** (`auctions/notifications.py` notify_user choke point, `send_push_to_user` + `promo_push_notifications` tasks, `UserData.push_notifications_instead_of_email`, `PushNotificationSent`, firebase-admin) but inert by design until (a) `FIREBASE_CREDENTIALS_JSON` is set on the deployment and (b) devices report real FCM tokens. App plumbing exists (`fcm_token` sent on device registration when present, `devices/unregister/` called on sign-out) but `PushService.currentToken()` is a stub returning null until a Firebase project + `firebase_messaging` are wired (the plan delivers the public Firebase client config via `/api/mobile/config/`, not a bundled `google-services.json`). Until both land, every notification falls back to email (`user_prefers_push()` is false for everyone). **Full setup checklist + config-endpoint decision: `PUSH.md`.**
+- **Push notifications:** app *and* backend *and* the config endpoint are all done and verified on hardware (2026-07-27) — `firebase_messaging` is wired, `PushService.currentToken()` is not a stub, and both deployments' `/api/mobile/config/` serve a complete `firebase` block. **`PUSH.md` and the code are the truth here.** Two remaining blockers, both server-side: `FIREBASE_CREDENTIALS_JSON` set per deployment (unset ⇒ `push_configured()` false ⇒ silent email fallback), and `UserData.push_notifications_instead_of_email` actually toggled on — which is what the new contextual opt-in above exists to do, once `notifications/prefs/` (`BACKEND_SPEC.md` Part N) lands. Testing trap: the **dev flavor can never receive push against staging** (staging's config targets `…app.staging`, so `PushService.init` goes inert by design) and a signed-out app never initializes push at all.
+- **Terms & privacy links / account deletion (App Store blockers):** the app now renders both legal links on the login and signup screens (`widgets/legal_links.dart`, paths from `/api/mobile/config/` with `/tos/` as the terms fallback). The site has **no privacy policy page and no way to delete an account** — Apple requires both for an app with account registration. Backend items: `BACKEND_SPEC.md` Parts L and D. Deletion is deliberately specced as a *web* page under `/preferences/`, which needs no app change (the shell's `/logout/` interception already turns the resulting web sign-out into a full native one).
 - **Square Tap to Pay (runtime):** Backend endpoints are done; charging still needs a real NFC device on API 31+ and Square production approval (sandbox works for the full flow). Not exercisable in CI.
 - ~~Offline sync backend~~ — landed (`offline/snapshot/` + `offline/sync/` in `auctions/mobile/`).
 - **AR lot mode backend v2:** v1 (models, solver, endpoints) landed on the backend, and so has every per-frame sensor channel `BACKEND_SPEC.md` Part 5 specced — gyro `yaw_deg` heading odometry, GPS + absolute-heading island anchoring, and pedometer-driven `odo_x_m`/`odo_y_m` planar dead-reckoning. What's left is island (connected-component) detection/labeling/merging (`component` on positions rows, which the app already consumes). Until it lands, lots that were never co-visible in one camera frame don't get reliable relative positions, and unconnected scanned islands overlap on the admin map.
@@ -515,6 +564,13 @@ doesn't invoke Gradle at all (`flutter analyze`/`test`/build_runner are pure
 Dart), so it has no JDK setup step and isn't affected. `minSdk` is **28**
 (Square SDK floor).
 
+**Release artifacts are retained for 1 day** (`retention-days: 1` on every
+`upload-artifact` in both release workflows). This is a **public** repo, so
+anyone can download any run's artifacts — a 30-day `.apk` artifact is a
+sideloadable pre-release build left on a public shelf. One day is the shortest
+GitHub allows; retention is whole days only, so a sub-day window (12 h) is not
+expressible in the workflow. TestFlight and Google Play hold the durable copies.
+
 ## Auth Model — Account Required
 
 The app has **no anonymous browsing**. The router (`lib/config/router.dart`)
@@ -535,6 +591,33 @@ traps signed-out users on three gate screens until a sign-in succeeds:
   pages, a link to the web login form returns to the native login screen, and
   anything else opens in the system browser. This keeps reCAPTCHA, email
   verification, and throttling server-side with no native re-implementation.
+  A failed load here gets a native "can't reach the server / Try again" panel:
+  signup is the one flow with no offline fallback at all (there's no account
+  yet, so nothing is cached), and the engine's own error page is a dead end.
+- `/legal/terms`, `/legal/privacy` — the deployment's legal documents, in the
+  same restricted WebView, and the only routes that work signed-in **and**
+  signed-out (`_publicLocations` in the router, not `_gateLocations` — the
+  latter also *ejects* signed-in users, which is right for `/login` and wrong
+  for a document). Linked from both the login and signup screens by
+  `LegalLinks`, because Apple requires terms and a privacy policy to be
+  reachable in-app at the point of account creation. Paths come from
+  `/api/mobile/config/` (`terms_url`/`privacy_policy_url`); terms falls back to
+  the site's `/tos/`, and a deployment with no privacy policy shows no privacy
+  link rather than a dead one — an off-host URL is rejected outright, since
+  these load *inside* the login trap. The privacy page doesn't exist on the
+  backend yet: `BACKEND_SPEC.md` Part L, and a submission blocker.
+
+**Nothing in the app prompts for a permission at launch.** Location is a soft
+banner on the listings pages (`LocationService.isLocationAwarePath`) plus a
+direct ask on the lot-scanning screen; notifications are offered on
+`/preferences/` and on in-person lot pages; camera and Bluetooth are asked for by
+the screen that needs them. Every contextual banner waits for the page to sit
+still for `_bannerSettleDelay` first and bails if the navigation generation moved
+(`_claimBanner`) — a page that settles and *then* redirects used to flash a
+prompt for a few frames before `_onLoadStart` hid it, which is worse than no
+prompt: the user sees they were asked something and can't answer it. The
+"already offered" flag is only set when a banner actually appears, so a stolen
+offer gets another chance on the next page.
 
 The native JWT (`authProvider`) is the single source of truth for "signed in".
 Session restore falls back to a cached profile when the network is down (tokens
@@ -563,6 +646,24 @@ JWT auth is bridged into the WebView's Django cookie session:
   it's backgrounded, and coming back to the site root loses the user's place.
   A pending quick action still wins; sign-out clears it.
 - Home-screen quick actions (long-press the launcher icon) deep-link into web pages: `ShortcutService` owns the type→path mapping ("Lots in my last auction" → `/lots/my-last-auction/` backend redirect, "Selling" → `/selling/`, "Invoices" → `/invoices/`); the shell consumes the pending path at mount (surviving the login trap via the handoff `?next=`) or navigates in place when already up.
+- **Downloads are refetched with the WebView's cookies** (`DownloadService` — these
+  are Django *session* endpoints, so a bare client gets the login page) and then
+  dispatched by MIME type. A **`.pkpass` goes to Apple's own Add-to-Wallet sheet**
+  on iOS (`PKAddPassesViewController` via `PlatformBridge.addPassToWallet` →
+  `ios/Runner/WalletPassPresenter.swift`), so the site's existing "Add to Apple
+  Wallet" button on a club membership card behaves the way it does in Safari —
+  one sheet, one "Add". `open_filex` stays the fallback (all Android has, and the
+  right answer if PassKit refuses the bytes); a pass already in the library
+  reports back rather than opening a sheet with a dead "Add" button. `.ics` opens
+  in the OS calendar importer, everything else goes to the share sheet, and a PDF
+  goes to the OS print dialog on the "System printer" method.
+- **Deployment config is re-fetched on resume if it never loaded**
+  (`_rewarmConfigIfFailed`). Riverpod caches a `FutureProvider` failure for the
+  process, so a cold start with no connectivity — routine at an auction hall —
+  otherwise left Square uninitialized and push inert *for the whole session*, and
+  the notification offer would have told the user notifications "aren't available
+  on this device". The login screen offers the same retry explicitly, since the
+  config fetch is what decides whether "Sign in with Google" appears at all.
 
 ## Key Decisions
 

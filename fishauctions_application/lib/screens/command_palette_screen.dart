@@ -48,6 +48,10 @@ class _CommandPaletteDialogState extends State<_CommandPaletteDialog> {
   List<PaletteGroup> _serverGroups = [];
   bool _loading = false;
 
+  /// The last search couldn't reach the server (vs. legitimately matching
+  /// nothing). Drives the empty state's wording.
+  bool _searchFailed = false;
+
   // AR command palette entry (BACKEND_SPEC.md "AR Command Palette Entry —
   // Last-Used-Auction Lookup"). Loaded once alongside the default results;
   // [_groups] injects a local AR item on top of whatever the server returned,
@@ -84,7 +88,7 @@ class _CommandPaletteDialogState extends State<_CommandPaletteDialog> {
     });
   }
 
-  /// The rendered groups: the server's results with a local "AR lot scanning"
+  /// The rendered groups: the server's results with a local "Lot scanning"
   /// group prepended when it applies to the current query.
   List<PaletteGroup> get _groups {
     final ar = _arItem(_textController.text);
@@ -92,7 +96,7 @@ class _CommandPaletteDialogState extends State<_CommandPaletteDialog> {
       return _serverGroups;
     }
     return [
-      PaletteGroup(label: 'AR lot scanning', items: [ar]),
+      PaletteGroup(label: 'Lot scanning', items: [ar]),
       ..._serverGroups,
     ];
   }
@@ -117,7 +121,7 @@ class _CommandPaletteDialogState extends State<_CommandPaletteDialog> {
     }
     return PaletteItem(
       type: 'ar',
-      title: 'Scan lots with AR — ${auction.title}',
+      title: 'Scan lots — ${auction.title}',
       subtitle: 'Point your camera at a label to find and identify lots',
       url: auction.slug!,
       icon: 'bi-qr-code-scan',
@@ -170,7 +174,10 @@ class _CommandPaletteDialogState extends State<_CommandPaletteDialog> {
     if (q.isNotEmpty) {
       _logger.recordPending(q);
     }
-    setState(() => _loading = true);
+    setState(() {
+      _loading = true;
+      _searchFailed = false;
+    });
     try {
       final groups = await CommandPaletteService.instance.search(q);
       final count = groups.fold(0, (sum, g) => sum + g.items.length);
@@ -187,8 +194,14 @@ class _CommandPaletteDialogState extends State<_CommandPaletteDialog> {
         _loading = false;
       });
     } on Exception catch (_) {
+      // Search is server-side, so offline means no results at all — say that
+      // instead of "No results", which reads as "your query matched nothing"
+      // and sends the user off rewording a search that could never run.
       if (mounted) {
-        setState(() => _loading = false);
+        setState(() {
+          _loading = false;
+          _searchFailed = true;
+        });
       }
     }
   }
@@ -354,10 +367,17 @@ class _CommandPaletteDialogState extends State<_CommandPaletteDialog> {
               Expanded(
                 child: _groups.isEmpty && !_loading
                     ? Center(
-                        child: Text(
-                          'No results',
-                          style: theme.textTheme.bodyMedium?.copyWith(
-                            color: theme.colorScheme.onSurfaceVariant,
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 32),
+                          child: Text(
+                            _searchFailed
+                                ? 'Couldn\'t search — check your connection '
+                                      'and try again.'
+                                : 'No results',
+                            textAlign: TextAlign.center,
+                            style: theme.textTheme.bodyMedium?.copyWith(
+                              color: theme.colorScheme.onSurfaceVariant,
+                            ),
                           ),
                         ),
                       )

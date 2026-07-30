@@ -17,6 +17,7 @@
 		7B4A9C050000000000000000 /* ArCameraViewFactory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B4A9C020000000000000000 /* ArCameraViewFactory.swift */; };
 		7B4A9C060000000000000000 /* ArEventBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B4A9C030000000000000000 /* ArEventBridge.swift */; };
 		7B4A9C090000000000000000 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 7B4A9C080000000000000000 /* PrivacyInfo.xcprivacy */; };
+		7B4A9C0B0000000000000000 /* WalletPassPresenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B4A9C0A0000000000000000 /* WalletPassPresenter.swift */; };
 		97C146FC1CF9000F007C117D /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FA1CF9000F007C117D /* Main.storyboard */; };
 		97C146FE1CF9000F007C117D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FD1CF9000F007C117D /* Assets.xcassets */; };
 		97C147011CF9000F007C117D /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FF1CF9000F007C117D /* LaunchScreen.storyboard */; };
@@ -59,6 +60,7 @@
 		7B4A9C020000000000000000 /* ArCameraViewFactory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArCameraViewFactory.swift; sourceTree = "<group>"; };
 		7B4A9C030000000000000000 /* ArEventBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArEventBridge.swift; sourceTree = "<group>"; };
 		7B4A9C080000000000000000 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		7B4A9C0A0000000000000000 /* WalletPassPresenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WalletPassPresenter.swift; sourceTree = "<group>"; };
 		7AFA3C8E1D35360C0083082E /* Release.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = Release.xcconfig; path = Flutter/Release.xcconfig; sourceTree = "<group>"; };
 		9740EEB21CF90195004384FC /* Debug.xcconfig */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.xcconfig; name = Debug.xcconfig; path = Flutter/Debug.xcconfig; sourceTree = "<group>"; };
 		9740EEB31CF90195004384FC /* Generated.xcconfig */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.xcconfig; name = Generated.xcconfig; path = Flutter/Generated.xcconfig; sourceTree = "<group>"; };
@@ -132,6 +134,7 @@
 				1498D2331E8E89220040F4C2 /* GeneratedPluginRegistrant.m */,
 				74858FAE1ED2DC5600515810 /* AppDelegate.swift */,
 				7884E8672EC3CC0400C636F2 /* SceneDelegate.swift */,
+				7B4A9C0A0000000000000000 /* WalletPassPresenter.swift */,
 				74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */,
 				7B4A9C070000000000000000 /* Ar */,
 			);
@@ -308,6 +311,7 @@
 				7B4A9C040000000000000000 /* ArCameraPlatformView.swift in Sources */,
 				7B4A9C050000000000000000 /* ArCameraViewFactory.swift in Sources */,
 				7B4A9C060000000000000000 /* ArEventBridge.swift in Sources */,
+				7B4A9C0B0000000000000000 /* WalletPassPresenter.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

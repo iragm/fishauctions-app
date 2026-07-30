@@ -1,3 +1,5 @@
+import '../config/environment.dart';
+
 /// Deployment-wide configuration, parsed from `GET /api/mobile/config/`.
 ///
 /// This endpoint is **public** (no auth) and lets one app binary serve any
@@ -11,6 +13,8 @@ class AppConfig {
     required this.squareEnvironment,
     required this.googleServerClientId,
     required this.brandName,
+    this.termsPath = defaultTermsPath,
+    this.privacyPath = '',
     this.firebase,
   });
 
@@ -19,8 +23,16 @@ class AppConfig {
     squareEnvironment: _str(json['square_environment']),
     googleServerClientId: _str(json['google_server_client_id']),
     brandName: _str(json['brand_name']),
+    termsPath: _pathOr(json['terms_url'], defaultTermsPath),
+    privacyPath: _pathOr(json['privacy_policy_url'], ''),
     firebase: FirebaseClientConfig.tryParse(json['firebase']),
   );
+
+  /// Where this deployment's terms live when config doesn't say. `/tos/`
+  /// (`UserAgreement`) has existed on the site since long before the app, and a
+  /// signup screen with no terms link is an App Store rejection — so the
+  /// fallback is the known-good path rather than nothing.
+  static const String defaultTermsPath = '/tos/';
 
   /// The deployment's public Square Application ID used to initialize the
   /// Square SDK. Environment-specific (`sandbox-sq0idb-…` vs `sq0idp-…`), so it
@@ -45,6 +57,22 @@ class AppConfig {
   /// (see `WebViewScreen`). Empty → the UI falls back to the compile-time
   /// `AppConstants.appName`. For this deployment it equals the site domain.
   final String brandName;
+
+  /// Site-relative path to this deployment's terms, e.g. `/tos/`. Never empty —
+  /// falls back to [defaultTermsPath]. Shown on the login and signup screens,
+  /// which is where an account is created and therefore where the App Store
+  /// expects the link.
+  final String termsPath;
+
+  /// Site-relative path to this deployment's privacy policy, or empty when the
+  /// deployment hasn't published one — in which case the app shows no privacy
+  /// link rather than a dead one. Apple requires this link in-app for any app
+  /// with account registration, so an empty value is a submission blocker, not
+  /// a style choice (BACKEND_SPEC.md Part L).
+  final String privacyPath;
+
+  /// Whether there's a privacy policy to link to.
+  bool get hasPrivacyPolicy => privacyPath.isNotEmpty;
 
   /// Public Firebase *client* config for push, or null when this deployment
   /// has no push configured (then push stays inert → email fallback).
@@ -76,6 +104,30 @@ class AppConfig {
   }
 
   static String _str(Object? v) => v == null ? '' : v.toString();
+
+  /// Normalizes a config URL to a **site-relative path** so the app can load it
+  /// in its own restricted WebView against `EnvironmentConfig.webBaseUrl`. The
+  /// backend may send either form; an absolute URL pointing somewhere else
+  /// entirely is rejected in favour of [fallback], because these links are
+  /// rendered inside the login trap and must not become an escape hatch to an
+  /// arbitrary host.
+  static String _pathOr(Object? raw, String fallback) {
+    final value = _str(raw);
+    if (value.isEmpty) {
+      return fallback;
+    }
+    if (value.startsWith('/') && !value.startsWith('//')) {
+      return value;
+    }
+    final uri = Uri.tryParse(value);
+    if (uri == null || !uri.hasScheme) {
+      return fallback;
+    }
+    final path = uri.path.isEmpty ? '/' : uri.path;
+    return uri.host == Uri.parse(EnvironmentConfig.webBaseUrl).host
+        ? path
+        : fallback;
+  }
 }
 
 /// The `firebase` block of `GET /api/mobile/config/` — the public client config

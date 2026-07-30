@@ -118,13 +118,20 @@ jobs:
           --build-number=${{ github.run_number }}
           --build-name=$BUILD_NAME
 
+      # retention-days: 1 — the shortest GitHub allows. This is a PUBLIC repo, so
+      # anyone can download a run's artifacts: an unreleased build sitting here
+      # for 30 days is a pre-release binary handed to the world. One day is long
+      # enough to grab the build you just triggered and short enough that old
+      # runs aren't a standing download shelf. (GitHub's retention is whole days
+      # only — there is no way to express 12 hours; the API rejects fractions and
+      # the repo-level "delete artifact" is the only finer-grained control.)
       - name: Upload .aab artifact
         uses: actions/upload-artifact@v7
         with:
           name: app-prod-release-${{ github.sha }}
           path: fishauctions_application/build/app/outputs/bundle/prodRelease/app-prod-release.aab
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 1
 
       # Same signing config and version as the .aab above, just packaged as an
       # installable APK — the .aab can't be sideloaded directly. This is what
@@ -137,13 +144,16 @@ jobs:
           --build-number=${{ github.run_number }}
           --build-name=$BUILD_NAME
 
+      # Same one-day retention as the .aab, and for the sharper version of the
+      # same reason: this one is directly *installable*, so a public 30-day
+      # artifact is a sideloadable pre-release anyone can run.
       - name: Upload .apk artifact
         uses: actions/upload-artifact@v7
         with:
           name: app-prod-release-apk-${{ github.sha }}
           path: fishauctions_application/build/app/outputs/flutter-apk/app-prod-release.apk
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 1
 
       # Prerequisites (now satisfied): the first .aab was uploaded MANUALLY in
       # the Play Console (Google requires this before the API will accept

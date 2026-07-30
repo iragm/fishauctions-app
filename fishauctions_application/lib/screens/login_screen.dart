@@ -8,10 +8,46 @@ import '../providers/auth_provider.dart';
 import '../providers/config_provider.dart';
 import '../services/social_auth_service.dart';
 import '../widgets/google_sign_in_button.dart';
+import '../widgets/legal_links.dart';
 
 /// Which sign-in is in flight, if any. Both paths lock the whole screen, but
 /// each reports progress and failures next to its own button.
 enum _Busy { none, password, google }
+
+/// Shown when the deployment config couldn't be fetched — i.e. the phone can't
+/// reach the backend, so no sign-in of any kind is going to work yet. Framed as
+/// information plus a retry rather than an error: nothing has gone wrong with
+/// the app.
+class _OfflineNotice extends StatelessWidget {
+  const _OfflineNotice({this.onRetry});
+
+  final VoidCallback? onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(16, 12, 8, 12),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.cloud_off, size: 20, color: scheme.onSurfaceVariant),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              'Can\'t reach the server right now. Check your connection.',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ),
+          TextButton(onPressed: onRetry, child: const Text('Retry')),
+        ],
+      ),
+    );
+  }
+}
 
 /// The app's front door. An account is required to use the app at all — the
 /// router traps signed-out users here (plus the signup and password-reset
@@ -139,7 +175,8 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final config = ref.watch(configProvider).value;
+    final configState = ref.watch(configProvider);
+    final config = configState.value;
     final brand = (config?.brandName.isNotEmpty ?? false)
         ? config!.brandName
         : AppConstants.appName;
@@ -169,6 +206,21 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                   style: Theme.of(context).textTheme.headlineSmall,
                 ),
                 const SizedBox(height: 24),
+                // A first launch with no connectivity is a real case (new
+                // phone, captive-portal wifi), and it isn't a neutral one: the
+                // config fetch is what decides whether "Sign in with Google"
+                // even appears, so failing it silently makes the app look like
+                // a deployment without Google sign-in. Riverpod caches the
+                // error for the session, so offer the retry explicitly rather
+                // than requiring a restart.
+                if (configState.hasError) ...[
+                  _OfflineNotice(
+                    onRetry: _submitting
+                        ? null
+                        : () => ref.invalidate(configProvider),
+                  ),
+                  const SizedBox(height: 16),
+                ],
                 // Google leads: it's the one-tap path, so it sits above the
                 // form rather than reading as a fallback underneath it.
                 if (googleConfigured) ...[
@@ -286,6 +338,10 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                     ),
                   ],
                 ),
+                // Terms/privacy at the front door as well as on the signup
+                // screen itself: this is the other place an account gets
+                // created (Google sign-in creates one on first use).
+                const LegalLinks(),
               ],
             ),
           ),

@@ -7,6 +7,7 @@ import 'package:open_filex/open_filex.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
+import '../utils/platform_bridge.dart';
 import 'system_print_service.dart';
 
 /// Handles files the WebView asks to download — CSV exports, invoice PDFs,
@@ -46,8 +47,9 @@ class DownloadService {
   );
 
   /// Downloads [request] (the WebView's download intent) and dispatches the
-  /// saved file to the OS. Returns a user-facing error string on failure, or
-  /// null on success.
+  /// saved file to the OS. Returns a message for the user, or null when there's
+  /// nothing to say — an error on failure, and occasionally a successful
+  /// outcome the OS won't report itself (a Wallet pass already in the library).
   ///
   /// [printPdfWithSystemDialog] — the "System printer" print method: PDFs go
   /// to the OS print dialog instead of the share sheet (other MIME types are
@@ -96,8 +98,7 @@ class DownloadService {
         return null;
       }
       final path = await _writeTemp(filename, bytes);
-      await _dispatch(path, mime);
-      return null;
+      return await _dispatch(path, mime, bytes);
     } on DioException catch (e) {
       return 'Download failed: ${e.message ?? e.type.name}';
     } on Object catch (e) {
@@ -114,15 +115,45 @@ class DownloadService {
         .join('; ');
   }
 
-  /// `.ics` and `.pkpass` open in the OS handler (calendar importer / Wallet);
-  /// everything else goes to the share sheet so the user can save or send it.
-  Future<void> _dispatch(String path, String mime) async {
-    if (mime.startsWith(_icsMime) || mime.startsWith(_pkpassMime)) {
+  /// A `.pkpass` goes to Apple's own Add-to-Wallet sheet on iOS; `.ics` (and a
+  /// pass on any other platform) opens in the OS handler; everything else goes
+  /// to the share sheet so the user can save or send it.
+  ///
+  /// Returns a message worth showing the user, or null when the OS took over
+  /// and speaks for itself.
+  Future<String?> _dispatch(String path, String mime, List<int> bytes) async {
+    if (mime.startsWith(_pkpassMime)) {
+      return _addPass(path, mime, bytes);
+    }
+    if (mime.startsWith(_icsMime)) {
       await OpenFilex.open(path, type: mime);
-    } else {
-      await SharePlus.instance.share(
-        ShareParams(files: [XFile(path, mimeType: mime)]),
-      );
+      return null;
+    }
+    await SharePlus.instance.share(
+      ShareParams(files: [XFile(path, mimeType: mime)]),
+    );
+    return null;
+  }
+
+  /// Club membership cards arrive as signed `.pkpass` files. On iOS that should
+  /// be one tap: `PKAddPassesViewController` is the same sheet Safari shows, so
+  /// "Add to Apple Wallet" in the WebView behaves like "Add to Apple Wallet"
+  /// anywhere else. `OpenFilex` remains the fallback — it's all Android has
+  /// (where a pass is a file for a third-party wallet app), and it's the right
+  /// answer if PassKit refuses.
+  Future<String?> _addPass(String path, String mime, List<int> bytes) async {
+    final outcome = await PlatformBridge.addPassToWallet(
+      Uint8List.fromList(bytes),
+    );
+    switch (outcome) {
+      case 'presented':
+        return null; // the Wallet sheet is the feedback
+      case 'already':
+        return 'That card is already in your Apple Wallet.';
+      default:
+        // 'unsupported' (non-iOS, or Wallet unavailable) and 'invalid'.
+        await OpenFilex.open(path, type: mime);
+        return null;
     }
   }
 
