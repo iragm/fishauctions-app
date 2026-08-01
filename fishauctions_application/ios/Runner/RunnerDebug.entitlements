@@ -28,5 +28,15 @@
 	     reader, so that half is testable in any build. -->
 	<key>com.apple.developer.proximity-reader.payment.acceptance</key>
 	<true/>
+
+	<!-- Sign in with Apple — see the note in Runner.entitlements. Present in
+	     both files because, unlike Tap to Pay, this capability is self-serve on
+	     the App ID and applies to development and distribution profiles alike;
+	     omitting it here would make the button fail only in debug builds, which
+	     is precisely where it gets tested. -->
+	<key>com.apple.developer.applesignin</key>
+	<array>
+		<string>Default</string>
+	</array>
 </dict>
 </plist>

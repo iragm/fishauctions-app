@@ -16,5 +16,21 @@
 	     fails. -->
 	<key>aps-environment</key>
 	<string>production</string>
+
+	<!-- Sign in with Apple. Required by App Review guideline 4.8 because the app
+	     also offers Google and Facebook login: wherever a third-party service
+	     sets up the primary account, an equivalent privacy-preserving option
+	     must be offered too.
+
+	     Unlike the Tap to Pay entitlement above, this one is self-serve — toggle
+	     "Sign In with Apple" on the App ID in Certificates, Identifiers &
+	     Profiles and regenerate the profile. It is NOT an Apple approval
+	     process. But the profile still has to carry it: if the capability isn't
+	     enabled on the App ID, every signed build fails with a provisioning
+	     error, so enable it before the next release build. -->
+	<key>com.apple.developer.applesignin</key>
+	<array>
+		<string>Default</string>
+	</array>
 </dict>
 </plist>

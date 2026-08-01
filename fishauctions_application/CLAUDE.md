@@ -631,14 +631,45 @@ expressible in the workflow. TestFlight and Google Play hold the durable copies.
 The app has **no anonymous browsing**. The router (`lib/config/router.dart`)
 traps signed-out users on three gate screens until a sign-in succeeds:
 
-- `/login` — native login: "Sign in with Google" on top, then the
-  username/password form. The Google button renders only when the deployment's
-  `/api/mobile/config/` returns a non-empty `google_server_client_id`;
-  unconfigured deployments simply don't offer it (no "not configured" error).
-  It draws Google's own unmodified button artwork from `assets/google/`
-  (`GoogleSignInButton`) — scale it with `height`, never restyle it. OAuth
-  client + SHA-1 registration, and the two ways it fails silently:
-  `GOOGLE_SIGNIN.md`.
+- `/login` — native login: the social buttons on top, then the
+  username/password form. **Three providers — Apple, Google, Facebook** —
+  each rendering only when `/api/mobile/config/` says the deployment configured
+  it (`apple_sign_in_enabled`, `google_server_client_id`, `facebook_app_id`);
+  unconfigured ones simply aren't offered (no "not configured" error). All
+  three are also on the website through allauth, and the app sends **allauth's
+  own provider ids**, so native and web sign-ins land on the same
+  `SocialAccount` row with no mapping table. Backend contract:
+  `BACKEND_SPEC.md` Part SOCIAL. Google specifics: `GOOGLE_SIGNIN.md`.
+  - **Apple leads on iOS, and that ordering is a requirement, not taste.**
+    Guideline 4.8 makes Sign in with Apple mandatory once any third-party login
+    sets up the primary account, and its HIG expects the button at least as
+    prominent as the others. `SocialAuthService.availableProviders` owns the
+    order.
+  - **Each button is the vendor's own artwork or spec** — Google's unmodified
+    PNGs (`assets/google/`), Apple's from `sign_in_with_apple`, Facebook's blue
+    with an asset slot for their logo (`facebookLogoAsset`). Never restyle any
+    of them into a house look, and never draw a substitute mark.
+  - **A social sign-in doesn't always finish natively.** Facebook often returns
+    no email at all (the account may have none, or the user declines the
+    permission), and an unverified address can't be trusted to identify an
+    account. The backend then returns a `continue_url` + `pending_token`; the
+    app runs allauth's own flow in the restricted WebView (`/social-continue`)
+    and exchanges the token afterwards. Re-implementing email collection and
+    confirmation natively would mean duplicating allauth's rate limiting,
+    confirmation-link handling and "that address belongs to someone else"
+    rules — where the bugs are account takeovers, not cosmetics.
+  - **Apple sends the name and email exactly once**, on the first
+    authorization, never again. The app forwards them so the backend can
+    persist them; they're hints, never identity (that's the verified token's
+    `sub`).
+  - **Apple + Facebook Limited Login are nonce-bound**: the app sends
+    SHA-256(nonce) to the provider and the raw value to the backend, which
+    must check them. Without it a captured ID token is a working credential.
+  - **Facebook is the one thing that isn't deployment-configurable.** Its SDKs
+    read the app id from `Info.plist`/`AndroidManifest.xml` at launch and
+    register an `fb<app-id>` URL scheme, so it's compiled in too
+    (`ios/Flutter/*.xcconfig`, `android/.../res/values/facebook.xml` — both
+    empty until filled). A fork with its own Facebook app needs its own build.
 - `/signup`, `/password-reset` — the django-allauth web flows hosted in a
   restricted WebView (`AllauthWebScreen`). **Allauth is mounted at the site
   root** (`/signup/`, `/password/reset/`, `/login/`, `/logout/` — not under

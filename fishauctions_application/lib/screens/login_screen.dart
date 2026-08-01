@@ -4,15 +4,16 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../constants/app_constants.dart';
+import '../models/social_provider.dart';
 import '../providers/auth_provider.dart';
 import '../providers/config_provider.dart';
 import '../services/social_auth_service.dart';
-import '../widgets/google_sign_in_button.dart';
 import '../widgets/legal_links.dart';
+import '../widgets/social_sign_in_buttons.dart';
 
 /// Which sign-in is in flight, if any. Both paths lock the whole screen, but
 /// each reports progress and failures next to its own button.
-enum _Busy { none, password, google }
+enum _Busy { none, password, social }
 
 /// Shown when the deployment config couldn't be fetched — i.e. the phone can't
 /// reach the backend, so no sign-in of any kind is going to work yet. Framed as
@@ -54,12 +55,19 @@ class _OfflineNotice extends StatelessWidget {
 /// screens) until a sign-in succeeds, at which point the router redirect
 /// moves them on; this screen never navigates on success itself.
 ///
-/// "Sign in with Google" and email/username + password both produce the JWT
-/// the native features use; the WebView shell then bridges that session into
-/// its Django cookie session. Google leads because it's the one-tap path, and
-/// its button only renders when the deployment has a Google OAuth client id
-/// configured (`google_server_client_id` in `/api/mobile/config/`) — an
-/// unconfigured deployment simply doesn't offer it.
+/// The social buttons (Apple, Google, Facebook) and email/username + password
+/// all produce the JWT the native features use; the WebView shell then bridges
+/// that session into its Django cookie session. The social buttons lead because
+/// they're the one-tap paths, and each renders only when the deployment has
+/// that provider configured in `/api/mobile/config/` — a deployment with none
+/// simply shows the password form. Apple comes first on iOS, which its
+/// guidelines require (see `SocialAuthService.availableProviders`).
+///
+/// A social sign-in doesn't always finish here. When the provider gives no
+/// usable email — routine with Facebook, and the reason Apple's private-relay
+/// addresses matter — the backend returns a web continuation the user completes
+/// in the restricted allauth WebView, after which the app swaps a pending token
+/// for the session. See `_finishInWebFlow` and `BACKEND_SPEC.md` Part SOCIAL.
 class LoginScreen extends ConsumerStatefulWidget {
   const LoginScreen({super.key});
 
@@ -74,7 +82,13 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   _Busy _busy = _Busy.none;
   bool _obscure = true;
   String? _error;
-  String? _googleError;
+
+  /// Failure from the most recent social attempt, shown under the buttons.
+  String? _socialError;
+
+  /// Which provider is mid-flight, so the spinner appears under *its* button
+  /// rather than under all of them.
+  SocialProvider? _activeProvider;
 
   bool get _submitting => _busy != _Busy.none;
 
@@ -92,7 +106,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     setState(() {
       _busy = _Busy.password;
       _error = null;
-      _googleError = null;
+      _socialError = null;
     });
 
     await ref
@@ -113,46 +127,112 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     // button doesn't blink back to life for the frame before it does.
   }
 
-  Future<void> _signInWithGoogle() async {
+  Future<void> _signInWith(SocialProvider provider) async {
     setState(() {
-      _busy = _Busy.google;
+      _busy = _Busy.social;
+      _activeProvider = provider;
       _error = null;
-      _googleError = null;
+      _socialError = null;
     });
 
-    final String? idToken;
+    final SocialCredential? credential;
     try {
-      idToken = await SocialAuthService.instance.signInForIdToken();
-    } on GoogleSignInUnavailable catch (e) {
-      setState(() {
-        _busy = _Busy.none;
-        _googleError = e.message;
-      });
+      credential = await SocialAuthService.instance.signIn(provider);
+    } on SocialSignInUnavailable catch (e) {
+      _failSocial(e.message);
       return;
     } on Object catch (_) {
-      setState(() {
-        _busy = _Busy.none;
-        _googleError = 'Could not start Google sign-in. Please try again.';
-      });
+      _failSocial(
+        'Could not start ${provider.label} sign-in. Please try again.',
+      );
       return;
     }
-    if (idToken == null) {
-      // The user dismissed the Google account picker — not an error.
-      setState(() => _busy = _Busy.none);
+    if (credential == null) {
+      // The user dismissed the provider's sheet — not an error.
+      setState(() {
+        _busy = _Busy.none;
+        _activeProvider = null;
+      });
       return;
     }
 
-    await ref.read(authProvider.notifier).loginWithGoogle(idToken);
+    final result = await ref
+        .read(authProvider.notifier)
+        .loginWithSocial(credential);
     if (!mounted) {
       return;
     }
-    final state = ref.read(authProvider);
-    if (state.hasError) {
+    if (result == null) {
+      _failSocial(_socialMessageFor(ref.read(authProvider).error, provider));
+      return;
+    }
+    if (result.isSignedIn) {
+      // The router redirect takes over; leave the screen locked so nothing
+      // blinks back to life for the frame before it does.
+      return;
+    }
+    await _finishInWebFlow(result, provider);
+  }
+
+  /// The provider gave us an identity but not enough to finish: no email at all
+  /// (routine with Facebook), or one that hasn't been verified.
+  ///
+  /// allauth already implements collecting and confirming an address properly —
+  /// including the confirmation email — so the user finishes there, in the same
+  /// restricted WebView the signup and password-reset flows use, and the app
+  /// then swaps the pending token for a session. Re-implementing that natively
+  /// would mean duplicating allauth's rate limiting, its confirmation-link
+  /// handling and its "this address is already taken by another account" rules.
+  Future<void> _finishInWebFlow(
+    SocialLoginResult result,
+    SocialProvider provider,
+  ) async {
+    final pendingToken = result.pendingToken ?? '';
+    final continueUrl = result.continueUrl ?? '';
+    if (continueUrl.isEmpty || pendingToken.isEmpty) {
+      _failSocial(
+        'Could not finish signing in with ${provider.label}. Please try again.',
+      );
+      return;
+    }
+    final completed = await context.push<bool>(
+      Uri(
+        path: '/social-continue',
+        queryParameters: {'url': continueUrl, 'detail': ?result.detail},
+      ).toString(),
+    );
+    if (!mounted) {
+      return;
+    }
+    if (completed != true) {
+      // Backed out of the web flow — no account was created, nothing to say.
       setState(() {
         _busy = _Busy.none;
-        _googleError = _googleMessageFor(state.error);
+        _activeProvider = null;
       });
+      return;
     }
+    await ref.read(authProvider.notifier).completeSocialLogin(pendingToken);
+    if (!mounted) {
+      return;
+    }
+    if (ref.read(authProvider).hasError) {
+      _failSocial(
+        'Almost there — finish confirming your email address, then sign in '
+        'with ${provider.label} again.',
+      );
+    }
+  }
+
+  void _failSocial(String message) {
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _busy = _Busy.none;
+      _activeProvider = null;
+      _socialError = message;
+    });
   }
 
   String _messageFor(Object? error) {
@@ -165,12 +245,24 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     return 'Could not sign in. Check your connection and try again.';
   }
 
-  String _googleMessageFor(Object? error) {
-    if (error is DioException && error.response?.statusCode == 404) {
-      return "Google sign-in isn't available yet. Please use your email and "
-          'password for now.';
+  String _socialMessageFor(Object? error, SocialProvider provider) {
+    if (error is DioException) {
+      // 404 means this deployment hasn't deployed the social endpoint yet — a
+      // configuration gap, not a bad credential, so don't tell the user to try
+      // again at something that cannot work.
+      if (error.response?.statusCode == 404) {
+        return '${provider.label} sign-in isn\'t available yet. Please use '
+            'your email and password for now.';
+      }
+      // The backend authors these (an address already tied to another account,
+      // a provider it can't verify right now); show its wording rather than
+      // flattening every case into one generic line.
+      final detail = error.response?.data;
+      if (detail is Map && detail['detail'] is String) {
+        return detail['detail'] as String;
+      }
     }
-    return 'Could not sign in with Google. Please try again.';
+    return 'Could not sign in with ${provider.label}. Please try again.';
   }
 
   @override
@@ -180,7 +272,8 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     final brand = (config?.brandName.isNotEmpty ?? false)
         ? config!.brandName
         : AppConstants.appName;
-    final googleConfigured = config?.googleServerClientId.isNotEmpty ?? false;
+    final providers =
+        ref.watch(socialProvidersProvider).value ?? const <SocialProvider>[];
     return Scaffold(
       appBar: AppBar(title: const Text('Sign in')),
       body: SafeArea(
@@ -221,35 +314,43 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                   ),
                   const SizedBox(height: 16),
                 ],
-                // Google leads: it's the one-tap path, so it sits above the
-                // form rather than reading as a fallback underneath it.
-                if (googleConfigured) ...[
-                  Center(
-                    child: GoogleSignInButton(
-                      onPressed: _submitting ? null : _signInWithGoogle,
-                    ),
-                  ),
-                  if (_busy == _Busy.google) ...[
-                    const SizedBox(height: 16),
-                    const Center(
-                      child: SizedBox(
-                        height: 20,
-                        width: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2),
+                // The social buttons lead: they're the one-tap paths, so they
+                // sit above the form rather than reading as a fallback
+                // underneath it. Order comes from SocialAuthService — Apple
+                // first on iOS, which its guidelines require.
+                if (providers.isNotEmpty) ...[
+                  for (final provider in providers) ...[
+                    Center(
+                      child: SocialSignInButton(
+                        provider: provider,
+                        onPressed: _submitting
+                            ? null
+                            : () => _signInWith(provider),
                       ),
                     ),
+                    if (_activeProvider == provider) ...[
+                      const SizedBox(height: 12),
+                      const Center(
+                        child: SizedBox(
+                          height: 20,
+                          width: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                      ),
+                    ],
+                    const SizedBox(height: 12),
                   ],
-                  if (_googleError != null) ...[
-                    const SizedBox(height: 16),
+                  if (_socialError != null) ...[
+                    const SizedBox(height: 4),
                     Text(
-                      _googleError!,
+                      _socialError!,
                       textAlign: TextAlign.center,
                       style: TextStyle(
                         color: Theme.of(context).colorScheme.error,
                       ),
                     ),
                   ],
-                  const SizedBox(height: 24),
+                  const SizedBox(height: 12),
                   Row(
                     children: [
                       const Expanded(child: Divider()),

@@ -265,14 +265,17 @@ nothing you declare — Square captures the card on-device and we never see card
 data — but location, contact info and user content are all collected and need
 to be accurate.
 
-**Unrelated to Tap to Pay, but a likely rejection:** the app offers "Sign in
-with Google" and has no Sign in with Apple. Guideline 4.8 requires an
-equivalent privacy-preserving login option (name and email only, email masking,
-no tracking) whenever a third-party service sets up the primary account. This
-applies only if the production deployment actually ships the Google button —
-it renders solely when `/api/mobile/config/` returns a non-empty
-`google_server_client_id`. Worth settling before submission rather than
-discovering it in review.
+**Guideline 4.8 (Login Services) — app side now done.** The app previously
+offered only Google, with no Sign in with Apple, which 4.8 requires whenever a
+third-party service sets up the primary account. Apple and Facebook sign-in are
+now implemented (Apple first on iOS, per its guidelines). Two things still
+gate it: the **Sign In with Apple capability** must be enabled on the App ID in
+Certificates, Identifiers & Profiles — it's self-serve, but until it's on, every
+signed build fails provisioning because `Runner.entitlements` now declares
+`com.apple.developer.applesignin` — and the backend half is `BACKEND_SPEC.md`
+Part SOCIAL. Apple also requires that deleting an account **revokes the Apple
+grant** (SOCIAL-6), which ties into the account-deletion page that already
+exists.
 
 ## Testing notes from the guide
 

@@ -1,6 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/auth_models.dart';
+import '../models/social_provider.dart';
 import '../services/api_service.dart';
 import '../services/auth_service.dart';
 
@@ -30,9 +31,32 @@ class AuthNotifier extends AsyncNotifier<AppUser?> {
     );
   }
 
-  Future<void> loginWithGoogle(String idToken) async {
+  /// Signs in with a native social credential (Google, Apple or Facebook).
+  ///
+  /// Returns the backend's answer so the caller can act on the one outcome this
+  /// notifier can't represent: a sign-in that needs the user to finish a web
+  /// flow first (supply an email, confirm one). That is not an error state:
+  /// the notifier stays signed-out and the login screen takes over, so it must
+  /// not go through [AsyncValue.guard], which would show it as a failure.
+  ///
+  /// Returns null when the exchange failed; the error is then on [state].
+  Future<SocialLoginResult?> loginWithSocial(
+    SocialCredential credential,
+  ) async {
+    SocialLoginResult? result;
+    state = await AsyncValue.guard(() async {
+      result = await AuthService.instance.loginWithSocial(credential);
+      // Null keeps the notifier signed-out while the web continuation runs.
+      return result!.user;
+    });
+    return state.hasError ? null : result;
+  }
+
+  /// Finishes a [SocialLoginResult.needsWeb] sign-in once the user has
+  /// completed the web flow.
+  Future<void> completeSocialLogin(String pendingToken) async {
     state = await AsyncValue.guard(
-      () => AuthService.instance.loginWithGoogle(idToken),
+      () => AuthService.instance.completeSocialLogin(pendingToken),
     );
   }
 

@@ -34,12 +34,14 @@ class AllauthWebScreen extends ConsumerStatefulWidget {
   const AllauthWebScreen.signup({super.key})
     : title = 'Create account',
       initialPath = '/signup/',
-      showLegalFooter = true;
+      showLegalFooter = true,
+      completionPath = null;
 
   const AllauthWebScreen.passwordReset({super.key})
     : title = 'Reset password',
       initialPath = '/password/reset/',
-      showLegalFooter = false;
+      showLegalFooter = false,
+      completionPath = null;
 
   /// A read-only legal page (terms, privacy policy) reached from the login or
   /// signup screen. [initialPath] comes from `/api/mobile/config/` and is
@@ -48,10 +50,41 @@ class AllauthWebScreen extends ConsumerStatefulWidget {
     required this.title,
     required this.initialPath,
     super.key,
-  }) : showLegalFooter = false;
+  }) : showLegalFooter = false,
+       completionPath = null;
+
+  /// Finishing a native social sign-in that couldn't complete on its own —
+  /// allauth needs an email address, or needs the one it has confirmed.
+  ///
+  /// This is allauth's own social-signup / email-confirmation flow, hosted
+  /// exactly like signup is, for exactly the same reason: re-implementing it
+  /// natively would mean duplicating its rate limiting, its "that address
+  /// belongs to another account" rules and its confirmation-link handling, and
+  /// getting any of those subtly wrong is an account-takeover bug, not a
+  /// cosmetic one.
+  ///
+  /// Pops `true` once the server redirects to [completionPath]; the caller then
+  /// exchanges its pending token for a session.
+  const AllauthWebScreen.socialContinue({
+    required this.initialPath,
+    super.key,
+    this.completionPath = defaultSocialCompletionPath,
+  }) : title = 'Finish signing in',
+       showLegalFooter = true;
+
+  /// Where the backend lands a finished social continuation. Kept in one place
+  /// because the app must recognise it exactly — see `BACKEND_SPEC.md`
+  /// Part SOCIAL.
+  static const String defaultSocialCompletionPath =
+      '/api/mobile/auth/social/done/';
 
   final String title;
   final String initialPath;
+
+  /// When set, reaching this path means the flow succeeded: the screen pops
+  /// `true` instead of rendering it. Null for the signup/reset/legal flows,
+  /// which have no "and now return to the app" step.
+  final String? completionPath;
 
   /// Whether to draw the terms/privacy links under the page. On the signup
   /// screen they're required — that's where the account is created, and Apple
@@ -100,6 +133,18 @@ class _AllauthWebScreenState extends ConsumerState<AllauthWebScreen> {
       return NavigationActionPolicy.ALLOW;
     }
     final webHost = Uri.parse(EnvironmentConfig.webBaseUrl).host;
+    // The social continuation is finished: hand control back to the caller,
+    // which swaps its pending token for a session. Checked before the
+    // allow-list, since this path must never render.
+    final completionPath = widget.completionPath;
+    if (completionPath != null &&
+        uri.host == webHost &&
+        uri.path == completionPath) {
+      if (mounted) {
+        Navigator.of(context).pop(true);
+      }
+      return NavigationActionPolicy.CANCEL;
+    }
     // Allauth is mounted at the site root here (no shared `/accounts/`
     // prefix to key off), so the trap allow-lists this screen's own flow —
     // its start page plus the handful of pages allauth redirects through —
@@ -111,6 +156,11 @@ class _AllauthWebScreenState extends ConsumerState<AllauthWebScreen> {
       '/password/reset/done/',
       '/confirm-email/',
       '/email/',
+      // allauth's socialaccount signup form — where it asks for the email a
+      // provider didn't supply (routine with Facebook) — and the page it
+      // bounces to when the chosen address is already taken.
+      '/social/signup/',
+      '/social/connections/',
     };
     if (uri.host == webHost &&
         (uri.path == widget.initialPath || inFlowPaths.contains(uri.path))) {

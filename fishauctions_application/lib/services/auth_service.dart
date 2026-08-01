@@ -4,6 +4,7 @@ import 'package:dio/dio.dart';
 import 'package:logger/logger.dart';
 
 import '../models/auth_models.dart';
+import '../models/social_provider.dart';
 import '../utils/device_identity.dart';
 import '../utils/secure_storage.dart';
 import 'api_service.dart';
@@ -35,14 +36,52 @@ class AuthService {
     return _storeTokensAndFetchUser(res.data as Map<String, dynamic>);
   }
 
-  /// Log in with a Google ID token obtained from the native Google Sign-In SDK.
-  /// The backend verifies the token, links/creates the account, and returns a
-  /// JWT pair — the same single session the password login produces.
-  /// Backend endpoint: POST /api/mobile/auth/google/  { "id_token": "..." }
-  Future<AppUser> loginWithGoogle(String idToken) async {
+  /// Log in with a credential from a native social sign-in (Google, Apple or
+  /// Facebook).
+  ///
+  /// The backend verifies the provider token and runs django-allauth's
+  /// socialaccount pipeline, which either signs the user in — returning the
+  /// same JWT pair a password login produces — or reports that it needs more
+  /// from the user before it can. That second case is not an error and is the
+  /// whole reason this returns [SocialLoginResult] rather than an [AppUser]:
+  ///
+  /// - **Facebook can return no email at all** (the account may have none, or
+  ///   the user declined the permission), so there is nothing to create an
+  ///   account with.
+  /// - **An email the provider hasn't verified** must be confirmed before it
+  ///   can be trusted, or anyone could take over an account by signing up to
+  ///   the provider with someone else's address.
+  ///
+  /// In both cases allauth already has the right web flow, so the backend
+  /// returns a `continue_url` and the app hands the user to it in the
+  /// restricted allauth WebView instead of re-implementing email collection and
+  /// confirmation natively. `pending_token` is what turns the finished web flow
+  /// back into a JWT pair — see [completeSocialLogin].
+  ///
+  /// Backend endpoint: POST /api/mobile/auth/social/ (BACKEND_SPEC Part SOCIAL)
+  Future<SocialLoginResult> loginWithSocial(SocialCredential credential) async {
+    final res = await _api.dio.post('auth/social/', data: credential.toJson());
+    final data = res.data as Map<String, dynamic>;
+    final continueUrl = data['continue_url'] as String?;
+    if (continueUrl != null && continueUrl.isNotEmpty) {
+      return SocialLoginResult.needsWeb(
+        continueUrl: continueUrl,
+        pendingToken: data['pending_token'] as String? ?? '',
+        detail: data['detail'] as String?,
+      );
+    }
+    return SocialLoginResult.signedIn(await _storeTokensAndFetchUser(data));
+  }
+
+  /// Exchanges the `pending_token` from a [SocialLoginResult.needsWeb] for a
+  /// JWT pair, once the user has finished the web continuation.
+  ///
+  /// Throws if the flow wasn't actually completed — the caller treats that as
+  /// "the user backed out", not as a failure worth an error message.
+  Future<AppUser> completeSocialLogin(String pendingToken) async {
     final res = await _api.dio.post(
-      'auth/google/',
-      data: {'id_token': idToken},
+      'auth/social/complete/',
+      data: {'pending_token': pendingToken},
     );
     return _storeTokensAndFetchUser(res.data as Map<String, dynamic>);
   }

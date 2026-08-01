@@ -13,6 +13,8 @@ class AppConfig {
     required this.squareEnvironment,
     required this.googleServerClientId,
     required this.brandName,
+    this.appleSignInEnabled = false,
+    this.facebookAppId = '',
     this.termsPath = defaultTermsPath,
     this.privacyPath = '',
     this.firebase,
@@ -22,6 +24,8 @@ class AppConfig {
     squareApplicationId: _str(json['square_application_id']),
     squareEnvironment: _str(json['square_environment']),
     googleServerClientId: _str(json['google_server_client_id']),
+    appleSignInEnabled: json['apple_sign_in_enabled'] == true,
+    facebookAppId: _str(json['facebook_app_id']),
     brandName: _str(json['brand_name']),
     termsPath: _pathOr(json['terms_url'], defaultTermsPath),
     privacyPath: _pathOr(json['privacy_policy_url'], ''),
@@ -52,6 +56,29 @@ class AppConfig {
   /// Not a secret (it ships in every web page's GSI button). Empty → the login
   /// screen hides the "Sign in with Google" button entirely.
   final String googleServerClientId;
+
+  /// Whether this deployment has django-allauth's `apple` provider configured
+  /// (Services ID, team id, key id and the signing key). A boolean rather than
+  /// an id because, unlike Google, the app needs no client id at runtime: the
+  /// native flow's audience is the app's own bundle id, which the *backend*
+  /// must be told about — see `BACKEND_SPEC.md` Part SOCIAL.
+  ///
+  /// The button additionally requires iOS 13+; `SocialAuthService` checks that
+  /// separately, so this being true doesn't guarantee the button appears.
+  final bool appleSignInEnabled;
+
+  /// The deployment's Facebook app id, or empty when Facebook login isn't
+  /// configured (then the button is hidden entirely).
+  ///
+  /// Unlike [googleServerClientId] and [squareApplicationId], this one is
+  /// **not** sufficient on its own: the Facebook SDKs read their app id from
+  /// `Info.plist` / `AndroidManifest.xml` at launch and register a
+  /// `fb<app-id>` URL scheme, so the value is also baked into the build. This
+  /// config key exists to decide whether to *offer* the button, and it must
+  /// agree with the compiled-in id. A fork with its own Facebook app therefore
+  /// needs its own build — the one place the "one binary serves any
+  /// deployment" property doesn't hold.
+  final String facebookAppId;
 
   /// The deployment's brand, shown as the app-bar title and drawer header
   /// (see `WebViewScreen`). Empty → the UI falls back to the compile-time

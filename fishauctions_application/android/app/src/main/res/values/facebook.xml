@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Facebook Login configuration for Android.
+
+  These are build-time values, which makes Facebook the one provider that breaks
+  the app's "one binary serves any deployment" rule: the SDK reads its app id
+  from the manifest at launch and registers an `fb<app-id>` URL scheme, neither
+  of which can come from /api/mobile/config/ the way the Google client id and
+  the Square application id do. A fork with its own Facebook app needs its own
+  build. (iOS has the same constraint — see ios/Runner/Info.plist.)
+
+  Fill these in from developers.facebook.com → your app → Settings → Basic
+  (App ID) and Settings → Advanced (Client Token). Neither is a secret: both
+  ship in every build by design, exactly like the Square application id. The app
+  *secret* belongs only on the Django side and must never appear here.
+
+  Leaving them empty is safe and is the deliberate default — the Facebook button
+  is gated on `facebook_app_id` from /api/mobile/config/, so an unset id here
+  just means the app never offers Facebook. Set both or neither, and make sure
+  the id matches whatever the backend serves: a mismatch fails at login time
+  with an opaque SDK error.
+-->
+<resources>
+    <string name="facebook_app_id"></string>
+    <string name="facebook_client_token"></string>
+    <!-- The `fb` prefix is required by the SDK's redirect activity. -->
+    <string name="fb_login_protocol_scheme">fb</string>
+</resources>

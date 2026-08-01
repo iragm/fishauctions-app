@@ -116,6 +116,47 @@
 				<string>com.googleusercontent.apps.1028419796918-0glbi1lhnfk32pg60v57lmv0qc6nv90g</string>
 			</array>
 		</dict>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>fb$(FACEBOOK_APP_ID)</string>
+			</array>
+		</dict>
+	</array>
+	<!-- Facebook Login. These are build-time values, which makes Facebook the
+	     one provider that breaks the app's "one binary serves any deployment"
+	     rule: the SDK reads its app id here at launch and registers an
+	     `fb<app-id>` URL scheme, neither of which can come from
+	     /api/mobile/config/ the way the Google client id and Square app id do.
+	     A fork with its own Facebook app therefore needs its own build.
+
+	     Both values are substituted from Xcode build settings — set them in
+	     ios/Flutter/Debug.xcconfig and Release.xcconfig (or inject them in CI),
+	     never by pasting them here, so the numeric id isn't duplicated across
+	     three places. Leaving them empty is safe: /api/mobile/config/ decides
+	     whether the button is offered at all, so an unset id simply means no
+	     Facebook button.
+
+	     The client token is NOT a secret (it ships in every build by design, the
+	     same way the Square application id does); the app *secret* stays on the
+	     Django side and is never in the app. -->
+	<key>FacebookAppID</key>
+	<string>$(FACEBOOK_APP_ID)</string>
+	<key>FacebookClientToken</key>
+	<string>$(FACEBOOK_CLIENT_TOKEN)</string>
+	<key>FacebookDisplayName</key>
+	<string>auction.fish</string>
+	<!-- Lets the SDK hand off to the Facebook app when it's installed, instead
+	     of always falling back to a web sheet. iOS requires every scheme an app
+	     probes with canOpenURL to be declared here. -->
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>fbapi</string>
+		<string>fb-messenger-share-api</string>
+		<string>fbauth2</string>
+		<string>fbshareextension</string>
 	</array>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>

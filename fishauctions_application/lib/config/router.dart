@@ -22,7 +22,15 @@ import '../screens/webview_screen.dart';
 /// they exist only to get an account — the screens a *signed-in* user is
 /// redirected away from. Everything else requires an account; the app has no
 /// anonymous browsing.
-const _gateLocations = {'/login', '/signup', '/password-reset'};
+const _gateLocations = {
+  '/login',
+  '/signup',
+  '/password-reset',
+  // Reached from the login screen mid-sign-in, so it belongs in the trap: the
+  // user is signed out until the pending token is exchanged, and a signed-in
+  // user has no business here.
+  '/social-continue',
+};
 
 /// Screens that work in either state, so the redirect leaves them alone both
 /// ways. The terms and privacy pages have to be readable at the point of
@@ -116,6 +124,16 @@ final routerProvider = Provider<GoRouter>((ref) {
       // wander into the site from here). Paths come from
       // `/api/mobile/config/`, so a fork points at its own documents; terms
       // falls back to the site's `/tos/`.
+      // Finishing a native social sign-in that needs an email address or a
+      // confirmation — allauth's own flow, hosted like signup is. Pops `true`
+      // when the server lands on the completion path; the login screen then
+      // exchanges its pending token. `url` is the backend's `continue_url`.
+      GoRoute(
+        path: '/social-continue',
+        builder: (context, state) => AllauthWebScreen.socialContinue(
+          initialPath: state.uri.queryParameters['url'] ?? '/social/signup/',
+        ),
+      ),
       GoRoute(
         path: '/legal/terms',
         builder: (context, state) => AllauthWebScreen.legal(
