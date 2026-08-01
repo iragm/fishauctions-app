@@ -92,11 +92,37 @@ class SquarePaymentService {
     if (!Platform.isIOS) {
       return;
     }
-    if (await _sdk.tapToPaySettings.isAppleAccountLinked()) {
+    if (await isAppleAccountLinked()) {
       return;
     }
     await _sdk.tapToPaySettings.linkAppleAccount();
   }
+
+  /// Whether this device is linked to an Apple account for Tap to Pay — i.e.
+  /// whether the merchant has accepted Apple's Tap to Pay Terms and Conditions.
+  ///
+  /// Always asked of the SDK (and through it, Apple). Apple's app-review
+  /// requirement 1.6 forbids holding this in a local variable: the merchant can
+  /// unlink their Apple Account at any time from iOS Settings, and a stale
+  /// `true` sends the app into a charge that can only fail. iOS-only; false on
+  /// Android, which has no Apple-account step.
+  Future<bool> isAppleAccountLinked() async {
+    if (!Platform.isIOS) {
+      return false;
+    }
+    return _sdk.tapToPaySettings.isAppleAccountLinked();
+  }
+
+  /// Subscribes to Square's reader-changed events, returning the handle that
+  /// cancels the subscription.
+  ///
+  /// Drives the Tap to Pay configuration-progress indicator Apple requires
+  /// (requirements 3.9.1 and 5.7) — the SDK reports the reader moving through
+  /// connecting-to-device / connecting-to-Square / ready as it prepares, which
+  /// is the PSP equivalent of `PaymentCardReader.Event.updateProgress`.
+  ReaderCallbackReference onReaderChanged(
+    void Function(ReaderChangedEvent event) callback,
+  ) => _sdk.readerManager.setReaderChangedCallback(callback);
 
   /// Ensures the runtime location permission that Square Tap to Pay requires
   /// on both platforms. Without it, [charge] fails with

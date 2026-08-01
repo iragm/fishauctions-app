@@ -13,6 +13,7 @@ import 'push_prompt_service.dart';
 import 'push_service.dart';
 import 'social_auth_service.dart';
 import 'square_payment_service.dart';
+import 'tap_to_pay_service.dart';
 
 final _log = Logger();
 
@@ -88,6 +89,13 @@ class AuthService {
     } on Object catch (e) {
       _log.w('Square deauthorize on logout failed: $e');
     }
+    // Drop the reader subscription and the previous user's Tap to Pay
+    // eligibility, so the next account doesn't inherit a drawer entry (or a
+    // pre-authorized reader) that belongs to someone else. Apple's terms
+    // acceptance is deliberately *not* touched: it's a property of the device
+    // and the Apple Account, not of our login, and it's read from Apple every
+    // time anyway (requirement 1.6).
+    TapToPayService.instance.reset();
     // So the next Google sign-in shows the account picker instead of silently
     // reusing the signed-out account. Never throws.
     await SocialAuthService.instance.signOut();

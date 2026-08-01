@@ -4,14 +4,18 @@ import 'dart:io' show Platform;
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:square_mobile_payments_sdk/square_mobile_payments_sdk.dart';
 
 import '../models/app_config.dart';
 import '../models/payment_context.dart';
+import '../models/tap_to_pay_status.dart';
 import '../providers/config_provider.dart';
 import '../services/api_service.dart';
 import '../services/config_service.dart';
 import '../services/square_payment_service.dart';
+import '../services/tap_to_pay_service.dart';
+import 'tap_to_pay_branding.dart';
 
 /// How a [PaymentSheet] ended. [paid] means the invoice is settled — the caller
 /// should refresh the checkout page so it re-renders PAID (HTMX-style).
@@ -101,6 +105,20 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
   /// "hold the card": Square's own full-screen Activity owns the tap UI.
   String _processingMessage = '';
 
+  /// Square's own receipt URL for the settled payment, when the backend
+  /// returns one. Feeds the "Send receipt" action (Apple's requirement 5.10).
+  String? _receiptUrl;
+
+  /// Human-readable receipt/reference for the attempt, shown on the outcome
+  /// view and included in a shared receipt.
+  String? _receiptNumber;
+
+  /// Set when the charge was declined by the card/issuer rather than failing
+  /// for a device or configuration reason. Requirement 5.9 wants the outcome
+  /// stated plainly, and 5.10 requires the customer to be able to receive a
+  /// receipt **even for a decline** — so the outcome view branches on this.
+  bool _declined = false;
+
   @override
   void initState() {
     super.initState();
@@ -134,6 +152,9 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
     _stranded = false;
     _settingsAction = null;
     _confirmAttempts = 0;
+    _receiptUrl = null;
+    _receiptNumber = null;
+    _declined = false;
     setState(() {
       _phase = _Phase.loading;
       _error = null;
@@ -256,6 +277,16 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
         return;
       }
 
+      // Apple's requirement 5.7: if the cashier gets here while Tap to Pay is
+      // still configuring, they must see an "initializing" screen saying it
+      // will be available soon — not a generic spinner, and certainly not the
+      // reader's own opaque failure. Normally instant, because the shell warms
+      // the reader at launch and on every resume (requirement 1.5).
+      await _awaitReaderReady();
+      if (!mounted) {
+        return;
+      }
+
       // Square's Sandbox environment can't simulate a real NFC tap — there's
       // no way to PCI-certify a software card read, so `charge()` in sandbox
       // always surfaces the native "connect hardware to take card payments"
@@ -351,7 +382,15 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
         );
         return;
       }
-      _fail('Payment failed: ${e.message}');
+      // Everything left is the card/issuer refusing, or the read timing out.
+      // Requirement 5.9 wants that outcome stated as an outcome — the customer
+      // was not charged — rather than as an app error, and 5.10 wants a receipt
+      // offered for it too, which `_declined` switches on.
+      _declined = true;
+      _fail(
+        'Payment declined. ${e.message}\n\nThe card was not charged. Ask the '
+        'customer for another card or payment method, then try again.',
+      );
     } on AuthorizeError catch (e) {
       if (e.code ==
           AuthorizationErrorCode.locationNotActivatedForCardProcessing) {
@@ -371,6 +410,50 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
       _fail('Payment could not be completed: $e');
     }
   }
+
+  /// Waits — showing the "initializing" view — until the Tap to Pay reader
+  /// reports ready, or until [_readerReadyTimeout] elapses.
+  ///
+  /// Apple's requirement 5.7 asks for this screen; the timeout is what keeps it
+  /// honest. The reader status is a best-effort signal (it stays `unknown` on a
+  /// deployment where the reader callback never fires, and Android doesn't
+  /// report Tap to Pay readiness the same way), so after the timeout we start
+  /// the charge anyway and let Square's own prompt be the authority. Blocking
+  /// a charge on our own progress indicator would be strictly worse than the
+  /// behaviour this replaces.
+  Future<void> _awaitReaderReady() async {
+    final status = TapToPayService.instance.status;
+    if (status.value.isReady) {
+      return;
+    }
+    setState(() {
+      _phase = _Phase.initializing;
+      _error = null;
+    });
+    final ready = Completer<void>();
+    void listener() {
+      if (status.value.isReady && !ready.isCompleted) {
+        ready.complete();
+      }
+    }
+
+    status.addListener(listener);
+    try {
+      await ready.future.timeout(
+        _readerReadyTimeout,
+        onTimeout: () {
+          // Deliberately not an error — see the doc comment.
+        },
+      );
+    } finally {
+      status.removeListener(listener);
+    }
+  }
+
+  /// How long the "initializing" view waits for the reader before starting the
+  /// charge regardless. Long enough to cover a genuine cold configure, short
+  /// enough that a never-arriving status doesn't strand the cashier.
+  static const _readerReadyTimeout = Duration(seconds: 12);
 
   /// The deployment config (Square app id + environment), or null if it hasn't
   /// loaded and can't be fetched. Config is the source of truth (warmed at
@@ -417,6 +500,16 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
       final data = res.data ?? const {};
       final receipt =
           data['receipt_number'] ?? data['payment_id'] ?? _capturedPaymentId;
+      _receiptNumber = receipt?.toString();
+      // Square's hosted receipt for this payment, when the backend passes it
+      // through from GetPayment. It's what makes the "Send receipt" action
+      // (requirement 5.10) a real receipt rather than a reference number —
+      // absent on deployments that don't return it yet, which the share text
+      // handles (BACKEND_SPEC.md Part TTP).
+      _receiptUrl = (data['receipt_url'] as String?)?.trim();
+      if (_receiptUrl?.isEmpty ?? false) {
+        _receiptUrl = null;
+      }
       _captureOutstanding = false;
       // Intentionally keep the Square authorization after a settled charge. An
       // in-person checkout runs many invoices for the same seller back-to-back,
@@ -427,12 +520,12 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
         _phase = _Phase.success;
         _error = receipt == null ? null : 'Receipt $receipt';
       });
-      // Hold the confirmation long enough for the cashier to read it (and the
-      // receipt number) before we dismiss and reload the WebView to PAID.
-      await Future<void>.delayed(const Duration(seconds: 4));
-      if (mounted) {
-        Navigator.of(context).pop(PaymentResult.paid);
-      }
+      // The sheet used to dismiss itself after four seconds. It can't any more:
+      // Apple's requirement 5.10 says it must be possible to send the customer
+      // a confidential digital receipt from here, and a window that closes on
+      // its own is not a way to offer that. The cashier now taps "Done" — one
+      // extra tap at the end of a charge, in exchange for the receipt action
+      // actually being reachable.
     } on DioException catch (e) {
       _confirmAttempts++;
       if (_confirmAttempts >= _maxConfirmAttempts) {
@@ -497,6 +590,46 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
     }
   }
 
+  /// Sends the customer a receipt for this attempt through the OS share sheet.
+  ///
+  /// Apple's requirement 5.10: *"Regardless of whether a transaction is
+  /// approved or declined, it must be possible to send a confidential digital
+  /// receipt to the customer. This could be done via SMS, email, QR code, or
+  /// Activity views."* The share sheet **is** an Activity view, which is why
+  /// this is a share rather than a bespoke "enter their email" form: it reaches
+  /// Messages, Mail, AirDrop and anything else the customer already uses,
+  /// without the app ever storing a customer's contact details.
+  ///
+  /// Confidential by construction — nothing here carries a card number, and the
+  /// hosted receipt URL is Square's own single-payment link.
+  Future<void> _shareReceipt() async {
+    final ctx = _ctx;
+    final lines = <String>[
+      if (_declined)
+        'Payment declined — invoice #${widget.invoicePk}'
+      else
+        'Payment received — invoice #${widget.invoicePk}',
+      if (ctx != null) 'Amount: ${ctx.amountLabel}',
+      if (_receiptNumber != null) 'Receipt: $_receiptNumber',
+      ?_receiptUrl,
+      if (_declined)
+        'This card was not charged. The invoice is still outstanding.',
+    ];
+    final params = ShareParams(
+      text: lines.join('\n'),
+      subject: 'Receipt for invoice #${widget.invoicePk}',
+    );
+    try {
+      await SharePlus.instance.share(params);
+    } on Object {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Couldn\'t open the share sheet.')),
+        );
+      }
+    }
+  }
+
   String? _detail(DioException e) {
     final data = e.response?.data;
     return data is Map ? data['detail'] as String? : null;
@@ -529,13 +662,24 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
             ],
             switch (_phase) {
               _Phase.loading => _LoadingView(onCancel: _popCancelled),
+              _Phase.initializing => _InitializingView(
+                amountLabel: _ctx?.amountLabel,
+              ),
               _Phase.processing => _ProcessingView(
                 message: _processingMessage,
                 amountLabel: _ctx?.amountLabel,
               ),
-              _Phase.success => _SuccessView(receipt: _error),
+              _Phase.success => _SuccessView(
+                receipt: _error,
+                amountLabel: _ctx?.amountLabel,
+                onShareReceipt: _shareReceipt,
+                onDone: () => Navigator.of(context).pop(PaymentResult.paid),
+              ),
               _Phase.error => _ErrorView(
                 message: _error ?? 'Something went wrong.',
+                // 5.10: a declined transaction must still be able to send the
+                // customer a receipt.
+                onShareReceipt: _declined ? _shareReceipt : null,
                 // Stranded (terminal) or fixable-only-in-settings: no retry.
                 // Otherwise, while a capture is outstanding, retry must
                 // re-confirm the same payment, not start a new charge — and
@@ -559,7 +703,51 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
   );
 }
 
-enum _Phase { loading, processing, success, error }
+enum _Phase { loading, initializing, processing, success, error }
+
+/// Apple's requirement 5.7: the cashier pressed the Tap to Pay button while the
+/// reader is still being configured, so they get a screen that says so and says
+/// it will be available soon — rather than an indefinite spinner or, worse,
+/// Square's opaque "connect hardware" prompt.
+///
+/// It also renders the reader's live configuration progress (requirement
+/// 3.9.1), which is the same signal the settings screen shows.
+class _InitializingView extends StatelessWidget {
+  const _InitializingView({this.amountLabel});
+
+  final String? amountLabel;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      if (amountLabel != null) ...[
+        Text(amountLabel!, style: Theme.of(context).textTheme.headlineSmall),
+        const SizedBox(height: 16),
+      ],
+      ValueListenableBuilder<TapToPayReaderStatus>(
+        valueListenable: TapToPayService.instance.status,
+        builder: (context, status, _) => Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(
+              width: double.infinity,
+              child: LinearProgressIndicator(),
+            ),
+            const SizedBox(height: 16),
+            Text(status.message, textAlign: TextAlign.center),
+          ],
+        ),
+      ),
+      const SizedBox(height: 8),
+      Text(
+        '$tapToPayName will be available in a moment.',
+        textAlign: TextAlign.center,
+        style: Theme.of(context).textTheme.bodySmall,
+      ),
+    ],
+  );
+}
 
 /// Warns that Android Developer options are on, which stops Square's reader
 /// from taking a tap. Deliberately a passive strip, not a gate: the app can't
@@ -645,18 +833,35 @@ class _ProcessingView extends StatelessWidget {
   );
 }
 
+/// The approved outcome (requirement 5.9), plus the receipt action Apple
+/// requires be available for it (5.10).
 class _SuccessView extends StatelessWidget {
-  const _SuccessView({this.receipt});
+  const _SuccessView({
+    required this.onShareReceipt,
+    required this.onDone,
+    this.receipt,
+    this.amountLabel,
+  });
 
   final String? receipt;
+  final String? amountLabel;
+  final Future<void> Function() onShareReceipt;
+  final VoidCallback onDone;
 
   @override
   Widget build(BuildContext context) => Column(
     mainAxisSize: MainAxisSize.min,
+    crossAxisAlignment: CrossAxisAlignment.stretch,
     children: [
       const Icon(Icons.check_circle, size: 64, color: Colors.green),
       const SizedBox(height: 16),
-      const Text('Payment complete!'),
+      Text(
+        amountLabel == null ? 'Approved' : 'Approved — $amountLabel',
+        textAlign: TextAlign.center,
+        style: Theme.of(
+          context,
+        ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
+      ),
       if (receipt != null) ...[
         const SizedBox(height: 4),
         Text(
@@ -665,6 +870,14 @@ class _SuccessView extends StatelessWidget {
           style: const TextStyle(color: Colors.grey),
         ),
       ],
+      const SizedBox(height: 24),
+      OutlinedButton.icon(
+        onPressed: onShareReceipt,
+        icon: const Icon(Icons.ios_share),
+        label: const Text('Send receipt to customer'),
+      ),
+      const SizedBox(height: 8),
+      FilledButton(onPressed: onDone, child: const Text('Done')),
     ],
   );
 }
@@ -676,6 +889,7 @@ class _ErrorView extends StatelessWidget {
     this.retryLabel,
     this.onOpenSettings,
     this.onClose,
+    this.onShareReceipt,
   });
 
   final String message;
@@ -686,6 +900,12 @@ class _ErrorView extends StatelessWidget {
   /// no longer prompt for). Shown instead of a "Try Again" that would no-op.
   final VoidCallback? onOpenSettings;
   final VoidCallback? onClose;
+
+  /// Set only for a *declined* transaction, where Apple's requirement 5.10
+  /// still expects the customer to be able to receive a receipt. Deliberately
+  /// null for device/config failures: nothing was presented to a customer
+  /// there, so there is no receipt to send.
+  final Future<void> Function()? onShareReceipt;
 
   @override
   Widget build(BuildContext context) => Column(
@@ -709,6 +929,14 @@ class _ErrorView extends StatelessWidget {
       if (onRetry != null && retryLabel != null) ...[
         if (onOpenSettings != null) const SizedBox(height: 8),
         FilledButton(onPressed: onRetry, child: Text(retryLabel!)),
+      ],
+      if (onShareReceipt != null) ...[
+        const SizedBox(height: 8),
+        OutlinedButton.icon(
+          onPressed: onShareReceipt,
+          icon: const Icon(Icons.ios_share),
+          label: const Text('Send receipt to customer'),
+        ),
       ],
       if (onClose != null) ...[
         const SizedBox(height: 8),

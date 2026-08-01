@@ -15,6 +15,7 @@ import '../screens/offline_set_winners_screen.dart';
 import '../screens/offline_users_screen.dart';
 import '../screens/print_label_screen.dart';
 import '../screens/splash_screen.dart';
+import '../screens/tap_to_pay_screen.dart';
 import '../screens/webview_screen.dart';
 
 /// The sign-in gate: the screens an anonymous user is allowed on, and — because
@@ -140,6 +141,14 @@ final routerProvider = Provider<GoRouter>((ref) {
           // (a direct route) leaves the screen to fetch its own.
           prefs: state.extra is LabelPrefs ? state.extra! as LabelPrefs : null,
         ),
+      ),
+      // Tap to Pay setup, status and merchant education. Reached from the
+      // drawer and from the awareness moment. Apple's review guide requires
+      // enablement and education to be reachable outside the checkout flow
+      // (requirements 3.6 and 4.3), which is what this route is for.
+      GoRoute(
+        path: '/tap-to-pay',
+        builder: (context, state) => const TapToPayScreen(),
       ),
       // AR lot mode — reached via the web's fishauctions://ar/<slug> deep
       // links (auction rules page; lot pages add ?locate=<pk>). Pops with a

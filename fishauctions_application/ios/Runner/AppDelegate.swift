@@ -55,6 +55,26 @@ import UIKit
         )
       case "getCameraFov":
         Self.handleGetCameraFov(result: result)
+      case "tapToPayEducationAvailable":
+        // iOS-only: Apple's merchant-education sheet is iOS 18+. Android has
+        // no equivalent (Tap to Pay on Android education is Google's/Square's).
+        result(TapToPayEducationPresenter.isAvailable)
+      case "presentTapToPayEducation":
+        // Apple's education sheet must come up over the app's own UI, so it
+        // presents from the root view controller — the Flutter one — rather
+        // than from a controller we create.
+        TapToPayEducationPresenter.present(
+          from: UIApplication.shared.connectedScenes
+            .compactMap { ($0 as? UIWindowScene)?.keyWindow }
+            .first?.rootViewController,
+          result: result
+        )
+      case "osVersion":
+        // Drives the "update your iPhone" message Apple's requirement 1.4 asks
+        // for: on iOS below the Tap to Pay floor the app must say the OS is the
+        // problem, not the hardware. Square's SDK collapses both into a single
+        // `isDeviceCapable() == false`, so the app asks the OS directly.
+        result(UIDevice.current.systemVersion)
       case "addPassToWallet":
         // iOS-only: Android has no equivalent (Google Wallet passes are added
         // by opening a save URL in the browser, which the WebView already

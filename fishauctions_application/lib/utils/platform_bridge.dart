@@ -185,6 +185,72 @@ class PlatformBridge {
     }
   }
 
+  /// Whether Apple's own Tap to Pay on iPhone merchant-education sheet
+  /// (`ProximityReaderDiscovery`) can be shown — iOS 18+ only, false everywhere
+  /// else and on any channel error.
+  ///
+  /// Apple's app-review guide requires this API for merchant education
+  /// (requirement 4.1), and using it is what satisfies the "digital wallets",
+  /// PIN-entry and fallback-payment education requirements too — Apple keeps
+  /// that content current and localized per region. Below iOS 18 the caller
+  /// shows its own text-only explanation instead.
+  static Future<bool> tapToPayEducationAvailable() async {
+    if (!Platform.isIOS) {
+      return false;
+    }
+    try {
+      return await _channel.invokeMethod<bool>('tapToPayEducationAvailable') ??
+          false;
+    } on PlatformException {
+      return false;
+    } on MissingPluginException {
+      return false;
+    }
+  }
+
+  /// Presents Apple's Tap to Pay on iPhone education sheet, resolving once the
+  /// user dismisses it.
+  ///
+  /// Returns `presented` when it was shown, `unsupported` on iOS 17 and
+  /// earlier (and on every non-iOS platform), or `failed` if the sheet itself
+  /// errored — the caller falls back to its own explanation for anything but
+  /// `presented`. Never throws: education failing must not break the flow it's
+  /// attached to (enabling Tap to Pay).
+  static Future<String> presentTapToPayEducation() async {
+    if (!Platform.isIOS) {
+      return 'unsupported';
+    }
+    try {
+      return await _channel.invokeMethod<String>('presentTapToPayEducation') ??
+          'failed';
+    } on PlatformException {
+      return 'failed';
+    } on MissingPluginException {
+      return 'unsupported';
+    }
+  }
+
+  /// The OS version string (`UIDevice.systemVersion` on iOS), or empty when the
+  /// platform doesn't report one.
+  ///
+  /// Only iOS implements it, and only one caller needs it: Apple's requirement
+  /// 1.4 says an app must tell the user to *update iOS* when the OS is what
+  /// blocks Tap to Pay, rather than showing a generic "unsupported device".
+  /// Square's SDK reports both causes as a single `isDeviceCapable() == false`,
+  /// so the version has to be read separately to tell them apart.
+  static Future<String> osVersion() async {
+    if (!Platform.isIOS) {
+      return '';
+    }
+    try {
+      return await _channel.invokeMethod<String>('osVersion') ?? '';
+    } on PlatformException {
+      return '';
+    } on MissingPluginException {
+      return '';
+    }
+  }
+
   /// Initializes the Square Mobile Payments SDK with [applicationId] (the
   /// deployment's Square Application ID, from `/api/mobile/config/`). Must run
   /// once before any authorize()/charge() call — the Square Flutter plugin

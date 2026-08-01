@@ -520,6 +520,60 @@ iOS — Apple's proximity-reader entitlement (code is wired on both platforms;
 the iOS checklist is in `IOS.md`). None of that is testable in CI; CI only
 verifies the app compiles and links.
 
+**Apple reviews Tap to Pay apps against a published checklist, and it drives
+real code.** `TAPTOPAY.md` tracks every item of the *Tap to Pay on iPhone App &
+Marketing Requirements and Review Guide* (v1.6) with its status; the backend
+half is `BACKEND_SPEC.md` Part TTP. We hold the **development** entitlement
+(dev only, 2026-07-31); the **publishing** entitlement — required for
+TestFlight *and* the App Store — is granted only after that review. The parts
+that shaped the app:
+
+- **Merchant education is Apple's, not ours** (`ProximityReaderDiscovery`,
+  iOS 18+, `ios/Runner/TapToPayEducation.swift`). Requirement 4.1 mandates it,
+  and using it satisfies 4.4/4.6/4.7/4.8 at a stroke because Apple keeps the
+  content current and localized. No entitlement is involved — it presents
+  education, unlike `PaymentCardReader` — so it works in dev builds, which is
+  what makes it recordable for the entitlement video.
+- **Never draw Tap to Pay artwork, and never shorten the name.** The guide bars
+  developing custom images/videos/illustrations depicting iPhone or the
+  capability; only the Marketing Toolkit's assets qualify. So the awareness
+  modal and education fallback are type-only, and the app ships **no icon** on
+  its Tap to Pay controls — requirement 5.5 permits only SF Symbols'
+  `wave.3.right.circle[.fill]`, and a lookalike (Material's `Icons.contactless`
+  very much included) fails it. `tapToPaySymbolAsset` in
+  `widgets/tap_to_pay_branding.dart` is the slot for the real export.
+- **The reader is warmed at launch and on resume** (`TapToPayService.prepare`,
+  requirement 1.5) — which means *authorizing* the SDK, since that's what
+  starts the reader preparing. Authorization used to happen per invoice, at the
+  instant the cashier pressed the button, which also made 5.6 ("Tap to Pay UI
+  within one second, 90% of the time") unreachable. Needs the new
+  `payments/authorization/` endpoint; self-disables on 404.
+- **Terms-acceptance status is asked of Apple every time** (requirement 1.6
+  forbids a local cache — a merchant can unlink their Apple Account from iOS
+  Settings at any moment). Don't memoize `isAppleAccountLinked()`.
+- **Enablement and education live outside checkout** (3.6, 4.3) — the drawer's
+  Tap to Pay entry → `/tap-to-pay` (`screens/tap_to_pay_screen.dart`), shown
+  only to merchants the backend calls eligible, since the guide's advice for a
+  mixed consumer/merchant app is to limit the feature to the right user type.
+  Nearly every user here is a bidder.
+- **A declined charge must still be able to send the customer a receipt**
+  (5.10, "approved *or* declined"), via SMS/email/QR/Activity view — the share
+  sheet is an Activity view, so that's what it uses. This is why the success
+  view no longer auto-dismisses after four seconds: a window that closes itself
+  isn't a way to offer an action.
+- **"Update your iOS" and "this iPhone will never work" are different
+  messages** (requirement 1.4). Square collapses both into
+  `isDeviceCapable() == false`, so the OS version is read natively and anything
+  below iOS 17.6 — the boundary Apple names — is reported as an update.
+- **Square OAuth onboarding must not leave the app** (2.2 + the General
+  Requirements' "without needing other apps"). It now opens in an in-app
+  browser view (`SFSafariViewController`/Custom Tabs) rather than the system
+  browser: that's the surface Apple counts as in-app, and it shares Safari's
+  cookies so a merchant whose Square login is Google SSO still works — which it
+  would *not* in the shell's own WebView, since Google blocks embedded
+  WebViews. Still gated on the website un-hiding its connect links in the app
+  (`BACKEND_SPEC.md` TTP-1) — as it stands, that is the likeliest rejection.
+
 ## Django Backend Notes (from CLAUDE.md in iragm/fishauctions)
 
 - Stack: Django 5.x, DRF, allauth, Bootstrap 5, HTMX, MariaDB, Redis, Celery, Docker
@@ -538,7 +592,8 @@ verifies the app compiles and links.
 - **Multi-lot printing + printed-marking (`BACKEND_SPEC.md` Part W):** app side landed 2026-07-26 — `fishauctions://print/?lots=…` is handled, so the template change is unblocked. Backend still owes: the bulk label buttons emitting that link when `user_print_method == 'bluetooth'` (plus letting `printredirect` carry the scheme, or gating in `LotLabelView.dispatch` instead), and `POST /api/mobile/labels/printed/`. Until the link lands, Bluetooth users still get a PDF sheet from the bulk buttons; until `labels/printed/` lands, natively printed labels stay "unprinted" on the website (the app's call self-disables on 404).
 - **Push notifications:** app *and* backend *and* the config endpoint are all done and verified on hardware (2026-07-27) — `firebase_messaging` is wired, `PushService.currentToken()` is not a stub, and both deployments' `/api/mobile/config/` serve a complete `firebase` block. **`PUSH.md` and the code are the truth here.** Two remaining blockers, both server-side: `FIREBASE_CREDENTIALS_JSON` set per deployment (unset ⇒ `push_configured()` false ⇒ silent email fallback), and `UserData.push_notifications_instead_of_email` actually toggled on — which is what the new contextual opt-in above exists to do, once `notifications/prefs/` (`BACKEND_SPEC.md` Part N) lands. Testing trap: the **dev flavor can never receive push against staging** (staging's config targets `…app.staging`, so `PushService.init` goes inert by design) and a signed-out app never initializes push at all.
 - **Terms & privacy links / account deletion (App Store blockers):** the app now renders both legal links on the login and signup screens (`widgets/legal_links.dart`, paths from `/api/mobile/config/` with `/tos/` as the terms fallback). The site has **no privacy policy page and no way to delete an account** — Apple requires both for an app with account registration. Backend items: `BACKEND_SPEC.md` Parts L and D. Deletion is deliberately specced as a *web* page under `/preferences/`, which needs no app change (the shell's `/logout/` interception already turns the resulting web sign-out into a full native one).
-- **Square Tap to Pay (runtime):** Backend endpoints are done; charging still needs a real NFC device on API 31+ and Square production approval (sandbox works for the full flow). Not exercisable in CI.
+- **Square Tap to Pay (runtime):** Backend endpoints are done; charging still needs a real NFC device on API 31+ and Square production approval (sandbox works for the full flow). Not exercisable in CI. Android is verified working in production builds; iOS has the **development** entitlement only (2026-07-31).
+- **Tap to Pay publishing entitlement / App Review (`TAPTOPAY.md`, `BACKEND_SPEC.md` Part TTP):** the app side of Apple's checklist is implemented — awareness moment, setup/education screen, Apple's education sheet, reader-progress indicators, receipt sharing, launch/resume warm-up, OS-version-aware messaging. Three backend items are review blockers: **TTP-1** un-hide the Square connect links in the app (today the site tells merchants to open a browser, which fails requirement 2.2 outright), **TTP-2** fix the checkout button's copy and icon (`Tap to Pay with card` + a Bootstrap credit-card glyph violate 5.4/5.5), and **TTP-3** the new `GET /api/mobile/payments/authorization/` that makes the warm-up and the admin-only terms gate possible. TTP-4 (`receipt_url` on confirm) and TTP-5 (launch email + push, from Apple's toolkit) are follow-ups.
 - ~~Offline sync backend~~ — landed (`offline/snapshot/` + `offline/sync/` in `auctions/mobile/`).
 - **AR lot mode backend v2:** v1 (models, solver, endpoints) landed on the backend, and so has every per-frame sensor channel `BACKEND_SPEC.md` Part 5 specced — gyro `yaw_deg` heading odometry, GPS + absolute-heading island anchoring, and pedometer-driven `odo_x_m`/`odo_y_m` planar dead-reckoning. What's left is island (connected-component) detection/labeling/merging (`component` on positions rows, which the app already consumes). Until it lands, lots that were never co-visible in one camera frame don't get reliable relative positions, and unconnected scanned islands overlap on the admin map.
 - **Proximity check-in backend:** app side (ping service + shell UI) is implemented; `BACKEND_SPEC.md` Part 6 (`exact_location_set`, the three `checkin/*` endpoints, nudge dedupe, history) is not. Feature self-disables on 404 until then.

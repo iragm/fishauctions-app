@@ -18,6 +18,7 @@ import '../constants/app_constants.dart';
 import '../models/checkin_models.dart';
 import '../models/club_menu_item.dart';
 import '../models/label_prefs.dart';
+import '../models/tap_to_pay_status.dart';
 import '../providers/auth_provider.dart';
 import '../providers/clubs_provider.dart';
 import '../providers/config_provider.dart';
@@ -38,10 +39,12 @@ import '../services/printer_setup_prompt.dart';
 import '../services/push_prompt_service.dart';
 import '../services/push_service.dart';
 import '../services/shortcut_service.dart';
-import '../services/square_payment_service.dart';
+import '../services/tap_to_pay_service.dart';
 import '../utils/platform_bridge.dart';
 import '../widgets/payment_sheet.dart';
 import '../widgets/printer_connect_sheet.dart';
+import '../widgets/tap_to_pay_awareness.dart';
+import '../widgets/tap_to_pay_branding.dart';
 import 'command_palette_screen.dart';
 
 class WebViewScreen extends ConsumerStatefulWidget {
@@ -178,8 +181,70 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       if (cfg.hasSquare) {
         await PlatformBridge.initializeSquare(cfg.squareApplicationId);
       }
+      // Apple's requirement 1.5: "at the launch of your app or when it comes to
+      // the foreground, your app must trigger the initial preparation and
+      // warming-up of Tap to Pay on an iPhone". Initializing the SDK isn't that
+      // — the reader only starts preparing once the SDK is *authorized*, which
+      // until now happened per invoice, at the moment the cashier pressed the
+      // button. That is also the only way to hit requirement 5.6 (the Tap to
+      // Pay UI must appear within one second, 90% of the time).
+      //
+      // Self-disables on a deployment without the eligibility endpoint, in
+      // which case the charge path authorizes per invoice exactly as before.
+      await TapToPayService.instance.prepare(
+        applicationId: cfg.hasSquare ? cfg.squareApplicationId : null,
+      );
     } on Object catch (e) {
       debugPrint('Square SDK warm-up skipped: $e');
+    }
+  }
+
+  /// Shows the Tap to Pay awareness moment once per device, to merchants who
+  /// can actually use it.
+  ///
+  /// Apple mandates at least one in-app awareness moment for all eligible users
+  /// (checklist 3.1/3.3, marketing 6.2), with a full-screen modal as the named
+  /// best practice (3.2). Gated on the backend's eligibility answer because the
+  /// same guide says to limit the feature to the appropriate user type in an
+  /// app with a mixed consumer/merchant base — which this very much is, since
+  /// nearly everyone here is a bidder, not an auctioneer.
+  ///
+  /// Runs behind the same settle-and-claim discipline as the location and
+  /// notification offers, so it can't flash over a page that's about to
+  /// redirect.
+  Future<void> _maybeOfferTapToPay(int generation) async {
+    final service = TapToPayService.instance;
+    if (!service.isApplePlatform) {
+      return;
+    }
+    final eligibility = service.eligibility.value;
+    if (eligibility == null || !eligibility.eligible) {
+      return;
+    }
+    if (await TapToPayAwarenessSheet.alreadyShown()) {
+      return;
+    }
+    // Nothing to announce to someone who already set it up, or whose iPhone
+    // can't do it at all.
+    if (!(await service.unsupportedReason()).isSupported ||
+        await service.isEnabled()) {
+      return;
+    }
+    if (!await _claimBanner(generation)) {
+      return;
+    }
+    if (!mounted) {
+      return;
+    }
+    // Marked shown before presenting, not after: a merchant who force-quits
+    // mid-modal has still seen it, and re-showing an announcement they
+    // dismissed is worse than missing one impression.
+    await TapToPayAwarenessSheet.markShown();
+    if (!mounted) {
+      return;
+    }
+    if (await TapToPayAwarenessSheet.show(context) && mounted) {
+      await context.push('/tap-to-pay');
     }
   }
 
@@ -602,6 +667,13 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       // The user may have just walked into the auction hall.
       CheckinService.instance.onAppResumed();
       unawaited(_rewarmConfigIfFailed());
+      // Apple's requirement 1.5 asks for Tap to Pay to be prepared "at the
+      // launch of your app **or when it comes to the foreground**". Both, here:
+      // iOS tears the reader down while backgrounded, so a cashier who
+      // switches away and comes back would otherwise be back to a cold
+      // authorize at the moment they press the button. `prepare` no-ops when
+      // the seller hasn't changed and the SDK is already authorized.
+      unawaited(_warmSquare());
     }
     // Going into the background is the moment before the process may be
     // reclaimed — take a last reading of where the user is, in case the page
@@ -995,6 +1067,10 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     final generation = _navGeneration;
     unawaited(_maybeOfferLocation(url.path, generation));
     unawaited(_maybeOfferPushForPath(url.path, generation));
+    // Tap to Pay's awareness moment isn't tied to a path — it's an
+    // announcement, not a permission — so it's offered on whatever page the
+    // merchant lands on, once per device.
+    unawaited(_maybeOfferTapToPay(generation));
     if (url.host == Uri.parse(EnvironmentConfig.webBaseUrl).host) {
       _rememberPage(url);
     }
@@ -1063,20 +1139,27 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       // Never let a capability-probe failure escape as an unhandled async
       // error (this runs from a nav-delegate callback / deep link); treat any
       // throw as "not capable" and tell the cashier.
-      bool capable;
+      //
+      // The message distinguishes "your iOS is too old" from "this iPhone will
+      // never work", which is Apple's requirement 1.4: below the Tap to Pay
+      // floor the app must tell the user to update iOS. Square reports both as
+      // a single incapable-device answer, so the reason is resolved separately.
+      TapToPayUnsupportedReason reason;
       try {
-        capable = await SquarePaymentService.instance.isDeviceCapable();
+        reason = await TapToPayService.instance.unsupportedReason();
       } on Object {
-        capable = false;
+        reason = TapToPayUnsupportedReason.device;
       }
-      if (!capable) {
-        _showSnack(
-          Platform.isIOS
-              ? 'This device can\'t take Tap to Pay — it needs an iPhone XS '
-                    'or newer on iOS 16.4+.'
-              : 'This device can\'t take Tap to Pay — it needs NFC and '
-                    'Android 12 or newer.',
-        );
+      if (!reason.isSupported) {
+        _showSnack(switch (reason) {
+          TapToPayUnsupportedReason.osVersion =>
+            'Update your iPhone to the latest version of iOS to use '
+                '$tapToPayName (it needs an iPhone XS or later).',
+          _ when Platform.isIOS => '$tapToPayName needs an iPhone XS or newer.',
+          _ =>
+            'This device can\'t take Tap to Pay — it needs NFC and Android 12 '
+                'or newer.',
+        });
         return;
       }
       if (!mounted) {
@@ -1550,11 +1633,25 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   }
 
   Future<void> _openExternally(Uri uri) async {
+    // Payment-seller onboarding is the one off-host flow that must not leave
+    // the app. Apple's Tap to Pay review guide requires the merchant to be able
+    // to onboard "without needing other apps" (General Requirements) and calls
+    // for "a fully digital onboarding experience within the app ... fully
+    // completed on an iPhone" (requirement 2.2). Handing the Square OAuth
+    // redirect to Safari fails both.
+    //
+    // It goes to an in-app browser view rather than this WebView because that
+    // is what an OAuth flow needs: SFSafariViewController on iOS (Chrome
+    // Custom Tabs on Android) is the surface Apple treats as in-app, and it
+    // shares Safari's cookie jar — so a merchant whose Square login is "Sign in
+    // with Google" still works. Google blocks its sign-in inside embedded
+    // WebViews, so loading this in the shell would have traded one failure for
+    // another.
+    final mode = _isSellerOnboarding(uri)
+        ? LaunchMode.inAppBrowserView
+        : LaunchMode.externalApplication;
     try {
-      final launched = await launchUrl(
-        uri,
-        mode: LaunchMode.externalApplication,
-      );
+      final launched = await launchUrl(uri, mode: mode);
       if (!launched) {
         _showSnack('Couldn\'t open the link.');
       }
@@ -1562,6 +1659,35 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       _showSnack('Couldn\'t open the link.');
     }
   }
+
+  /// Whether [uri] is a payment-seller connect/OAuth destination — Square's or
+  /// PayPal's own domains, or our host's connect endpoints that redirect
+  /// straight to them.
+  ///
+  /// Host-matched (rather than by path alone) so the whole redirect chain stays
+  /// in the same in-app browser session; an OAuth flow that changes host
+  /// mid-way and gets ejected to Safari is exactly the failure this avoids.
+  static bool _isSellerOnboarding(Uri uri) {
+    final host = uri.host.toLowerCase();
+    const oauthHosts = {
+      'squareup.com',
+      'squareupsandbox.com',
+      'connect.squareup.com',
+      'connect.squareupsandbox.com',
+      'paypal.com',
+      'sandbox.paypal.com',
+    };
+    if (oauthHosts.any((h) => host == h || host.endsWith('.$h'))) {
+      return true;
+    }
+    return host == Uri.parse(EnvironmentConfig.webBaseUrl).host &&
+        _sellerConnectPath.hasMatch(uri.path);
+  }
+
+  /// Our host's seller-connect entry points, which 302 to the provider.
+  static final RegExp _sellerConnectPath = RegExp(
+    r'^/(square|paypal)/(connect|oauth)',
+  );
 
   /// The WebView can't download files itself, and these Django endpoints are
   /// session-authenticated — DownloadService refetches with the WebView's
@@ -1809,6 +1935,7 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
                   'Label printing',
                   '/printing/',
                 ),
+                _tapToPayTile(ctx),
                 _navTile(ctx, Icons.block, 'Ignore categories', '/ignore/'),
                 _navTile(
                   ctx,
@@ -1847,6 +1974,42 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       ),
     ),
   );
+
+  /// The drawer's Tap to Pay entry — setup, status and merchant education.
+  ///
+  /// Apple's review guide requires both that enablement be reachable outside
+  /// the awareness and checkout flows ("such as through your app settings",
+  /// requirement 3.6) and that merchant education live somewhere permanent
+  /// like Settings or Help (4.3). This tile is that route.
+  ///
+  /// iOS-only, and hidden for users the backend says aren't merchants — the
+  /// guide's own advice for an app with a mixed consumer/merchant user base is
+  /// to limit the feature to the appropriate user type. Bidders (nearly all of
+  /// this app's users) never see it. While eligibility is still unknown the
+  /// tile stays hidden rather than flickering in: the shell fetches it at
+  /// mount, so "unknown" here means the answer is seconds away or the
+  /// deployment doesn't serve it at all.
+  Widget _tapToPayTile(BuildContext ctx) {
+    if (!TapToPayService.instance.isApplePlatform) {
+      return const SizedBox.shrink();
+    }
+    return ValueListenableBuilder<TapToPayEligibility?>(
+      valueListenable: TapToPayService.instance.eligibility,
+      builder: (_, eligibility, _) {
+        if (eligibility == null || !eligibility.eligible) {
+          return const SizedBox.shrink();
+        }
+        return ListTile(
+          leading: const Icon(Icons.contactless_outlined),
+          title: const Text(tapToPayName),
+          onTap: () {
+            Navigator.of(ctx).pop();
+            context.push('/tap-to-pay');
+          },
+        );
+      },
+    );
+  }
 
   /// The drawer's "Offline mode" entry — the native users/lots/set-winners
   /// screens that keep an in-person auction running with no connection.
