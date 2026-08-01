@@ -9,6 +9,8 @@ import '../services/command_palette_logger.dart';
 import '../services/command_palette_service.dart';
 import '../services/last_used_auction_service.dart';
 import '../services/location_service.dart';
+import '../services/tap_to_pay_service.dart';
+import '../widgets/tap_to_pay_branding.dart';
 
 /// Opens the command palette as a full-screen dialog.
 ///
@@ -17,23 +19,33 @@ import '../services/location_service.dart';
 /// [onOpenAr] is called with an auction slug when the user taps the locally
 /// injected AR entry (see [_CommandPaletteDialogState._arItem]) — AR is a
 /// native camera screen, not a web path, so it can't go through
-/// [navigateToPath].
+/// [navigateToPath]. [onOpenTapToPay] is the same arrangement for the Tap to
+/// Pay entry, which needs no argument at all (its route is fixed).
 Future<void> showCommandPalette(
   BuildContext context,
   void Function(String path) navigateToPath, {
   void Function(String auctionSlug)? onOpenAr,
+  void Function()? onOpenTapToPay,
 }) => showDialog<void>(
   context: context,
   useSafeArea: false,
-  builder: (_) =>
-      _CommandPaletteDialog(navigateToPath: navigateToPath, onOpenAr: onOpenAr),
+  builder: (_) => _CommandPaletteDialog(
+    navigateToPath: navigateToPath,
+    onOpenAr: onOpenAr,
+    onOpenTapToPay: onOpenTapToPay,
+  ),
 );
 
 class _CommandPaletteDialog extends StatefulWidget {
-  const _CommandPaletteDialog({required this.navigateToPath, this.onOpenAr});
+  const _CommandPaletteDialog({
+    required this.navigateToPath,
+    this.onOpenAr,
+    this.onOpenTapToPay,
+  });
 
   final void Function(String path) navigateToPath;
   final void Function(String auctionSlug)? onOpenAr;
+  final void Function()? onOpenTapToPay;
 
   @override
   State<_CommandPaletteDialog> createState() => _CommandPaletteDialogState();
@@ -92,13 +104,63 @@ class _CommandPaletteDialogState extends State<_CommandPaletteDialog> {
   /// group prepended when it applies to the current query.
   List<PaletteGroup> get _groups {
     final ar = _arItem(_textController.text);
-    if (ar == null) {
-      return _serverGroups;
-    }
+    final tapToPay = _tapToPayItem(_textController.text);
     return [
-      PaletteGroup(label: 'Lot scanning', items: [ar]),
+      if (ar != null) PaletteGroup(label: 'Lot scanning', items: [ar]),
+      if (tapToPay != null)
+        PaletteGroup(label: tapToPayName, items: [tapToPay]),
       ..._serverGroups,
     ];
+  }
+
+  /// The Tap to Pay entry for [query], or null when it doesn't apply.
+  ///
+  /// Same shape as [_arItem]: a native screen the server can't hand back as a
+  /// URL, shown either because it's relevant (the backend says this user is a
+  /// merchant) or because the user explicitly searched for it.
+  ///
+  /// Asking by name works **even when eligibility is unknown**, which matters
+  /// twice over. It's the only way in on a deployment that doesn't serve
+  /// `payments/authorization/` yet — otherwise the drawer tile is hidden, the
+  /// awareness modal never fires, and `/tap-to-pay` is unreachable. And it
+  /// rescues a real merchant whose eligibility fetch simply failed, who would
+  /// otherwise be told nothing and offered nothing.
+  PaletteItem? _tapToPayItem(String query) {
+    if (!TapToPayService.instance.isApplePlatform) {
+      return null;
+    }
+    final eligible =
+        TapToPayService.instance.eligibility.value?.eligible ?? false;
+    if (!eligible && !_tapToPayQueryMatches(query)) {
+      return null;
+    }
+    return const PaletteItem(
+      type: 'tap_to_pay',
+      title: 'Set up $tapToPayName',
+      subtitle: 'Take contactless card payments on this iPhone',
+      // No URL — the palette logger records the type, and [_handleTap] routes
+      // by type rather than navigating the web shell.
+      url: '',
+      icon: 'bi-credit-card',
+    );
+  }
+
+  bool _tapToPayQueryMatches(String q) {
+    final ql = q.trim().toLowerCase();
+    // Two characters is too coarse to distinguish intent, and "ta" would
+    // otherwise put a payment terminal in front of someone typing "tank".
+    if (ql.length < 3) {
+      return false;
+    }
+    const phrases = [
+      'tap to pay',
+      'tap to pay on iphone',
+      'contactless',
+      'card reader',
+      'take a payment',
+      'accept payments',
+    ];
+    return phrases.any((p) => p.contains(ql) || ql.contains(p));
   }
 
   /// The AR entry for [query], or null when it doesn't apply.
@@ -238,6 +300,11 @@ class _CommandPaletteDialogState extends State<_CommandPaletteDialog> {
       // AR is a native camera screen, not a web path — [item.url] carries the
       // auction slug (there's no real URL to log/open) for [onOpenAr].
       widget.onOpenAr?.call(item.url);
+      return;
+    }
+    if (item.type == 'tap_to_pay') {
+      // Also a native screen, and with no slug to carry — the route is fixed.
+      widget.onOpenTapToPay?.call();
       return;
     }
     widget.navigateToPath(item.url);

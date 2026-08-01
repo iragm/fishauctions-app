@@ -108,16 +108,22 @@ Square-side approval. In order:
       ships `MockReaderUI` (`showMockReaderUI`) to exercise a full tap → 
       `payments/confirm/` round-trip without the entitlement or real hardware.
       Temporary debug hook; don't ship a button for it.
-- [ ] **Request the Tap to Pay entitlement** from Apple:
-      `com.apple.developer.proximity-reader.payment.acceptance` (Apple's
-      "Tap to Pay on iPhone" entitlement request form on
-      developer.apple.com; Square's Tap to Pay docs link it). Needs the
-      production bundle id `com.fishauctions.app` registered first.
-- [ ] **After the grant**: create `ios/Runner/Runner.entitlements` containing
-      that entitlement, set `CODE_SIGN_ENTITLEMENTS = Runner/Runner.entitlements`
-      on the Runner target, regenerate the provisioning profile. (Deliberately
-      NOT added now — an entitlements file the profile doesn't carry breaks
-      signing for the plain build above.)
+- [x] **Request the Tap to Pay *development* entitlement** —
+      `com.apple.developer.proximity-reader.payment.acceptance`. **Granted
+      2026-07-31.** It's in `ios/Runner/RunnerDebug.entitlements`, which is
+      what Debug builds sign with, so a real charge on a tethered iPhone works.
+- [ ] **Request the Tap to Pay *publishing* entitlement.** A second, separate
+      grant, and the one TestFlight **and** the App Store both need — Apple
+      issues it only after reviewing the app against its published checklist.
+      Status of every item, plus the videos and materials Apple asks for, is in
+      **`TAPTOPAY.md`**; the backend half is `BACKEND_SPEC.md` Part TTP (three
+      of those are review blockers).
+- [ ] **After the publishing grant**: add the same entitlement key to
+      `ios/Runner/Runner.entitlements` and regenerate the distribution profile.
+      (`CODE_SIGN_ENTITLEMENTS` is already wired for both configurations.)
+      Deliberately NOT there now — a *distribution* profile can't carry it
+      until the publishing grant lands, and an entitlements file the profile
+      doesn't satisfy breaks every Release/TestFlight export.
 - [ ] **Real-device production test**: iPhone XS+ on iOS 16.4+, production
       Square app id from prod `/api/mobile/config/`, real card, small
       invoice; verify the invoice flips to PAID and the web checkout page

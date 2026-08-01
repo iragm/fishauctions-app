@@ -7,5 +7,26 @@
 	     Release/Profile use Runner.entitlements. -->
 	<key>aps-environment</key>
 	<string>development</string>
+
+	<!-- Tap to Pay on iPhone. Present HERE and deliberately NOT in
+	     Runner.entitlements, because the two entitlements Apple grants are
+	     separate and arrive at different times:
+
+	       * the DEVELOPMENT entitlement (granted 2026-07-31) enables the
+	         capability on the App ID for *development* provisioning profiles
+	         only — which is exactly what a Debug build signs with, so a real
+	         charge on a tethered iPhone works with this key.
+	       * the PUBLISHING entitlement — the one App Review grants after the
+	         checklist in TAPTOPAY.md — is what makes a *distribution* profile
+	         carry it. Until that lands, putting this key in
+	         Runner.entitlements means cloud signing can't build a profile that
+	         satisfies it and every Release/TestFlight export fails.
+
+	     So: add it to Runner.entitlements the day the publishing grant email
+	     arrives, not before. Note that none of the merchant-education UI needs
+	     this at all — ProximityReaderDiscovery presents education, not a
+	     reader, so that half is testable in any build. -->
+	<key>com.apple.developer.proximity-reader.payment.acceptance</key>
+	<true/>
 </dict>
 </plist>

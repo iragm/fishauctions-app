@@ -1539,6 +1539,10 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     // AR is a native screen, not a web path — the palette's locally injected
     // AR entry routes through the same push+return flow as the deep link.
     onOpenAr: (slug) => unawaited(_launchAr(slug, null)),
+    // Likewise native. This is also the one route to Tap to Pay setup that
+    // works before the backend serves `payments/authorization/` — the drawer
+    // tile and the awareness modal both wait on that answer.
+    onOpenTapToPay: () => unawaited(context.push('/tap-to-pay')),
   );
 
   // ── Navigation, downloads, permissions, bridges ───────────────────────────

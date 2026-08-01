@@ -144,15 +144,56 @@ bumping `IPHONEOS_DEPLOYMENT_TARGET` to 16.4 in `project.pbxproj`.
 
 ---
 
+## Building and testing this
+
+**Entitlement: already done, and only in the debug file.**
+`com.apple.developer.proximity-reader.payment.acceptance` is in
+`RunnerDebug.entitlements` and deliberately **not** in `Runner.entitlements`.
+The development entitlement Apple granted enables the capability for
+*development* provisioning profiles, which is what a Debug build signs with — so
+a real charge on a tethered iPhone works today. A *distribution* profile only
+carries it once the publishing entitlement is granted; adding the key to
+`Runner.entitlements` before then breaks every Release/TestFlight export, since
+cloud signing can't build a profile that satisfies it. Add it there on the day
+the publishing grant arrives.
+
+**Most of the new code needs no entitlement at all.**
+`ProximityReaderDiscovery` presents education, not a card reader, so the
+awareness modal, the setup screen, Apple's education sheet and the progress
+indicators are all exercisable in any build — which is what makes the
+entitlement-review videos recordable now, before the publishing grant.
+
+**What you need:** a Mac with **Xcode 16 or later** (the education API is in the
+iOS 18 SDK; it's `@available`-guarded, so the deployment target stays 16.0), and
+a **physical iPhone XS+ on iOS 16.4+** — Tap to Pay does not work in the
+Simulator. `TapToPayEducation.swift` is already registered in `project.pbxproj`,
+so no Xcode file-adding step. No new pods.
+
+```bash
+flutter run -t lib/main.dart --dart-define=FLAVOR=staging
+```
+
+**How to reach the new UI before the backend lands.** The drawer tile and the
+awareness modal both wait on `GET /api/mobile/payments/authorization/`
+(**TTP-3**), which doesn't exist yet — until it does, eligibility stays unknown
+and neither appears. Open the **command palette** (tap the title bar) and search
+*"tap to pay"* — that entry matches by name regardless of eligibility, precisely
+so this is testable now. From there: the setup screen, terms acceptance, Apple's
+education sheet, and the reader progress indicator.
+
+**What can't be tested until TTP-1/TTP-2/TTP-3 ship:** the in-app Square OAuth
+onboarding (the site still hides the connect links from the app), the corrected
+checkout button copy/icon, and the launch/resume warm-up.
+
 ## Before submitting
 
 1. **Land TTP-1, TTP-2, TTP-3** (`BACKEND_SPEC.md`). TTP-1 and TTP-2 are
    template edits; TTP-3 is one new read-only endpoint.
-2. **Add the entitlement to `ios/Runner/Runner.entitlements`** —
-   `com.apple.developer.proximity-reader.payment.acceptance` — but **only after
-   Apple grants it**. Adding it early means cloud signing can't build a profile
-   that carries it and every export fails. The file already has a comment
-   marking the spot.
+2. **Copy the entitlement into `ios/Runner/Runner.entitlements`** —
+   `com.apple.developer.proximity-reader.payment.acceptance`, already present in
+   `RunnerDebug.entitlements` — **only once the publishing entitlement is
+   granted**. Before that it breaks Release/TestFlight signing; see "Building
+   and testing this" above.
 3. **Download the Marketing Guide and Toolkit** (access page + password on p. 23
    of the review guide PDF) and swap the toolkit's hero banner and approved copy
    into `tap_to_pay_awareness.dart`.
@@ -172,6 +213,66 @@ bumping `IPHONEOS_DEPLOYMENT_TARGET` to 16.4 in `project.pbxproj`.
    test account with admin rights on an auction that has Square connected.
    Don't mention MDM, and don't put "Tap to Pay on iPhone" in the app name
    (App Review Guideline 5.2.5).
+
+## App Store Connect
+
+Nothing needs changing in ASC to **build or test** this, and nothing there
+affects the publishing entitlement — that review is a separate track (the
+entitlement request form and email, with videos and the checklist above).
+ASC matters only at App Store submission, and it's all metadata, no config
+toggles.
+
+Note that **apps submitted with a Tap to Pay entitlement get a special review**
+by the App Store Review team on top of the normal one, so the notes below are
+read closely rather than skimmed.
+
+**App Review Information → Notes.** There's no dedicated Tap to Pay field; the
+guide's requirements are all satisfied by what you write here:
+
+- Declare that the app uses the Tap to Pay on iPhone entitlement.
+- Describe the use case — "point-of-sale for auction organizers collecting
+  payment in person at club auctions".
+- State the release method if you ship behind a feature flag.
+- **Don't mention MDM.** The guide warns it flags the app for unnecessary
+  review.
+
+**App Review Information → test account.** Must be an account with **admin
+rights on an auction that has Square connected** — otherwise the reviewer can't
+reach the checkout page, the Tap to Pay button, or (once TTP-3 lands) the
+setup screen, since all three are gated on being a merchant. A plain bidder
+account will get the app rejected as unreviewable. Not geo-fenced, so there's
+nothing to declare there.
+
+**Attachment.** Upload either a video walkthrough of the checkout experience
+*from sign-in to checkout*, or high-fidelity wireframes of it. The checkout
+video from the entitlement review can be reused — same warning applies, film it
+with a second device, the Tap to Pay screens don't screen-record.
+
+**App name and product page.** The name must not contain "Tap to Pay on
+iPhone" (Guideline 5.2.5) — `auction.fish` is fine. If you add Tap to Pay
+messaging to the product page or screenshots it must use Marketing Guide
+assets, and the guide says to hold that until the feature is in full general
+availability.
+
+**Privacy policy URL** — point it at `https://auction.fish/privacy/`. That page
+now exists (`PrivacyPolicyView`), as does account deletion; both were open
+blockers as recently as 2026-07-29 and are not any more.
+
+**App Privacy questionnaire.** Worth a pass before submitting: it's
+authoritative for the nutrition label (which is why `PrivacyInfo.xcprivacy`
+deliberately omits `NSPrivacyCollectedDataTypes`). Tap to Pay itself collects
+nothing you declare — Square captures the card on-device and we never see card
+data — but location, contact info and user content are all collected and need
+to be accurate.
+
+**Unrelated to Tap to Pay, but a likely rejection:** the app offers "Sign in
+with Google" and has no Sign in with Apple. Guideline 4.8 requires an
+equivalent privacy-preserving login option (name and email only, email masking,
+no tracking) whenever a third-party service sets up the primary account. This
+applies only if the production deployment actually ships the Google button —
+it renders solely when `/api/mobile/config/` returns a non-empty
+`google_server_client_id`. Worth settling before submission rather than
+discovering it in review.
 
 ## Testing notes from the guide
 
