@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert' show jsonEncode;
 import 'dart:io' show Platform;
 
 import 'package:add_2_calendar/add_2_calendar.dart';
@@ -40,6 +41,7 @@ import '../services/push_prompt_service.dart';
 import '../services/push_service.dart';
 import '../services/shortcut_service.dart';
 import '../services/tap_to_pay_service.dart';
+import '../services/voice_command_service.dart';
 import '../utils/platform_bridge.dart';
 import '../widgets/payment_sheet.dart';
 import '../widgets/printer_connect_sheet.dart';
@@ -159,6 +161,10 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     // Bring up push (FCM) once config is known — inert unless this deployment
     // configured push for this exact build. Off the critical path too.
     unawaited(_warmPush());
+    // Apply the deployment's voice grammar, so the set-winners page's
+    // voiceGetState answers with this deployment's settings rather than the
+    // bundled defaults.
+    unawaited(_warmVoice());
     // Keep an offline copy of the operator's last admin auction warm
     // (periodic snapshot pulls), and drain any changes queued while offline.
     // Conflicts the server reports surface as a snackbar.
@@ -257,6 +263,19 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   /// This deliberately does **not** ask for the notification permission; that
   /// happens contextually (see _maybeOfferPush). A token only exists here if
   /// the user has already allowed notifications on a previous run.
+  /// Hand the deployment's `voice` block to the grammar before any page can
+  /// ask `voiceGetState`. Cheap and synchronous once config is in hand — no
+  /// permission, no microphone, nothing started; the served block only decides
+  /// which words are listened for and whether voice is offered at all.
+  Future<void> _warmVoice() async {
+    try {
+      final cfg = await ref.read(configProvider.future);
+      VoiceCommandService.instance.applyConfig(cfg.voice);
+    } on Object catch (e) {
+      debugPrint('Voice config warm-up skipped: $e');
+    }
+  }
+
   Future<void> _warmPush() async {
     try {
       final cfg = await ref.read(configProvider.future);
@@ -284,6 +303,7 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     ref.invalidate(configProvider);
     await _warmSquare();
     await _warmPush();
+    await _warmVoice();
   }
 
   /// Called once the InAppWebView exists. Registers the JS bridges, seeds the
@@ -350,6 +370,28 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
         callback: (args) async {
           await _enablePushFromWeb(_pushSurfaceFrom(args.firstOrNull));
           return _pushState();
+        },
+      )
+      // Voice-driven set winners (VOICE.md). The microphone is native because
+      // iOS WKWebView has no Web Speech API and _onPermissionRequest denies
+      // the page's own mic request; everything else — the button, the field
+      // writes, the submit — stays on the page.
+      //   voiceGetState()   → {supported, listening, permission, backend, …}
+      //   voiceStart({auction}) → begins; events arrive on the receiver below
+      //   voiceStop()       → {listening: false}
+      ..addJavaScriptHandler(
+        handlerName: 'voiceGetState',
+        callback: (_) => VoiceCommandService.instance.state(),
+      )
+      ..addJavaScriptHandler(
+        handlerName: 'voiceStart',
+        callback: (args) => _startVoice(args.firstOrNull),
+      )
+      ..addJavaScriptHandler(
+        handlerName: 'voiceStop',
+        callback: (_) async {
+          await VoiceCommandService.instance.stop();
+          return VoiceCommandService.instance.state();
         },
       );
     await _applyLocation(prompt: false, fresh: false);
@@ -428,6 +470,9 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     );
     CheckinService.instance.newActions.removeListener(_onCheckinActions);
     CheckinService.instance.stop();
+    // The shell going away is the last chance to close the microphone: the
+    // page that owns the stop button is gone with it.
+    _stopVoiceOnNavigation();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -853,6 +898,65 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     'prefs_endpoint': NotificationPrefsService.instance.isAvailable,
   };
 
+  /// Begin a voice set-winners session for the auction the page names.
+  ///
+  /// The slug has to come from the page rather than being parsed out of the
+  /// URL: the app would be guessing which auction a path belongs to, and the
+  /// vocabulary it fetches decides which bidder numbers are legal answers.
+  Future<Map<String, dynamic>> _startVoice(Object? args) async {
+    final slug = _voiceSlugFrom(args);
+    if (slug == null) {
+      return {'listening': false, 'error': 'no_auction'};
+    }
+    await VoiceCommandService.instance.start(
+      auctionSlug: slug,
+      sink: _sendVoiceEvent,
+    );
+    return VoiceCommandService.instance.state();
+  }
+
+  static String? _voiceSlugFrom(Object? args) {
+    final slug = args is Map ? args['auction'] : args;
+    final text = slug is String ? slug.trim() : '';
+    return text.isEmpty ? null : text;
+  }
+
+  /// Push one event to the page's receiver.
+  ///
+  /// A push rather than a poll because the interesting events — a level meter
+  /// at ~10 Hz, a partial transcript — are a stream, and because the page
+  /// should be free to ignore what it doesn't understand. A missing receiver
+  /// is not an error: it means the operator navigated away mid-session, which
+  /// [_stopVoiceOnNavigation] then tidies up.
+  void _sendVoiceEvent(Map<String, dynamic> event) {
+    final controller = _controller;
+    if (controller == null) {
+      return;
+    }
+    unawaited(
+      controller
+          .evaluateJavascript(
+            source:
+                'window.fishauctionsVoice && '
+                'window.fishauctionsVoice.onEvent && '
+                'window.fishauctionsVoice.onEvent(${jsonEncode(event)});',
+          )
+          .catchError((Object e) {
+            debugPrint('Voice event delivery failed: $e');
+            return null;
+          }),
+    );
+  }
+
+  /// Listening must not outlive the page that started it. The microphone stays
+  /// open otherwise — with no visible control anywhere, since the button that
+  /// would stop it just navigated away.
+  void _stopVoiceOnNavigation() {
+    if (VoiceCommandService.instance.isListening) {
+      unawaited(VoiceCommandService.instance.stop());
+    }
+  }
+
   /// Maps the bridge's reason string onto a surface. Anything unrecognized (a
   /// newer template, a typo) falls back to the lot wording, which is the only
   /// surface the web has a reason to drive.
@@ -988,6 +1092,7 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     // on, so it doesn't float over an unrelated screen — and invalidates any
     // offer still settling for the page we're leaving (see _claimBanner).
     _navGeneration++;
+    _stopVoiceOnNavigation();
     if (mounted) {
       ScaffoldMessenger.of(context).hideCurrentMaterialBanner();
       setState(() => _loading = true);

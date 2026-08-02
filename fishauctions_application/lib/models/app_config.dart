@@ -18,6 +18,7 @@ class AppConfig {
     this.termsPath = defaultTermsPath,
     this.privacyPath = '',
     this.firebase,
+    this.voice,
   });
 
   factory AppConfig.fromJson(Map<String, dynamic> json) => AppConfig(
@@ -30,6 +31,9 @@ class AppConfig {
     termsPath: _pathOr(json['terms_url'], defaultTermsPath),
     privacyPath: _pathOr(json['privacy_policy_url'], ''),
     firebase: FirebaseClientConfig.tryParse(json['firebase']),
+    voice: json['voice'] is Map<String, dynamic>
+        ? json['voice'] as Map<String, dynamic>
+        : null,
   );
 
   /// Where this deployment's terms live when config doesn't say. `/tos/`
@@ -106,6 +110,17 @@ class AppConfig {
   /// Delivered here — like [squareApplicationId] — so one binary serves any
   /// deployment without a bundled `google-services.json`. See `PUSH.md`.
   final FirebaseClientConfig? firebase;
+
+  /// The `voice` block — anchor keywords, confidence weights and thresholds for
+  /// voice-driven set winners, or null when the deployment hasn't configured
+  /// one (the app then uses `bundledVoiceGrammar()`).
+  ///
+  /// Kept as a raw map rather than parsed here because it is *tuning data*,
+  /// not app config: which words a given auctioneer uses is exactly what a
+  /// deployment will want to change without an app release, and
+  /// `VoiceGrammar.fromJson` merges it over the bundled default field by
+  /// field. See `VOICE.md` §3 and `BACKEND_SPEC.md` Part VOICE-3.
+  final Map<String, dynamic>? voice;
 
   /// Whether this deployment can do Tap to Pay at all (has a Square app id).
   bool get hasSquare => squareApplicationId.isNotEmpty;

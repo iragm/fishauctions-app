@@ -19,5 +19,3 @@ proximity check-in, the last-used-auction lookup) were removed once the backend
 implemented them — `git log` on this file has the history. Several `CLAUDE.md`
 references to "Part 1 / Part 6 / Part T / Part W" point at that removed content;
 the code and `auctions/mobile/urls.py` are the truth.
-
----

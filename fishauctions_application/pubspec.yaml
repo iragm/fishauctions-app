@@ -91,6 +91,13 @@ dependencies:
   # Apple's Tap to Pay entitlement before real charges (checklist: IOS.md).
   # See lib/services/square_payment_service.dart.
   sign_in_with_apple: ^8.1.0
+  # Native speech recognition — voice-driven set winners (VOICE.md). Wraps
+  # SFSpeechRecognizer / android.speech.SpeechRecognizer, so recognition runs
+  # on-device where the platform can (an auction hall's wifi is bad and the
+  # round trip is the latency the operator feels). It is deliberately reached
+  # only through SpeechBackend: phrase biasing and cloud streaming are the
+  # named upgrade paths, and neither is expressible through this package.
+  speech_to_text: ^7.4.0
   square_mobile_payments_sdk: ^2026.7.2
   # Open external / target=_blank links (connect banners, map directions, Google
   # Wallet) in the system browser instead of the in-app WebView.

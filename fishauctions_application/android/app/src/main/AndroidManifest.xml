@@ -46,6 +46,15 @@
     <uses-feature android:name="android.hardware.camera.autofocus" android:required="false"/>
     <uses-permission android:name="android.permission.CAMERA"/>
 
+    <!-- Microphone — voice-driven set winners (VOICE.md). Speech recognition
+         runs natively because iOS WKWebView has no Web Speech API and the shell
+         denies the WebView's own microphone request; the page drives it over
+         the voice* JS bridge. Optional feature so the app still installs on
+         devices without a mic; the permission is asked when the operator taps
+         the page's microphone button, never at launch. -->
+    <uses-feature android:name="android.hardware.microphone" android:required="false"/>
+    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+
     <!-- Photo library — the web's image uploads (add-image-to-lot, club icon)
          are plain <input type="file" accept="image/*">. The file chooser the
          WebView opens reads images from the gallery; CAMERA (above) covers
@@ -185,5 +194,13 @@
              see the Facebook app is installed and always falls back to a web
              sheet, which is a worse (and slower) login. -->
         <package android:name="com.facebook.katana"/>
+        <!-- Android 11+ package visibility for speech recognition. Without
+             this, SpeechRecognizer.isRecognitionAvailable() returns false on
+             API 30+ even when a recognition service is installed — the query
+             is filtered out, so voice set-winners would silently report
+             "not supported" on every modern phone. -->
+        <intent>
+            <action android:name="android.speech.RecognitionService"/>
+        </intent>
     </queries>
 </manifest>

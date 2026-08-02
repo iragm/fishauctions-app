@@ -386,6 +386,62 @@ in `auctions/mobile/`). The app still degrades gracefully on deployments
 without them: a 404 disables sync for the process and offline mode reports
 "no offline data yet".
 
+### Voice set-winners
+
+Hands-free lot selling on `/auctions/<slug>/lots/set-winners/`: the operator
+taps a mic button on the web page and calls out "lot forty two … bidder
+seventeen … twenty five dollars … sold". Full design and the v1 post-mortem:
+**`VOICE.md`**; the web half is `BACKEND_SPEC.md` Part VOICE.
+
+**App side is implemented; nothing runs until the page lands** (VOICE-4) —
+`voiceGetState` answers `supported: false` on a deployment with no `voice`
+config, so shipping it early is inert.
+
+- **The app owns only the microphone.** Native because iOS `WKWebView` has no
+  Web Speech API and the shell denies the WebView's mic outright. The page
+  keeps owning the form — validation, submit, undo, queue auto-advance — and
+  the app writes into `#lot`/`#price`/`#winner` over the `voice*` JS bridge
+  (`voiceGetState`/`voiceStart`/`voiceStop`, plus pushed events to a page
+  receiver `window.fishauctionsVoice.onEvent`).
+- **The old Vosk attempt failed for three reasons that weren't Vosk**, and
+  they're why the rewrite looks like it does: the model was never deployed
+  (only a placeholder is committed; the weights are gitignored), the number
+  parser concatenated digits so "twenty five" became `205`, and a `GAIN = 5`
+  on float samples clipped the audio. It also cost the page its analytics,
+  ads and CDN assets to get SharedArrayBuffer.
+- **Values are matched against a closed vocabulary, not parsed out of free
+  text.** `AuctionTOS.bidder_number` is a `CharField` and is routinely text,
+  which in seller-dash auctions spills into lot numbers (`f"{bidder}-{n}"[:9]`
+  → `BOB-1`), so anything assuming digits is wrong for real auctions. Instead
+  the auction's actual identifiers are expanded into their spoken forms —
+  cardinal, digit-by-digit, letter names, NATO, with/without a spoken "dash" —
+  and the utterance is looked up in that index. "Fifteen" vs "fifty" stops
+  being a coin flip when only one of them is a real bidder.
+- **Confidence is computed, never taken.** `speech_to_text` reports `-1` ("not
+  available") constantly — iOS on-device results and Android partials both —
+  so the score combines anchor-keyword quality, vocabulary-match quality and
+  agreement between the n-best alternates, with the platform's number as one
+  flattened input. Three of the four signals are ours.
+- **Every value slot needs an anchor keyword** (`lot`/`bidder`/`dollars`), which
+  is v1's one good idea kept: a bare number writes nothing, so the auctioneer's
+  chant can't corrupt a field. **`sold` is guarded** — it submits only when all
+  three fields are filled and confident, otherwise it arrives with `blocked_by`
+  populated and the page says what's missing.
+- **The grammar is served data** (`voice` block in `/api/mobile/config/`, over
+  `bundled_voice_grammar.dart`), same pattern as `ThermalPrinterProfile`. Which
+  words a given auctioneer uses is exactly what we'll be wrong about on day one,
+  and v1 had no tuning loop at all.
+- **The recognizer is swappable** (`SpeechBackend`). `platform` is the only one
+  today; `biased` (phrase biasing over a platform channel), `cloud` and a
+  fixed-grammar spotter are the named upgrade paths, selected by config.
+- **`speech_to_text` is per-utterance, not a session** — Android ends after
+  each phrase, iOS caps a request at ~1 min — so `PlatformSpeechBackend` owns a
+  restart loop and treats `error_no_match`/`error_speech_timeout` as the normal
+  end of a phrase. Naive continuous listening dies at the first silence.
+- **No offline fallback for the vocabulary**, deliberately: it never reads
+  `OfflineStore`. Offline mode is where a bug means a stuck auction, and it
+  stays small.
+
 ### Proximity Check-in ("welcome to the auction")
 
 While the shell is up, `CheckinService` POSTs the phone's position (only when
@@ -598,6 +654,7 @@ that shaped the app:
 - **AR lot mode backend v2:** v1 (models, solver, endpoints) landed on the backend, and so has every per-frame sensor channel `BACKEND_SPEC.md` Part 5 specced — gyro `yaw_deg` heading odometry, GPS + absolute-heading island anchoring, and pedometer-driven `odo_x_m`/`odo_y_m` planar dead-reckoning. What's left is island (connected-component) detection/labeling/merging (`component` on positions rows, which the app already consumes). Until it lands, lots that were never co-visible in one camera frame don't get reliable relative positions, and unconnected scanned islands overlap on the admin map.
 - **Proximity check-in backend:** app side (ping service + shell UI) is implemented; `BACKEND_SPEC.md` Part 6 (`exact_location_set`, the three `checkin/*` endpoints, nudge dedupe, history) is not. Feature self-disables on 404 until then.
 - **Recruit volunteers:** entirely web/backend — `BACKEND_SPEC.md` Part 7. No app work at all (notifications ride the Part 2 push pipeline; the accept flow is a web page).
+- **Voice set-winners:** app side is done (pipeline, parser, vocabulary matcher, confidence model, bridge handlers, 50 tests). All four remaining items are backend — `BACKEND_SPEC.md` Part VOICE: delete the dead Vosk code and the cross-origin-isolation scaffolding (VOICE-1), `GET /api/mobile/auctions/<slug>/voice/vocabulary/` (VOICE-2), the `voice` config block (VOICE-3), and the page itself — mic button, event receiver, confidence styling (VOICE-4). VOICE-4 is the one that turns the feature on; until it lands nothing calls `voiceStart`. Tuning telemetry is VOICE-5.
 - **Release signing:** wired in CI (keystore from repo secrets; the release workflow refuses to build unsigned). *Local* `flutter build --release` still falls back to debug signing unless you create `android/key.properties` yourself.
 
 ## CI/CD
