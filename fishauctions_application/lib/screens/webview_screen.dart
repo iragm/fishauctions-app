@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection' show UnmodifiableListView;
 import 'dart:convert' show jsonEncode;
 import 'dart:io' show Platform;
 
@@ -1827,6 +1828,49 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
 
   // ── Navigation, downloads, permissions, bridges ───────────────────────────
 
+  /// Remove the Web Speech API from every page, at document start.
+  ///
+  /// **Android's System WebView defines `webkitSpeechRecognition` and cannot
+  /// use it.** The binding is part of Blink so it's exposed, but WebView never
+  /// wires it to a recognition service, and [_onPermissionRequest] denies the
+  /// page's microphone outright besides — so `start()` fires an immediate
+  /// `error` and nothing else ever happens. The object exists; the feature does
+  /// not.
+  ///
+  /// That broke the command palette's microphone in exactly the way a stub
+  /// does: the page feature-detects `window.SpeechRecognition ||
+  /// window.webkitSpeechRecognition`, finds it, believes it, and never reaches
+  /// the `dictate*` bridge that actually works here. The button appeared and
+  /// tapping it did nothing — no prompt, no transcript, no error text, because
+  /// a failed `start()` only un-presses the button.
+  ///
+  /// Deleting the globals makes the app's environment *honest*, so that
+  /// feature detection reaches the right answer with no app-specific knowledge:
+  /// any page asking "does this browser do speech recognition?" is now
+  /// correctly told no, and can fall back — to the bridge, to a typed input, to
+  /// whatever it likes. Fixing only the palette's branch order would leave the
+  /// next page that asks the same question with the same broken answer.
+  ///
+  /// iOS is unaffected — `WKWebView` has never shipped the API, so this is a
+  /// no-op there and the fallback path was always taken.
+  static final _hideWebSpeechApi = UserScript(
+    injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+    source: '''
+(function () {
+  ['SpeechRecognition', 'webkitSpeechRecognition',
+   'SpeechGrammarList', 'webkitSpeechGrammarList'].forEach(function (name) {
+    try {
+      delete window[name];
+      if (window[name]) {
+        // Non-configurable on some builds; shadow it instead.
+        Object.defineProperty(window, name, {value: undefined, configurable: true});
+      }
+    } catch (e) { /* nothing else to try; the page falls back either way */ }
+  });
+})();
+''',
+  );
+
   /// The website's single-lot label PDF (`SingleLotLabelView`, Django's
   /// `lots/print/<int:pk>/`).
   static final _singleLotLabelPath = RegExp(r'^/lots/print/(\d+)/?$');
@@ -2436,6 +2480,7 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
               top: false,
               child: InAppWebView(
                 initialSettings: _webViewSettings,
+                initialUserScripts: UnmodifiableListView([_hideWebSpeechApi]),
                 onWebViewCreated: (c) => unawaited(_onWebViewCreated(c)),
                 onLoadStart: _onLoadStart,
                 onLoadStop: (c, url) => unawaited(_onLoadStop(c, url)),

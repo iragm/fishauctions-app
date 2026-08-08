@@ -839,14 +839,29 @@ JWT auth is bridged into the WebView's Django cookie session:
 - **Dictation is a generic bridge, not a palette feature**
   (`dictateGetState`/`dictateStart`/`dictateStop` → `DictationService`, events
   pushed to `window.fishauctionsDictate.onEvent`). Any page can fill a field by
-  talking. It exists because `window.SpeechRecognition` is in **neither** of
-  the app's engines — iOS `WKWebView` never had the Web Speech API and
-  Android's System WebView doesn't ship Chrome's recognizer — so the palette's
-  own microphone button is simply invisible in the app. Deliberately *not*
+  talking. It exists because the Web Speech API works in **neither** of the
+  app's engines — iOS `WKWebView` never shipped it at all, and Android's System
+  WebView **defines `webkitSpeechRecognition` without being able to use it**
+  (the Blink binding is exposed; WebView never wires it to a recognition
+  service, and `_onPermissionRequest` denies the page's mic besides). That
+  second case is worse than the first: feature detection finds the object,
+  believes it, and never reaches the bridge — the palette's mic button appeared
+  and tapping it did nothing, with no prompt and no error, because a failed
+  `start()` only un-presses the button. So the shell **deletes
+  `SpeechRecognition`/`webkitSpeechRecognition` at document start**
+  (`_hideWebSpeechApi`, a `UserScript`), making the environment honest so any
+  page's detection reaches the right answer with no app-specific knowledge.
+  Fixing only the palette's branch order would leave the next page asking the
+  same question the same broken way (that order is still worth fixing —
+  `BACKEND_SPEC.md` PALETTE-2a). Deliberately *not*
   `VoiceCommandService` with the grammar removed: set-winners matches a closed
   vocabulary because a wrong bidder costs money, whereas the palette's whole
   point is that you can say anything and a language model reads it. Dictation
-  ends itself on the final transcript — one sentence, then hand it back.
+  ends itself on the final transcript — one sentence, then hand it back — and
+  does **not** force on-device recognition the way set-winners does: Android's
+  `onDevice: true` resolves to `createOnDeviceSpeechRecognizer`, which fails
+  outright with no downloaded language pack instead of falling back, and a
+  palette command is already waiting on a network call to the model.
 - **Deployment config is re-fetched on resume if it never loaded**
   (`_rewarmConfigIfFailed`). Riverpod caches a `FutureProvider` failure for the
   process, so a cold start with no connectivity — routine at an auction hall —

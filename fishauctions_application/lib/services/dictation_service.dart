@@ -91,7 +91,16 @@ class DictationService {
     // waiting for it to be acted on. The backend's restart loop keeps the
     // session alive across the platform's per-utterance API; a final result is
     // what ends this one, in [_onSpeechEvent].
-    await _backend.start(const SpeechSessionOptions());
+    //
+    // `preferOnDevice: false` is the one place this deliberately differs from
+    // voice set-winners, which forces on-device because an auction hall's wifi
+    // is bad and the operator feels every round trip. On Android
+    // `onDevice: true` resolves to `createOnDeviceSpeechRecognizer`, which
+    // **fails outright** on a phone with no downloaded language pack rather
+    // than falling back — and a palette command is already waiting on a network
+    // call to the language model, so there is nothing to protect here. Working
+    // beats fast.
+    await _backend.start(const SpeechSessionOptions(preferOnDevice: false));
     return true;
   }
 

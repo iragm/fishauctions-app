@@ -14,6 +14,9 @@ class FakeSpeechBackend implements SpeechBackend {
   int startCalls = 0;
   int stopCalls = 0;
 
+  /// What the last [start] was asked for.
+  SpeechSessionOptions? lastOptions;
+
   final _events = StreamController<SpeechEvent>.broadcast();
 
   /// Push an event as though the platform recognizer had produced it.
@@ -47,7 +50,10 @@ class FakeSpeechBackend implements SpeechBackend {
   }
 
   @override
-  Future<void> start(SpeechSessionOptions options) async => startCalls++;
+  Future<void> start(SpeechSessionOptions options) async {
+    lastOptions = options;
+    startCalls++;
+  }
 
   @override
   Future<void> stop() async => stopCalls++;

@@ -60,6 +60,15 @@ void main() {
       expect(backend.stopCalls, greaterThan(0));
     });
 
+    // Android's onDevice:true resolves to createOnDeviceSpeechRecognizer, which
+    // fails outright with no downloaded language pack instead of falling back.
+    // The palette is already waiting on a network call to the model, so there
+    // is nothing on-device recognition would protect here.
+    test('does not demand an on-device recognizer', () async {
+      await DictationService.instance.start(sink: (_) {});
+      expect(backend.lastOptions?.preferOnDevice, isFalse);
+    });
+
     test('a refusal comes back as an error event', () async {
       backend.readiness = SpeechReadiness.deniedForever;
       final events = <Map<String, dynamic>>[];
