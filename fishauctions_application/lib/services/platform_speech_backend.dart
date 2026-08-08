@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 
 import 'package:logger/logger.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -6,6 +7,7 @@ import 'package:speech_to_text/speech_recognition_error.dart';
 import 'package:speech_to_text/speech_recognition_result.dart';
 import 'package:speech_to_text/speech_to_text.dart';
 
+import '../utils/platform_bridge.dart';
 import 'speech_backend.dart';
 import 'voice_parser.dart';
 
@@ -71,17 +73,81 @@ class PlatformSpeechBackend implements SpeechBackend {
   @override
   Stream<SpeechEvent> get events => _events.stream;
 
+  /// Whether the phone has a recognition service — asked of the OS directly,
+  /// never of `speech_to_text`.
+  ///
+  /// **`SpeechToText.initialize()` cannot answer this question**, which is the
+  /// bug this method exists to fix. On Android it *requests* `RECORD_AUDIO`
+  /// (and `BLUETOOTH_CONNECT`) and then returns whether that permission is
+  /// held — so calling it from `voiceGetState` popped a permission dialog the
+  /// instant the set-winners page loaded, and answered `supported: false` on
+  /// every phone that hadn't already granted the microphone. A phone that has
+  /// never been asked is not a phone that can't.
+  ///
+  /// Optimistic on a channel error or a platform that doesn't implement the
+  /// check: the failure we care about is hiding the button on hardware that
+  /// works. If the recognizer really is missing, [prepare] says so precisely,
+  /// at the moment the user asked for it.
   @override
-  Future<bool> available() async {
-    final ready = await _ensureInitialized();
-    if (!ready) {
+  Future<bool> isCapable() => PlatformBridge.speechRecognitionAvailable();
+
+  @override
+  Future<bool> hasPermission() async {
+    try {
+      return await Permission.microphone.isGranted;
+    } on Object catch (e) {
+      _log.w('Microphone permission check failed: $e');
       return false;
     }
-    // Deliberately re-read rather than trusting the init-time answer: the
-    // microphone can be revoked from Settings while the app is backgrounded,
-    // which at an auction means it happened between two lots.
-    _needsPermission = !await Permission.microphone.isGranted;
-    return true;
+  }
+
+  @override
+  Future<SpeechReadiness> prepare() async {
+    // Ask for the microphone ourselves, before speech_to_text can. Its
+    // initialize() would otherwise raise the dialog at a time of its choosing
+    // (see isCapable), and it collapses "refused" and "no recognizer" into one
+    // false — two states that need different messages.
+    //
+    // iOS needs two grants, not one: SFSpeechRecognizer's own authorization is
+    // separate from the microphone's, and it traps on first use without it.
+    // Both are asked here so the pair arrives together, on the tap, rather
+    // than the second one appearing from inside initialize().
+    for (final permission in [
+      Permission.microphone,
+      if (Platform.isIOS) Permission.speech,
+    ]) {
+      final status = await _request(permission);
+      _needsPermission = !status.isGranted;
+      if (!status.isGranted) {
+        return status.isPermanentlyDenied || status.isRestricted
+            ? SpeechReadiness.deniedForever
+            : SpeechReadiness.denied;
+      }
+    }
+    // With the permission already held, initialize() takes the "has
+    // permission, completing" path: no dialog, and its answer is now really
+    // about the recognizer.
+    return await _ensureInitialized()
+        ? SpeechReadiness.ready
+        : SpeechReadiness.unavailable;
+  }
+
+  Future<PermissionStatus> _request(Permission permission) async {
+    try {
+      final current = await permission.status;
+      // A permanent denial must not be re-requested: the OS returns denied
+      // without showing anything, so the user sees a button that does nothing
+      // rather than a message telling them where the switch is.
+      if (current.isGranted ||
+          current.isPermanentlyDenied ||
+          current.isRestricted) {
+        return current;
+      }
+      return await permission.request();
+    } on Object catch (e) {
+      _log.w('Permission request for $permission failed: $e');
+      return PermissionStatus.denied;
+    }
   }
 
   Future<bool> _ensureInitialized() async {
@@ -94,14 +160,10 @@ class PlatformSpeechBackend implements SpeechBackend {
         onStatus: _onStatus,
       );
     } on Object catch (e) {
+      // Thrown rather than returned when the platform reports
+      // `recognizerNotAvailable`.
       _log.w('Speech initialize failed: $e');
       _initialized = false;
-    }
-    if (!_initialized) {
-      // initialize() collapses "no recognition service" and "permission
-      // refused" into a single false. They need different messages, so ask
-      // the permission layer which one it was.
-      _needsPermission = !await Permission.microphone.isGranted;
     }
     return _initialized;
   }
@@ -109,17 +171,9 @@ class PlatformSpeechBackend implements SpeechBackend {
   @override
   Future<void> start(SpeechSessionOptions options) async {
     _options = options;
-    if (!await _ensureInitialized()) {
-      _events.add(
-        SpeechEvent.error(
-          _needsPermission
-              ? SpeechErrorKind.permission
-              : SpeechErrorKind.unavailable,
-          _needsPermission
-              ? 'Microphone access is off for this app.'
-              : 'This device has no speech recognition available.',
-        ),
-      );
+    final readiness = await prepare();
+    if (readiness != SpeechReadiness.ready) {
+      _events.add(SpeechEvent.error(readiness.errorKind, readiness.message));
       return;
     }
     _wantListening = true;

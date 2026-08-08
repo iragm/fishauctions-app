@@ -1,5 +1,6 @@
 import AVFoundation
 import Flutter
+import Speech
 import SquareMobilePaymentsSDK
 import UIKit
 
@@ -53,6 +54,8 @@ import UIKit
           applicationId: arguments?["applicationId"] as? String,
           result: result
         )
+      case "speechRecognitionAvailable":
+        Self.handleSpeechRecognitionAvailable(result: result)
       case "getCameraFov":
         Self.handleGetCameraFov(result: result)
       case "tapToPayEducationAvailable":
@@ -117,6 +120,28 @@ import UIKit
       return
     }
     result(Double(device.activeFormat.videoFieldOfView))
+  }
+
+  // Whether this iPhone has speech recognition — asked *without* triggering an authorization
+  // prompt, which rules out `speech_to_text`'s initialize() (it asks for the microphone and speech
+  // recognition, then reports the permission as if it were the capability). The page calls
+  // voiceGetState() on load, long before the user has expressed any interest in talking to it.
+  //
+  // Reading authorizationStatus() and supportedLocales() are both silent. `.restricted` is the one
+  // status that really means never — a device-policy ban (Screen Time, MDM) the user cannot lift —
+  // so it's the only one that reports "no". `.denied` deliberately still says yes: a phone whose
+  // owner refused once and can re-enable it in Settings is a phone that can do this, and hiding
+  // the button leaves them nothing to tap.
+  //
+  // supportedLocales() rather than SFSpeechRecognizer(locale: .current), because the recognition
+  // locale comes from the app's served voice config (en_US by default), not from the phone's
+  // region — a device set to a locale Apple doesn't recognize can still recognize English.
+  private static func handleSpeechRecognitionAvailable(result: FlutterResult) {
+    if SFSpeechRecognizer.authorizationStatus() == .restricted {
+      result(false)
+      return
+    }
+    result(!SFSpeechRecognizer.supportedLocales().isEmpty)
   }
 
   private static func handleInitializeSquare(applicationId: String?, result: FlutterResult) {

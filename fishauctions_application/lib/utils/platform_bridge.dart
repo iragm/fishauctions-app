@@ -251,6 +251,39 @@ class PlatformBridge {
     }
   }
 
+  /// Whether this phone has a speech recognition service — **without asking
+  /// for any permission and without starting a recognizer.**
+  ///
+  /// Android reads `SpeechRecognizer.isRecognitionAvailable()` (plus the
+  /// on-device recognizer on API 31+); iOS constructs an `SFSpeechRecognizer`
+  /// and checks the authorization status isn't `restricted` (a device-policy
+  /// ban, the one iOS state that really means "never"). Neither call prompts.
+  ///
+  /// This exists because there is no permission-free capability check in
+  /// `speech_to_text`: its `initialize()` requests the microphone as a side
+  /// effect and then reports the *permission* as if it were the device's
+  /// capability. Answering `voiceGetState` with it meant a dialog on page load
+  /// and "voice isn't available on this phone" on every phone that hadn't
+  /// already granted it.
+  ///
+  /// **True on any error, and on a platform that doesn't implement it** — a
+  /// missing check must not hide a microphone button on hardware that works.
+  /// The permission request and the recognizer start both happen later, from a
+  /// real tap, where a precise failure can be reported.
+  static Future<bool> speechRecognitionAvailable() async {
+    if (!Platform.isAndroid && !Platform.isIOS) {
+      return false;
+    }
+    try {
+      return await _channel.invokeMethod<bool>('speechRecognitionAvailable') ??
+          true;
+    } on PlatformException {
+      return true;
+    } on MissingPluginException {
+      return true;
+    }
+  }
+
   /// Initializes the Square Mobile Payments SDK with [applicationId] (the
   /// deployment's Square Application ID, from `/api/mobile/config/`). Must run
   /// once before any authorize()/charge() call — the Square Flutter plugin

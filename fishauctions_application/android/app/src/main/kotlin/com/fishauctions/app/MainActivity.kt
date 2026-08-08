@@ -8,6 +8,7 @@ import android.hardware.camera2.CameraManager
 import android.nfc.NfcAdapter
 import android.os.Build
 import android.provider.Settings
+import android.speech.SpeechRecognizer
 import com.fishauctions.app.ar.ArCameraViewFactory
 import com.fishauctions.app.ar.ArEventBridge
 import com.squareup.sdk.mobilepayments.MobilePaymentsSdk
@@ -31,6 +32,7 @@ class MainActivity : FlutterActivity() {
                     "isNfcEnabled" -> result.success(isNfcEnabled())
                     "isDeveloperModeEnabled" -> result.success(isDeveloperModeEnabled())
                     "openNfcSettings" -> openNfcSettings(result)
+                    "speechRecognitionAvailable" -> result.success(isSpeechRecognitionAvailable())
                     "getCameraFov" -> result.success(backCameraHorizontalFovDeg())
                     "getLensDistortion" -> result.success(backCameraLensDistortion())
                     "initializeSquare" -> initializeSquare(call.argument("applicationId"), result)
@@ -112,6 +114,32 @@ class MainActivity : FlutterActivity() {
             .firstOrNull()
     } catch (e: Throwable) {
         null
+    }
+
+    // Whether this phone has a speech recognition service — without requesting RECORD_AUDIO and
+    // without constructing a recognizer.
+    //
+    // This exists because speech_to_text has no permission-free capability check: its initialize()
+    // *requests* the microphone and then returns whether the permission is held, which is a
+    // different question. Answering the page's voiceGetState() with it popped a permission dialog
+    // on page load and reported "no voice on this phone" for every phone that hadn't already
+    // granted it (see PlatformSpeechBackend.isCapable).
+    //
+    // Package visibility (Android 11+) matters here: isRecognitionAvailable() only sees a
+    // recognition service because AndroidManifest.xml declares the matching <queries><intent> for
+    // android.speech.RecognitionService. Without it this returns false on every modern phone.
+    //
+    // The on-device check is a separate question from the network one — a phone with Google's
+    // offline speech pack but no network recognizer still works, and voice deliberately prefers
+    // on-device (an auction hall's wifi is bad).
+    private fun isSpeechRecognitionAvailable(): Boolean = try {
+        val onDevice = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            SpeechRecognizer.isOnDeviceRecognitionAvailable(this)
+        SpeechRecognizer.isRecognitionAvailable(this) || onDevice
+    } catch (e: Throwable) {
+        // Optimistic: a hidden microphone button on hardware that works is the worse failure, and
+        // the real attempt reports precisely when the user taps Listen.
+        true
     }
 
     // Whether this device can take a Square Tap to Pay charge: NFC hardware plus

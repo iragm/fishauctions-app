@@ -107,6 +107,14 @@ class VoiceVocabularyService {
     }
   }
 
+  /// Test hook — stop [begin] reaching the network at all, the same way a 404
+  /// does in production.
+  @visibleForTesting
+  bool get offlineForTesting => _unsupported;
+
+  @visibleForTesting
+  set offlineForTesting(bool value) => _unsupported = value;
+
   /// Test hook — inject a vocabulary without a network round trip.
   @visibleForTesting
   VoiceVocabulary get vocabularyForTesting => _vocabulary;

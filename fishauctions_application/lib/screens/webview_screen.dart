@@ -28,6 +28,7 @@ import '../services/api_service.dart';
 import '../services/auth_service.dart';
 import '../services/bluetooth_service.dart';
 import '../services/checkin_service.dart';
+import '../services/dictation_service.dart';
 import '../services/download_service.dart';
 import '../services/label_prefs_service.dart';
 import '../services/label_print_service.dart';
@@ -381,7 +382,7 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       //   voiceStop()       → {listening: false}
       ..addJavaScriptHandler(
         handlerName: 'voiceGetState',
-        callback: (_) => VoiceCommandService.instance.state(),
+        callback: (_) => _voiceState(),
       )
       ..addJavaScriptHandler(
         handlerName: 'voiceStart',
@@ -390,8 +391,39 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       ..addJavaScriptHandler(
         handlerName: 'voiceStop',
         callback: (_) async {
-          await VoiceCommandService.instance.stop();
-          return VoiceCommandService.instance.state();
+          try {
+            await VoiceCommandService.instance.stop();
+          } on Object catch (e) {
+            debugPrint('voiceStop failed: $e');
+          }
+          return _voiceState();
+        },
+      )
+      // Plain dictation, for any page that wants a field filled by talking —
+      // the command palette's microphone first. Native for the same reason
+      // voice set-winners is: `window.SpeechRecognition` exists in neither of
+      // the app's engines, so the page's own implementation of this silently
+      // never appears in the app.
+      //   dictateGetState() → {supported, listening, permission}
+      //   dictateStart()    → begins; transcripts arrive on the receiver below
+      //   dictateStop()     → {listening: false}
+      ..addJavaScriptHandler(
+        handlerName: 'dictateGetState',
+        callback: (_) => _dictationState(),
+      )
+      ..addJavaScriptHandler(
+        handlerName: 'dictateStart',
+        callback: (_) => _startDictation(),
+      )
+      ..addJavaScriptHandler(
+        handlerName: 'dictateStop',
+        callback: (_) async {
+          try {
+            await DictationService.instance.stop();
+          } on Object catch (e) {
+            debugPrint('dictateStop failed: $e');
+          }
+          return _dictationState();
         },
       );
     await _applyLocation(prompt: false, fresh: false);
@@ -898,6 +930,31 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     'prefs_endpoint': NotificationPrefsService.instance.isAvailable,
   };
 
+  /// What `voiceGetState` answers with — and the shape every voice handler
+  /// resolves with, including the failures.
+  ///
+  /// **None of the voice handlers may ever throw.** A rejected `callHandler`
+  /// promise is indistinguishable, on the page, from an app build that has no
+  /// voice handlers at all: its catch says "Voice is not available on this
+  /// phone", which is both wrong and unactionable. Anything that goes wrong
+  /// here has to come back as a state map carrying an `error` the page can
+  /// print instead.
+  Future<Map<String, dynamic>> _voiceState({String? error}) async {
+    try {
+      final state = await VoiceCommandService.instance.state();
+      return {...state, 'error': ?error};
+    } on Object catch (e) {
+      debugPrint('voiceGetState failed: $e');
+      // Supported, because the failure was ours rather than the device's, and
+      // a hidden button can't be retried.
+      return {
+        'supported': true,
+        'listening': false,
+        'error': error ?? 'Voice could not start. Try again.',
+      };
+    }
+  }
+
   /// Begin a voice set-winners session for the auction the page names.
   ///
   /// The slug has to come from the page rather than being parsed out of the
@@ -906,13 +963,18 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   Future<Map<String, dynamic>> _startVoice(Object? args) async {
     final slug = _voiceSlugFrom(args);
     if (slug == null) {
-      return {'listening': false, 'error': 'no_auction'};
+      return _voiceState(error: 'This page didn\'t say which auction to use.');
     }
-    await VoiceCommandService.instance.start(
-      auctionSlug: slug,
-      sink: _sendVoiceEvent,
-    );
-    return VoiceCommandService.instance.state();
+    try {
+      await VoiceCommandService.instance.start(
+        auctionSlug: slug,
+        sink: _sendVoiceEvent,
+      );
+    } on Object catch (e) {
+      debugPrint('voiceStart failed: $e');
+      return _voiceState(error: 'Voice could not start. Try again.');
+    }
+    return _voiceState();
   }
 
   static String? _voiceSlugFrom(Object? args) {
@@ -955,6 +1017,63 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     if (VoiceCommandService.instance.isListening) {
       unawaited(VoiceCommandService.instance.stop());
     }
+    if (DictationService.instance.isListening) {
+      unawaited(DictationService.instance.stop());
+    }
+  }
+
+  // ── Dictation bridge ──────────────────────────────────────────────────────
+
+  /// The state map every dictation handler resolves with, failures included —
+  /// same rule as [_voiceState]: a rejected `callHandler` promise is
+  /// indistinguishable from a build with no dictation handlers at all, so the
+  /// page would hide its microphone rather than say what went wrong.
+  Future<Map<String, dynamic>> _dictationState({String? error}) async {
+    try {
+      final state = await DictationService.instance.state();
+      return {...state, 'error': ?error};
+    } on Object catch (e) {
+      debugPrint('dictateGetState failed: $e');
+      return {
+        'supported': true,
+        'listening': false,
+        'error': error ?? 'Dictation could not start. Try again.',
+      };
+    }
+  }
+
+  Future<Map<String, dynamic>> _startDictation() async {
+    try {
+      await DictationService.instance.start(sink: _sendDictationEvent);
+    } on Object catch (e) {
+      debugPrint('dictateStart failed: $e');
+      return _dictationState(error: 'Dictation could not start. Try again.');
+    }
+    return _dictationState();
+  }
+
+  /// Push one dictation event to the page's receiver. Deliberately a separate
+  /// global from `fishauctionsVoice`: the command palette is a modal that
+  /// opens *over* the set-winners page, so one receiver would mean the
+  /// palette's transcripts arriving at the code that fills in bidder numbers.
+  void _sendDictationEvent(Map<String, dynamic> event) {
+    final controller = _controller;
+    if (controller == null) {
+      return;
+    }
+    unawaited(
+      controller
+          .evaluateJavascript(
+            source:
+                'window.fishauctionsDictate && '
+                'window.fishauctionsDictate.onEvent && '
+                'window.fishauctionsDictate.onEvent(${jsonEncode(event)});',
+          )
+          .catchError((Object e) {
+            debugPrint('Dictation event delivery failed: $e');
+            return null;
+          }),
+    );
   }
 
   /// Maps the bridge's reason string onto a surface. Anything unrecognized (a
@@ -1638,17 +1757,73 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     return (b == null || b.isEmpty) ? AppConstants.appName : b;
   }
 
-  void _onTitleTap() => showCommandPalette(
-    context,
-    _loadPath,
-    // AR is a native screen, not a web path — the palette's locally injected
-    // AR entry routes through the same push+return flow as the deep link.
-    onOpenAr: (slug) => unawaited(_launchAr(slug, null)),
-    // Likewise native. This is also the one route to Tap to Pay setup that
-    // works before the backend serves `payments/authorization/` — the drawer
-    // tile and the awareness modal both wait on that answer.
-    onOpenTapToPay: () => unawaited(context.push('/tap-to-pay')),
-  );
+  void _onTitleTap() => unawaited(_openCommandPalette());
+
+  /// Open the command palette — the website's own, if the page in the WebView
+  /// has it.
+  ///
+  /// The web palette is the real one: natural-language assist with a language
+  /// model behind it, streamed progress, a confirm countdown, clarifying
+  /// questions and the telemetry that feeds the analytics page. Re-implementing
+  /// that natively would be a second copy of a feature that changes weekly, and
+  /// it would drift — which is the general rule in this app: business logic
+  /// lives on the web side, the app supplies the hardware (here, the
+  /// microphone, over the `dictate*` bridge).
+  ///
+  /// [showCommandPalette] stays as the fallback and is not dead code: the JS
+  /// returns false whenever the palette isn't there — a deployment that hasn't
+  /// un-hidden it yet, a page that failed to load, offline — and the native
+  /// palette works in all of those, since it goes over the JWT API rather than
+  /// the page.
+  Future<void> _openCommandPalette() async {
+    if (await _showWebCommandPalette()) {
+      return;
+    }
+    if (!mounted) {
+      return;
+    }
+    await showCommandPalette(
+      context,
+      _loadPath,
+      // AR is a native screen, not a web path — the palette's locally injected
+      // AR entry routes through the same push+return flow as the deep link.
+      onOpenAr: (slug) => unawaited(_launchAr(slug, null)),
+      // Likewise native. This is also the one route to Tap to Pay setup that
+      // works before the backend serves `payments/authorization/` — the drawer
+      // tile and the awareness modal both wait on that answer.
+      onOpenTapToPay: () => unawaited(context.push('/tap-to-pay')),
+    );
+  }
+
+  /// Show the page's own palette modal, reporting whether it was there.
+  ///
+  /// Bootstrap is what the site already uses for this modal, and the keyboard
+  /// shortcut that normally opens it (Ctrl+K) is unreachable on a phone — so
+  /// the app bar's title is the app's equivalent, and it has to reach the same
+  /// modal rather than a copy of it.
+  Future<bool> _showWebCommandPalette() async {
+    final controller = _controller;
+    if (controller == null) {
+      return false;
+    }
+    try {
+      final shown = await controller.evaluateJavascript(
+        source:
+            '(function () {'
+            '  var el = document.getElementById("command-palette-modal");'
+            '  if (!el || !window.bootstrap) { return false; }'
+            '  bootstrap.Modal.getOrCreateInstance(el).show();'
+            '  return true;'
+            '})();',
+      );
+      // Both platforms have been known to hand back the string "true" rather
+      // than a bool, depending on how the engine serializes the result.
+      return shown == true || shown == 'true';
+    } on Object catch (e) {
+      debugPrint('Web command palette unavailable: $e');
+      return false;
+    }
+  }
 
   // ── Navigation, downloads, permissions, bridges ───────────────────────────
 
@@ -1949,6 +2124,14 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
         if (slug != null && slug.isNotEmpty) {
           unawaited(_launchAr(slug, uri.queryParameters['locate']));
         }
+      case 'tap-to-pay':
+        // fishauctions://tap-to-pay — the native setup/education screen. It
+        // exists as a link so the website's command palette can offer it: the
+        // palette runs in the WebView now (it is where the language model and
+        // the assist UI live), and a native screen is not something the server
+        // can hand back as a URL. Same reason `ar` is a link rather than a
+        // path.
+        unawaited(context.push('/tap-to-pay'));
     }
   }
 

@@ -6,7 +6,7 @@ import 'package:logger/logger.dart';
 import '../models/voice_command.dart';
 import '../models/voice_grammar.dart';
 import 'bundled_voice_grammar.dart';
-import 'platform_speech_backend.dart';
+import 'microphone.dart';
 import 'speech_backend.dart';
 import 'voice_parser.dart';
 import 'voice_vocabulary_service.dart';
@@ -56,16 +56,25 @@ class VoiceCommandService {
   /// page's decision to reveal the microphone button, so a phone with no
   /// recognition service — or a deployment that turned voice off — shows no
   /// dead control.
+  ///
+  /// **Permission is not part of this answer, and asking for it here is a
+  /// bug.** The page calls `voiceGetState` on load, so anything this touches
+  /// happens before the user has shown any interest in voice at all. It used
+  /// to run `SpeechToText.initialize()`, which on Android both raises the
+  /// microphone dialog *and* reports the permission as the device's
+  /// capability — so the dialog appeared on page load and the answer was
+  /// `supported: false` on every phone that had not already granted it.
   Future<bool> isSupported() async {
     if (!_grammar.enabled) {
       return false;
     }
-    final backend = _ensureBackend();
-    return backend.available();
+    return _ensureBackend().isCapable();
   }
 
   /// True when the only thing missing is the OS permission, so the caller can
-  /// say "allow the microphone" rather than "this device can't".
+  /// say "allow the microphone" rather than "this device can't". Only
+  /// meaningful once a session has been attempted — nothing before [start]
+  /// looks at permissions.
   bool get needsPermission => _backend?.needsPermission ?? false;
 
   /// Apply the deployment's served grammar. Merged over the bundled default
@@ -85,14 +94,22 @@ class VoiceCommandService {
   /// rather than disabling voice — a config written for a build that has
   /// `biased` or `cloud` should degrade on an older app, not break it. This is
   /// the seam the other backends slot into; nothing above it changes.
+  ///
+  /// Comes from [Microphone] rather than being constructed here: palette
+  /// dictation listens through the same recognizer, and two of them contend
+  /// for one platform service rather than giving you two.
   SpeechBackend _ensureBackend() {
     if (_grammar.backend != 'platform') {
       _log.i('Unknown voice backend "${_grammar.backend}"; using platform');
     }
-    return _backend ??= PlatformSpeechBackend();
+    return _backend ??= Microphone.instance.backend;
   }
 
   /// Start listening for [auctionSlug], reporting everything to [sink].
+  ///
+  /// **This is the microphone permission's one and only prompt point.** It runs
+  /// from the page's Listen button, which is the first moment the user has said
+  /// they want voice at all.
   Future<bool> start({
     required String auctionSlug,
     required VoiceEventSink sink,
@@ -104,16 +121,18 @@ class VoiceCommandService {
     _slots.clear();
     _lastEmitted.clear();
     final backend = _ensureBackend();
-    if (!await backend.available()) {
+    final readiness = await backend.prepare();
+    if (readiness != SpeechReadiness.ready) {
       _emit({
         'type': 'error',
-        'code': backend.needsPermission ? 'permission_denied' : 'unavailable',
-        'message': backend.needsPermission
-            ? 'Microphone access is off for this app.'
-            : 'This device has no speech recognition available.',
+        'code': readiness.errorCode,
+        'message': readiness.message,
       });
       return false;
     }
+    // Evicts palette dictation if it was listening. Deliberate: a tap on
+    // Listen is the operator saying this is what the microphone is for now.
+    await Microphone.instance.claim('voice', stop);
     final vocabulary = await VoiceVocabularyService.instance.begin(auctionSlug);
     await _subscription?.cancel();
     _subscription = backend.events.listen(_onSpeechEvent);
@@ -133,6 +152,7 @@ class VoiceCommandService {
   Future<void> stop() async {
     _listening = false;
     VoiceVocabularyService.instance.end();
+    Microphone.instance.release('voice');
     await _backend?.stop();
     await _subscription?.cancel();
     _subscription = null;
@@ -264,12 +284,17 @@ class VoiceCommandService {
   }
 
   /// Current state, for `voiceGetState`.
+  ///
+  /// `supported` and `permission` are independent on purpose: a phone that can
+  /// do voice but hasn't been asked for the microphone yet is the *normal*
+  /// state on first visit, and it must still reveal the button — tapping it is
+  /// what earns the prompt.
   Future<Map<String, dynamic>> state() async {
     final supported = await isSupported();
     return {
       'supported': supported,
       'listening': _listening,
-      'permission': !needsPermission,
+      'permission': supported && await _ensureBackend().hasPermission(),
       'backend': backendId,
       'on_device': isOnDevice,
       'confident_at': _grammar.confidentAt,
@@ -283,5 +308,17 @@ class VoiceCommandService {
     _lastEmitted.clear();
     _grammar = bundledVoiceGrammar();
     _listening = false;
+    _backend = null;
+    _sink = null;
   }
+
+  /// Drive the session with a stand-in recognizer. The seam exists for one
+  /// invariant in particular: `voiceGetState` must answer without asking the
+  /// OS for anything (see [isSupported]), and nothing but a fake backend can
+  /// prove a prompt didn't happen.
+  @visibleForTesting
+  SpeechBackend? get backendForTesting => _backend;
+
+  @visibleForTesting
+  set backendForTesting(SpeechBackend? backend) => _backend = backend;
 }

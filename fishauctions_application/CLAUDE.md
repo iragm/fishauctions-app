@@ -393,10 +393,33 @@ taps a mic button on the web page and calls out "lot forty two … bidder
 seventeen … twenty five dollars … sold". Full design and the v1 post-mortem:
 **`VOICE.md`**; the web half is `BACKEND_SPEC.md` Part VOICE.
 
-**App side is implemented; nothing runs until the page lands** (VOICE-4) —
-`voiceGetState` answers `supported: false` on a deployment with no `voice`
-config, so shipping it early is inert.
+**Both halves are live** — the page landed (VOICE-4) and the app answers its
+bridge.
 
+- **Capability and permission are different questions, and conflating them
+  broke this outright** (fixed 2026-08-08). `voiceGetState` runs on *page
+  load*, so nothing it touches may prompt. It used to call `speech_to_text`'s
+  `initialize()`, which on Android **requests `RECORD_AUDIO`** and then returns
+  whether that permission is held — so the microphone dialog appeared the
+  instant the page rendered, and `supported: false` came back on every phone
+  that hadn't already granted it, hiding the button for good ("Voice is not
+  available on this phone"). Capability is now a permission-free native check
+  (`PlatformBridge.speechRecognitionAvailable` →
+  `SpeechRecognizer.isRecognitionAvailable` / `SFSpeechRecognizer`), optimistic
+  on any error because a hidden button on working hardware is the worse
+  failure. The microphone is requested in `SpeechBackend.prepare`, reached only
+  from `voiceStart` — i.e. the Listen tap. `speech_to_text`'s `initialize()`
+  then takes its "already has permission" path and prompts for nothing.
+- **No voice bridge handler may throw.** A rejected `callHandler` promise is
+  indistinguishable, on the page, from an app build with no voice handlers —
+  its catch says "Voice is not available on this phone", which is wrong and
+  unactionable. Failures resolve as a state map carrying `error`.
+- **One microphone, one recognizer, arbitrated by `Microphone`.** Two
+  `SpeechToText` objects contend for the same platform service rather than
+  giving you two (`ERROR_RECOGNIZER_BUSY`, or silence on iOS). Voice
+  set-winners and palette dictation overlap on exactly one screen — the palette
+  opens *over* the set-winners page — so a claim takes the microphone and stops
+  the previous holder. The last thing tapped wins.
 - **The app owns only the microphone.** Native because iOS `WKWebView` has no
   Web Speech API and the shell denies the WebView's mic outright. The page
   keeps owning the form — validation, submit, undo, queue auto-advance — and
@@ -654,7 +677,8 @@ that shaped the app:
 - **AR lot mode backend v2:** v1 (models, solver, endpoints) landed on the backend, and so has every per-frame sensor channel `BACKEND_SPEC.md` Part 5 specced — gyro `yaw_deg` heading odometry, GPS + absolute-heading island anchoring, and pedometer-driven `odo_x_m`/`odo_y_m` planar dead-reckoning. What's left is island (connected-component) detection/labeling/merging (`component` on positions rows, which the app already consumes). Until it lands, lots that were never co-visible in one camera frame don't get reliable relative positions, and unconnected scanned islands overlap on the admin map.
 - **Proximity check-in backend:** app side (ping service + shell UI) is implemented; `BACKEND_SPEC.md` Part 6 (`exact_location_set`, the three `checkin/*` endpoints, nudge dedupe, history) is not. Feature self-disables on 404 until then.
 - **Recruit volunteers:** entirely web/backend — `BACKEND_SPEC.md` Part 7. No app work at all (notifications ride the Part 2 push pipeline; the accept flow is a web page).
-- **Voice set-winners:** app side is done (pipeline, parser, vocabulary matcher, confidence model, bridge handlers, 50 tests). All four remaining items are backend — `BACKEND_SPEC.md` Part VOICE: delete the dead Vosk code and the cross-origin-isolation scaffolding (VOICE-1), `GET /api/mobile/auctions/<slug>/voice/vocabulary/` (VOICE-2), the `voice` config block (VOICE-3), and the page itself — mic button, event receiver, confidence styling (VOICE-4). VOICE-4 is the one that turns the feature on; until it lands nothing calls `voiceStart`. Tuning telemetry is VOICE-5.
+- ~~Voice set-winners~~ — **both halves are live.** The backend landed the vocabulary endpoint, the `voice` config block, the page (mic button, event receiver, confidence styling) and the tuning telemetry; the app's two launch bugs — a permission dialog on page load, and "not available on this phone" on any phone that hadn't already granted the microphone — were fixed 2026-08-08 (see the Voice section above; the cause was `SpeechToText.initialize()` being used as a capability check).
+- **Command palette in the app (`BACKEND_SPEC.md` Part PALETTE):** the website's palette grew an LLM assist (streamed NDJSON, confirm countdown, clarify options, cancel/report telemetry) and a voice input, but `base.html` renders it only when `not request.is_mobile_app`, so app users still get the plain native palette. App side landed 2026-08-08: the app-bar title now opens the *web* palette when the page has it (`#command-palette-modal`) and falls back to the native one when it doesn't, and `dictateGetState`/`dictateStart`/`dictateStop` expose the phone's recognizer so the palette's mic can work — `window.SpeechRecognition` exists in neither of the app's engines. Backend owes three web-only items: drop the `not request.is_mobile_app` guard (PALETTE-1), point `command_palette.js`'s mic at the bridge (PALETTE-2), and emit the two native rows as `fishauctions://ar/<slug>` / `fishauctions://tap-to-pay` result items (PALETTE-3).
 - **Release signing:** wired in CI (keystore from repo secrets; the release workflow refuses to build unsigned). *Local* `flutter build --release` still falls back to debug signing unless you create `android/key.properties` yourself.
 
 ## CI/CD
@@ -800,6 +824,29 @@ JWT auth is bridged into the WebView's Django cookie session:
   reports back rather than opening a sheet with a dead "Add" button. `.ics` opens
   in the OS calendar importer, everything else goes to the share sheet, and a PDF
   goes to the OS print dialog on the "System printer" method.
+- **The command palette is the website's, opened from the app-bar title.** The
+  web palette is where the LLM assist lives (streamed NDJSON progress, the
+  confirm countdown, clarify options, cancel/report telemetry) — a second
+  native copy of a feature that changes weekly would drift within a month — so
+  the title tap runs `bootstrap.Modal.getOrCreateInstance('#command-palette-modal')`
+  and only falls back to the native `showCommandPalette` when the JS says the
+  modal isn't there (older deployment, failed page load, offline). The native
+  palette is therefore *not* dead code: it is the offline path, and it goes
+  over the JWT API rather than the page. Two rows the server can't express as
+  URLs ride custom schemes instead — `fishauctions://ar/<slug>` and
+  `fishauctions://tap-to-pay`. Backend half: `BACKEND_SPEC.md` Part PALETTE
+  (one template line, one JS shim, two rows).
+- **Dictation is a generic bridge, not a palette feature**
+  (`dictateGetState`/`dictateStart`/`dictateStop` → `DictationService`, events
+  pushed to `window.fishauctionsDictate.onEvent`). Any page can fill a field by
+  talking. It exists because `window.SpeechRecognition` is in **neither** of
+  the app's engines — iOS `WKWebView` never had the Web Speech API and
+  Android's System WebView doesn't ship Chrome's recognizer — so the palette's
+  own microphone button is simply invisible in the app. Deliberately *not*
+  `VoiceCommandService` with the grammar removed: set-winners matches a closed
+  vocabulary because a wrong bidder costs money, whereas the palette's whole
+  point is that you can say anything and a language model reads it. Dictation
+  ends itself on the final transcript — one sentence, then hand it back.
 - **Deployment config is re-fetched on resume if it never loaded**
   (`_rewarmConfigIfFailed`). Riverpod caches a `FutureProvider` failure for the
   process, so a cold start with no connectivity — routine at an auction hall —

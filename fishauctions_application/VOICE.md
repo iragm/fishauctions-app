@@ -5,13 +5,31 @@ taps a microphone button on the web page and then just talks:
 
 > "lot forty two … bidder seventeen … twenty five dollars … sold"
 
-**Status.** The app half is built: the speech pipeline, the parser, the
-vocabulary matcher, the confidence model and the three `voice*` bridge
-handlers, with 50 tests over the parts that decide accuracy. It does nothing
-yet, because the microphone button and the field-writing live on the web page
-— that's `BACKEND_SPEC.md` Part VOICE, and until VOICE-4 lands nothing calls
-`voiceStart`. `voiceGetState` answers `supported: false` on a deployment that
-hasn't configured voice, so shipping the app side early is inert, not broken.
+**Status.** Live on both halves. The app supplies the speech pipeline, the
+parser, the vocabulary matcher, the confidence model and the three `voice*`
+bridge handlers; the backend landed the vocabulary endpoint, the `voice` config
+block, the page's microphone button and receiver, and the tuning telemetry.
+
+Two launch bugs, both app-side, both fixed 2026-08-08, and both worth
+remembering because they came from the same mistake — treating the microphone
+*permission* as the device's *capability*:
+
+- **The permission dialog appeared on page load.** `voiceGetState` runs when the
+  set-winners page renders, and it called `speech_to_text`'s `initialize()`,
+  which on Android requests `RECORD_AUDIO` as a side effect. The user was asked
+  for a microphone before they had shown the slightest interest in one.
+- **"Voice is not available on this phone", on phones that were.** That same
+  `initialize()` returns whether the permission is held — not whether a
+  recognizer exists — so the honest first-visit answer (`false`, nobody has
+  granted anything yet) was reported as `supported: false`, and the page did
+  the right thing with the wrong fact: it hid the button, permanently.
+
+The fix is the split now baked into `SpeechBackend`: `isCapable()` is
+permission-free and prompt-free (a native `SpeechRecognizer.isRecognitionAvailable`
+/ `SFSpeechRecognizer` check, optimistic on error — hiding the button on
+working hardware is the worse failure), and `prepare()` is the *only* thing
+that asks for the microphone, reached only from `voiceStart`, i.e. from the tap
+on Listen. See §3.3.
 
 ---
 
@@ -193,6 +211,26 @@ voiceGetState()            → {supported, listening, permission, backend, on_de
 voiceStart({auction, locale}) → {listening, error}
 voiceStop()                → {listening: false}
 ```
+
+Two invariants hold across all three, and both were bugs before they were
+invariants:
+
+- **`voiceGetState` prompts for nothing and starts nothing.** The page calls it
+  on load. `supported` answers "does this phone have a recognizer" and
+  `permission` answers "has it been granted" — separately, because
+  `{supported: true, permission: false}` is the *normal* first visit and must
+  still reveal the button. The tap is what earns the prompt.
+- **None of them ever throws.** A rejected `callHandler` promise is
+  indistinguishable, on the page, from an app build that has no voice handlers
+  at all — its catch prints "Voice is not available on this phone". Anything
+  that goes wrong resolves as a state map carrying `error` instead, so the page
+  can print what actually happened.
+
+The microphone is claimed through `Microphone` (`services/microphone.dart`),
+which also owns the one shared recognizer: the command palette dictates through
+the same platform service, and the palette opens *over* this page. Starting
+either one stops the other rather than both failing with
+`ERROR_RECOGNIZER_BUSY`.
 
 App → page is a push, not a poll — `evaluateJavascript` calling a receiver the
 page installs:
@@ -453,7 +491,12 @@ gets its ads, its analytics and its CDN assets back.
 
 The button renders hidden and is revealed only after `voiceGetState()` resolves
 `{supported: true}` — `{% if request.is_mobile_app %}` alone would show a dead
-button to everyone on the current app build, which ships no `voice*` handlers.
+button to anyone on an app build that ships no `voice*` handlers.
+
+**Done**, along with the rest of the page. Note that `supported` no longer
+implies the microphone has been granted (it never should have): a first visit
+answers `{supported: true, permission: false}` and the button must appear
+anyway.
 
 ---
 
@@ -465,10 +508,12 @@ button to everyone on the current app build, which ships no `voice*` handlers.
    spoken-form index, matching, computed confidence, `command` events.
    **Done**, with 50 tests; the parser is pure and testable against recorded
    transcripts, which is where the tuning loop starts.
-3. **Demolition** (backend, ~1 h) — delete v1 and the cross-origin-isolation
-   scaffolding. Independent of everything else; pure removal.
-4. **The page** (backend) — mic button, receiver, field states, tones, guarded
-   `sold`, undo. This is what turns the app half on: `BACKEND_SPEC.md` VOICE-4.
+3. ~~**Demolition**~~ (backend) — delete v1 and the cross-origin-isolation
+   scaffolding. **Done.**
+4. ~~**The page**~~ (backend) — mic button, receiver, field states, tones,
+   guarded `sold`, undo. **Done** — and it is what exposed the two app-side
+   capability/permission bugs at the top of this file, since nothing had ever
+   called `voiceGetState` on a real phone before.
 5. **Then measure.** Log `{heard, chosen, confidence, corrected_to}` (VOICE-5)
    and use real sessions to tune the grammar over `/api/mobile/config/`. If
    accuracy is still short after tuning, the ordered answers are: phrase
