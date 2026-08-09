@@ -413,7 +413,11 @@ bridge.
 - **No voice bridge handler may throw.** A rejected `callHandler` promise is
   indistinguishable, on the page, from an app build with no voice handlers —
   its catch says "Voice is not available on this phone", which is wrong and
-  unactionable. Failures resolve as a state map carrying `error`.
+  unactionable. Failures resolve as a state map carrying `error`. Guarding the
+  *body* isn't enough: `voiceStart` threw before reaching its `try` and
+  answered every tap on Listen with that exact sentence until 2026-08-09 — see
+  the JS-bridge argument rule under WebView Integration Notes, which is where
+  the general version of this lives.
 - **One microphone, one recognizer, arbitrated by `Microphone`.** Two
   `SpeechToText` objects contend for the same platform service rather than
   giving you two (`ERROR_RECOGNIZER_BUSY`, or silence on iOS). Voice
@@ -702,7 +706,7 @@ that shaped the app:
 - **AR lot mode backend v2:** v1 (models, solver, endpoints) landed on the backend, and so has every per-frame sensor channel `BACKEND_SPEC.md` Part 5 specced — gyro `yaw_deg` heading odometry, GPS + absolute-heading island anchoring, and pedometer-driven `odo_x_m`/`odo_y_m` planar dead-reckoning. What's left is island (connected-component) detection/labeling/merging (`component` on positions rows, which the app already consumes). Until it lands, lots that were never co-visible in one camera frame don't get reliable relative positions, and unconnected scanned islands overlap on the admin map.
 - **Proximity check-in backend:** app side (ping service + shell UI) is implemented; `BACKEND_SPEC.md` Part 6 (`exact_location_set`, the three `checkin/*` endpoints, nudge dedupe, history) is not. Feature self-disables on 404 until then.
 - **Recruit volunteers:** entirely web/backend — `BACKEND_SPEC.md` Part 7. No app work at all (notifications ride the Part 2 push pipeline; the accept flow is a web page).
-- ~~Voice set-winners~~ — **both halves are live.** The backend landed the vocabulary endpoint, the `voice` config block, the page (mic button, event receiver, confidence styling) and the tuning telemetry; the app's two launch bugs — a permission dialog on page load, and "not available on this phone" on any phone that hadn't already granted the microphone — were fixed 2026-08-08 (see the Voice section above; the cause was `SpeechToText.initialize()` being used as a capability check).
+- ~~Voice set-winners~~ — **both halves are live.** The backend landed the vocabulary endpoint, the `voice` config block, the page (mic button, event receiver, confidence styling) and the tuning telemetry; the app's two launch bugs — a permission dialog on page load, and "not available on this phone" on any phone that hadn't already granted the microphone — were fixed 2026-08-08 (see the Voice section above; the cause was `SpeechToText.initialize()` being used as a capability check). **A third bug wore the same message and outlived both** — `voiceStart` threw `NoSuchMethodError` on `args.firstOrNull` before any of its own code ran, so the page's catch printed "Voice is not available on this phone" on every tap of Listen and the recognizer was never once reached (fixed 2026-08-09; the rule is under WebView Integration Notes). **Nothing past that throw has been exercised on hardware yet** — the first real session is still unproven.
 - ~~Command palette in the app~~ — **both halves are live** (2026-08-08). The app-bar title opens the *web* palette when the page has it (`#command-palette-modal`) and falls back to the native one when it doesn't, and `dictateGetState`/`dictateStart`/`dictateStop` expose the phone's recognizer so the palette's mic works — `window.SpeechRecognition` exists in neither of the app's engines. The web side landed the whole of Part PALETTE: the modal renders for app users, `command_palette.js` checks the bridge *before* feature-detecting Web Speech, it shows the dictation error instead of only un-pressing the button, and lot scanning / Tap to Pay are emitted as `fishauctions://` result rows (`auctions/command_palette.py`).
 - **Release signing:** wired in CI (keystore from repo secrets; the release workflow refuses to build unsigned). *Local* `flutter build --release` still falls back to debug signing unless you create `android/key.properties` yourself.
 
@@ -861,6 +865,24 @@ JWT auth is bridged into the WebView's Django cookie session:
   URLs ride custom schemes instead — `fishauctions://ar/<slug>` and
   `fishauctions://tap-to-pay`, emitted by `auctions/command_palette.py` and
   gated on the app's User-Agent (dead links in a browser).
+- **A JS bridge handler must declare its parameter as `List<dynamic>`, and may
+  never reach a page's argument through an extension method.**
+  `addJavaScriptHandler`'s `callback` is typed as a bare `Function`, so an
+  inferred lambda parameter is `dynamic` — and a member access on `dynamic` is
+  a *dynamic invocation*, which never finds an extension. `firstOrNull` is
+  `package:collection`'s extension on `Iterable`, not a `List` member, so
+  `callback: (args) => f(args.firstOrNull)` compiled with no import and threw
+  `NoSuchMethodError` the first time a page called it. The plugin turns a
+  throwing handler into a **rejected** `callHandler` promise, which every page
+  here reads as "this app build doesn't have that handler" — so set-winners
+  answered a tap on Listen with "Voice is not available on this phone",
+  instantly and with no microphone prompt, while `voiceGetState` (which ignores
+  its arguments) worked and revealed the button. `pushPromptOffer`/`pushEnable`
+  were broken the same way, silently, which is why the contextual notification
+  offer never appeared from a lot page. Fixed 2026-08-09 with
+  `_WebViewScreenState._firstArg` plus declared parameter types — the
+  declaration is the real guard, since it turns the mistake back into a compile
+  error.
 - **Dictation is a generic bridge, not a palette feature**
   (`dictateGetState`/`dictateStart`/`dictateStop` → `DictationService`, events
   pushed to `window.fishauctionsDictate.onEvent`). Any page can fill a field by
@@ -888,6 +910,16 @@ JWT auth is bridged into the WebView's Django cookie session:
   Android's `onDevice: true` resolves to `createOnDeviceSpeechRecognizer`,
   which fails with no downloaded language pack, and a palette command is
   already waiting on a network call to the model anyway.
+  **It also ends a phrase on a browser-length silence, not an auction one**
+  (`DictationService.dictationPause`, 1.5 s, against set-winners' 3 s —
+  `SpeechSessionOptions.pauseFor`, per session because the two are waiting on
+  different people). The silence window *is* the delay between the user
+  finishing and the microphone going off, and on Android it is felt twice over:
+  it sets the recognizer's own complete-silence timeout *and* the plugin's
+  timer after `onEndOfSpeech`. At 3 s the palette took roughly twice the
+  browser's time to notice, which is what "it doesn't turn the mic off the way
+  the web does" was (fixed 2026-08-09; the earlier fix that day made it stop
+  by itself at all).
   **A phrase that ends without a final transcript still gets reported as one**
   (`_finalizePending`): the recognizer can deliver a run of partials and then
   simply stop, and a final is what the page acts on — Web Speech's own `stop()`

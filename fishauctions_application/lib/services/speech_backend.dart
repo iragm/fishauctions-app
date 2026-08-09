@@ -128,11 +128,29 @@ class SpeechSessionOptions {
     this.localeId = 'en_US',
     this.preferOnDevice = true,
     this.continuous = true,
+    this.pauseFor = const Duration(seconds: 3),
     this.biasPhrases = const [],
   });
 
   final String localeId;
   final bool preferOnDevice;
+
+  /// How long a silence ends an utterance.
+  ///
+  /// **This is the whole of the delay between the speaker stopping and the
+  /// microphone switching off**, so it belongs to the caller rather than the
+  /// backend: it is a different question for an auctioneer than it is for
+  /// someone who has just asked the command palette for something and is
+  /// waiting on the answer. The default is set-winners' — long enough to say
+  /// "twenty five dollars" without being cut in half.
+  ///
+  /// On Android it becomes `EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS`
+  /// *and* the plugin's own post-`onEndOfSpeech` timer, so it is felt twice
+  /// over if the platform doesn't deliver a final result promptly. Three
+  /// seconds for dictation was roughly twice the browser's wait, which is
+  /// exactly what "the app doesn't turn the microphone off the way the web
+  /// does" was.
+  final Duration pauseFor;
 
   /// Whether the session outlives one utterance.
   ///

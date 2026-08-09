@@ -192,6 +192,16 @@ can move without an app release once more than one exists.
   the language tag, partials flag, listen mode or pause changes — **not** when
   `onDevice` does — so the fallback would otherwise inherit
   `EXTRA_PREFER_OFFLINE` and fail identically.
+- **`pauseFor` belongs to the caller, not the backend.** It is the whole of the
+  delay between the speaker stopping and the microphone switching off, and on
+  Android it is spent twice — it sets the recognizer's own complete-silence
+  timeout *and* the plugin's timer after `onEndOfSpeech`. Three seconds is
+  right for an auctioneer, who pauses mid-chant and must not be cut off, and
+  wrong for palette dictation, where the user has finished a sentence and is
+  watching a lit microphone: there it read as the app failing to notice they
+  had stopped, at roughly twice a browser's wait. Hence
+  `SpeechSessionOptions.pauseFor`, 3 s for set-winners and
+  `DictationService.dictationPause` (1.5 s) for dictation.
 - **`SpeechRecognitionError.permanent` is a lie on Android.** The plugin writes
   `speechError.put("permanent", true)` on every error it forwards. A session
   ends on a permission refusal or three consecutive failures — never on that
@@ -243,6 +253,19 @@ invariants:
   at all — its catch prints "Voice is not available on this phone". Anything
   that goes wrong resolves as a state map carrying `error` instead, so the page
   can print what actually happened.
+
+  **Wrapping the handler's body is not enough, and assuming it was cost this
+  feature a month.** `voiceStart` is the one handler that takes an argument,
+  and it read it with `args.firstOrNull` — an extension method on a parameter
+  that infers as `dynamic`, because `addJavaScriptHandler`'s `callback` is
+  typed as a bare `Function`. Dynamic invocations never find extensions, so
+  every tap on Listen threw `NoSuchMethodError` *before* entering the `try`,
+  the promise rejected, and the page printed exactly the sentence this
+  invariant exists to prevent — with no permission prompt, because nothing in
+  the app ran. `voiceGetState` ignores its arguments, so it worked, revealed
+  the button, and made the feature look like it was one tap from working.
+  Declare bridge parameters as `List<dynamic>`; a mistake is then a compile
+  error (fixed 2026-08-09, `_WebViewScreenState._firstArg`).
 
 The microphone is claimed through `Microphone` (`services/microphone.dart`),
 which also owns the one shared recognizer: the command palette dictates through

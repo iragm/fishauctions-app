@@ -77,6 +77,24 @@ void main() {
       expect(backend.lastOptions?.continuous, isFalse);
     });
 
+    // The silence window *is* the delay between the user finishing and the
+    // microphone going off, and set-winners' three seconds — right for an
+    // auctioneer mid-chant — read here as the app not noticing they had
+    // stopped talking. On Android it is felt twice over: it sets the
+    // recognizer's complete-silence timeout and the plugin's own timer after
+    // end-of-speech.
+    test(
+      'ends a phrase on a browser-length silence, not an auction one',
+      () async {
+        await DictationService.instance.start(sink: (_) {});
+        expect(backend.lastOptions?.pauseFor, DictationService.dictationPause);
+        expect(
+          backend.lastOptions!.pauseFor,
+          lessThan(const SpeechSessionOptions().pauseFor),
+        );
+      },
+    );
+
     test('reports what it heard when the recognizer ends itself', () async {
       final events = <Map<String, dynamic>>[];
       await DictationService.instance.start(sink: events.add);

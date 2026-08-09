@@ -308,6 +308,28 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     await _warmVoice();
   }
 
+  /// The first argument of a `callHandler(name, arg)` call, or null when the
+  /// page passed none.
+  ///
+  /// **Never reach for `args.firstOrNull` in a handler, and always declare the
+  /// parameter as `List<dynamic>`.** `addJavaScriptHandler`'s `callback` is
+  /// typed as a bare `Function`, so an inferred lambda parameter is `dynamic`
+  /// and every member access on it becomes a *dynamic* invocation — which
+  /// never finds an extension method. `firstOrNull` is `package:collection`'s
+  /// extension on `Iterable`, not a member of `List`, so the call compiled
+  /// with no import and threw `NoSuchMethodError` the moment a page used it.
+  /// The plugin turns a throwing handler into a **rejected** `callHandler`
+  /// promise, which pages read as "this app build has no such handler": that
+  /// is what made set-winners answer a tap on Listen with "Voice is not
+  /// available on this phone" — instantly, with no microphone prompt — while
+  /// `voiceGetState`, which ignores its arguments, worked fine and revealed
+  /// the button. `pushPromptOffer`/`pushEnable` broke the same way.
+  ///
+  /// Declaring the type is the real guard: a missing member is then a compile
+  /// error instead of a runtime one.
+  static Object? _firstArg(List<dynamic> args) =>
+      args.isEmpty ? null : args.first as Object?;
+
   /// Called once the InAppWebView exists. Registers the JS bridges, seeds the
   /// location cookies from an instant cached fix (if already granted) so
   /// distances render on the first page without delaying it, then kicks off the
@@ -360,8 +382,8 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       )
       ..addJavaScriptHandler(
         handlerName: 'pushPromptOffer',
-        callback: (args) async {
-          final surface = _pushSurfaceFrom(args.firstOrNull);
+        callback: (List<dynamic> args) async {
+          final surface = _pushSurfaceFrom(_firstArg(args));
           final before = _bannerGeneration;
           await _maybeOfferPush(surface, _navGeneration);
           return {'offered': _bannerGeneration != before};
@@ -369,8 +391,8 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       )
       ..addJavaScriptHandler(
         handlerName: 'pushEnable',
-        callback: (args) async {
-          await _enablePushFromWeb(_pushSurfaceFrom(args.firstOrNull));
+        callback: (List<dynamic> args) async {
+          await _enablePushFromWeb(_pushSurfaceFrom(_firstArg(args)));
           return _pushState();
         },
       )
@@ -387,7 +409,7 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       )
       ..addJavaScriptHandler(
         handlerName: 'voiceStart',
-        callback: (args) => _startVoice(args.firstOrNull),
+        callback: (List<dynamic> args) => _startVoice(_firstArg(args)),
       )
       ..addJavaScriptHandler(
         handlerName: 'voiceStop',

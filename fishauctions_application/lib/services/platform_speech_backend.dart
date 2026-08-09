@@ -49,11 +49,6 @@ class PlatformSpeechBackend implements SpeechBackend {
   /// chose rather than mid-word.
   static const Duration _listenFor = Duration(seconds: 50);
 
-  /// How long a pause ends an utterance. Long enough to say "twenty five
-  /// dollars" without being cut in half; short enough that a command lands
-  /// while the operator is still looking at the screen.
-  static const Duration _pauseFor = Duration(seconds: 3);
-
   /// How many failures in a row end a continuous session. One is too few —
   /// a recognizer that hiccups mid-auction should recover by itself — and
   /// unlimited is a microphone that stays lit while nothing works.
@@ -197,8 +192,9 @@ class PlatformSpeechBackend implements SpeechBackend {
     await _listen();
   }
 
-  /// [_pauseFor], nudged by a millisecond once we've fallen back to network
-  /// recognition — a workaround for the plugin, not a tuning knob.
+  /// The session's [SpeechSessionOptions.pauseFor], nudged by a millisecond
+  /// once we've fallen back to network recognition — a workaround for the
+  /// plugin, not a tuning knob.
   ///
   /// Its Android side rebuilds the recognizer `Intent` only when the language
   /// tag, partial-results flag, listen mode or pause length changes;
@@ -209,8 +205,8 @@ class PlatformSpeechBackend implements SpeechBackend {
   /// is the case where the flag gets set at all. Changing the pause forces the
   /// rebuild; a millisecond is not observable anywhere else.
   Duration get _pauseForNow => _onDeviceUnavailable
-      ? _pauseFor + const Duration(milliseconds: 1)
-      : _pauseFor;
+      ? _options.pauseFor + const Duration(milliseconds: 1)
+      : _options.pauseFor;
 
   Future<void> _listen() async {
     if (!_wantListening || _speech.isListening) {

@@ -45,6 +45,18 @@ class DictationService {
   /// fighting over one recognizer.
   static const owner = 'dictation';
 
+  /// How long a silence ends a dictated phrase.
+  ///
+  /// Deliberately shorter than voice set-winners' three seconds, because the
+  /// two are waiting on different people. An auctioneer pauses mid-chant and
+  /// must not be cut off; someone who has just told the palette what they want
+  /// is sitting there watching a lit microphone, and every extra second reads
+  /// as the app failing to notice they stopped talking — which is exactly what
+  /// "it doesn't turn the mic off the way the web does" was. A browser's own
+  /// silence window is around this long, so matching it is also what makes a
+  /// page written against Web Speech feel the same in the app.
+  static const Duration dictationPause = Duration(milliseconds: 1500);
+
   StreamSubscription<SpeechEvent>? _subscription;
   DictationEventSink? _sink;
   bool _listening = false;
@@ -111,7 +123,11 @@ class DictationService {
     // call to the language model, so there is nothing to protect here. Working
     // beats fast.
     await _backend.start(
-      const SpeechSessionOptions(preferOnDevice: false, continuous: false),
+      const SpeechSessionOptions(
+        preferOnDevice: false,
+        continuous: false,
+        pauseFor: dictationPause,
+      ),
     );
     return true;
   }
