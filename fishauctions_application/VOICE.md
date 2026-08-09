@@ -178,6 +178,24 @@ can move without an app release once more than one exists.
   pauseFor: …, cancelOnError: false)`. Prefer on-device: an auction hall's wifi
   is bad, the round trip is the latency the operator feels, and Apple throttles
   server-side recognition per app per hour.
+- **But `onDevice: true` is a request that a phone can accept and then fail.**
+  `SpeechRecognizer.isOnDeviceRecognitionAvailable()` reports whether the
+  *service* exists, not whether the language pack is downloaded, so a phone
+  that passes every availability check answers the first listen with
+  `ERROR_LANGUAGE_UNAVAILABLE` — reported to the user as "no speech
+  recognition available", on a phone whose microphone demonstrably works. The
+  first such failure drops to network recognition for the rest of the process
+  (`PlatformSpeechBackend._onDeviceUnavailable`) and the page says "Listening
+  (online)". Palette dictation never asked for on-device, which is why it was
+  the half that worked. The retry also has to shift `pauseFor` by a
+  millisecond: the plugin rebuilds its Android recognizer `Intent` only when
+  the language tag, partials flag, listen mode or pause changes — **not** when
+  `onDevice` does — so the fallback would otherwise inherit
+  `EXTRA_PREFER_OFFLINE` and fail identically.
+- **`SpeechRecognitionError.permanent` is a lie on Android.** The plugin writes
+  `speechError.put("permanent", true)` on every error it forwards. A session
+  ends on a permission refusal or three consecutive failures — never on that
+  flag.
 - **No gain stage.** The platform recognizers run the same AGC/noise-suppression
   pipeline as the keyboard dictation mic. Feeding them raw is correct; v1's
   ×5 was actively harmful.

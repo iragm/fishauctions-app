@@ -461,6 +461,31 @@ bridge.
   each phrase, iOS caps a request at ~1 min — so `PlatformSpeechBackend` owns a
   restart loop and treats `error_no_match`/`error_speech_timeout` as the normal
   end of a phrase. Naive continuous listening dies at the first silence.
+- **Whether a session outlives one utterance is the backend's call**
+  (`SpeechSessionOptions.continuous`), not the caller's, because **most ways a
+  phrase can end produce no transcript**: silence, a no-match on a cough, the
+  platform just reporting `notListening`. Dictation stopping itself on the
+  final result was therefore stopping on the rarest of them, which is why the
+  palette's microphone stayed lit until it was tapped a second time (fixed
+  2026-08-08). Everything that ends a phrase now goes through
+  `_endOfUtterance`, which re-arms or ends according to that one flag.
+- **On-device recognition is a request, and a phone can accept it and then be
+  unable to do it.** `SpeechRecognizer.isOnDeviceRecognitionAvailable` reports
+  the *service*, not a downloaded language pack, so a phone that passes every
+  availability check answers the first listen with
+  `ERROR_LANGUAGE_UNAVAILABLE`. Voice asks for on-device (an auction hall's
+  wifi is bad) and dictation doesn't — which is exactly why set-winners
+  reported "no speech recognition available" on a phone whose palette
+  microphone worked in the same breath. The first such failure now drops to
+  network recognition for the rest of the process, silently; the page's
+  "Listening (online)" comes from the `on_device` flag that goes with it.
+- **Android's `permanent` flag on an error means nothing** — the plugin writes
+  `speechError.put("permanent", true)` on *every* error it forwards, with no
+  value behind it — so believing it ended a half-hour auction at the first
+  network hiccup. A session now ends on a permission refusal, or after three
+  consecutive failures; the ones in between are retried and not reported,
+  since a failure the next re-arm fixes two seconds later isn't news and
+  putting it on screen resets the button while the microphone is coming back.
 - **No offline fallback for the vocabulary**, deliberately: it never reads
   `OfflineStore`. Offline mode is where a bug means a stuck auction, and it
   stays small.
@@ -678,7 +703,7 @@ that shaped the app:
 - **Proximity check-in backend:** app side (ping service + shell UI) is implemented; `BACKEND_SPEC.md` Part 6 (`exact_location_set`, the three `checkin/*` endpoints, nudge dedupe, history) is not. Feature self-disables on 404 until then.
 - **Recruit volunteers:** entirely web/backend — `BACKEND_SPEC.md` Part 7. No app work at all (notifications ride the Part 2 push pipeline; the accept flow is a web page).
 - ~~Voice set-winners~~ — **both halves are live.** The backend landed the vocabulary endpoint, the `voice` config block, the page (mic button, event receiver, confidence styling) and the tuning telemetry; the app's two launch bugs — a permission dialog on page load, and "not available on this phone" on any phone that hadn't already granted the microphone — were fixed 2026-08-08 (see the Voice section above; the cause was `SpeechToText.initialize()` being used as a capability check).
-- **Command palette in the app (`BACKEND_SPEC.md` Part PALETTE):** the website's palette grew an LLM assist (streamed NDJSON, confirm countdown, clarify options, cancel/report telemetry) and a voice input, but `base.html` renders it only when `not request.is_mobile_app`, so app users still get the plain native palette. App side landed 2026-08-08: the app-bar title now opens the *web* palette when the page has it (`#command-palette-modal`) and falls back to the native one when it doesn't, and `dictateGetState`/`dictateStart`/`dictateStop` expose the phone's recognizer so the palette's mic can work — `window.SpeechRecognition` exists in neither of the app's engines. Backend owes three web-only items: drop the `not request.is_mobile_app` guard (PALETTE-1), point `command_palette.js`'s mic at the bridge (PALETTE-2), and emit the two native rows as `fishauctions://ar/<slug>` / `fishauctions://tap-to-pay` result items (PALETTE-3).
+- ~~Command palette in the app~~ — **both halves are live** (2026-08-08). The app-bar title opens the *web* palette when the page has it (`#command-palette-modal`) and falls back to the native one when it doesn't, and `dictateGetState`/`dictateStart`/`dictateStop` expose the phone's recognizer so the palette's mic works — `window.SpeechRecognition` exists in neither of the app's engines. The web side landed the whole of Part PALETTE: the modal renders for app users, `command_palette.js` checks the bridge *before* feature-detecting Web Speech, it shows the dictation error instead of only un-pressing the button, and lot scanning / Tap to Pay are emitted as `fishauctions://` result rows (`auctions/command_palette.py`).
 - **Release signing:** wired in CI (keystore from repo secrets; the release workflow refuses to build unsigned). *Local* `flutter build --release` still falls back to debug signing unless you create `android/key.properties` yourself.
 
 ## CI/CD
@@ -834,8 +859,8 @@ JWT auth is bridged into the WebView's Django cookie session:
   palette is therefore *not* dead code: it is the offline path, and it goes
   over the JWT API rather than the page. Two rows the server can't express as
   URLs ride custom schemes instead — `fishauctions://ar/<slug>` and
-  `fishauctions://tap-to-pay`. Backend half: `BACKEND_SPEC.md` Part PALETTE
-  (one template line, one JS shim, two rows).
+  `fishauctions://tap-to-pay`, emitted by `auctions/command_palette.py` and
+  gated on the app's User-Agent (dead links in a browser).
 - **Dictation is a generic bridge, not a palette feature**
   (`dictateGetState`/`dictateStart`/`dictateStop` → `DictationService`, events
   pushed to `window.fishauctionsDictate.onEvent`). Any page can fill a field by
@@ -852,16 +877,24 @@ JWT auth is bridged into the WebView's Django cookie session:
   (`_hideWebSpeechApi`, a `UserScript`), making the environment honest so any
   page's detection reaches the right answer with no app-specific knowledge.
   Fixing only the palette's branch order would leave the next page asking the
-  same question the same broken way (that order is still worth fixing —
-  `BACKEND_SPEC.md` PALETTE-2a). Deliberately *not*
+  same question the same broken way — the palette has since put the bridge
+  check first as well, which is belt and braces, not a substitute.
+  Deliberately *not*
   `VoiceCommandService` with the grammar removed: set-winners matches a closed
   vocabulary because a wrong bidder costs money, whereas the palette's whole
   point is that you can say anything and a language model reads it. Dictation
-  ends itself on the final transcript — one sentence, then hand it back — and
-  does **not** force on-device recognition the way set-winners does: Android's
-  `onDevice: true` resolves to `createOnDeviceSpeechRecognizer`, which fails
-  outright with no downloaded language pack instead of falling back, and a
-  palette command is already waiting on a network call to the model.
+  runs a one-shot session (`continuous: false` — one sentence, then hand it
+  back) and does **not** force on-device recognition the way set-winners does:
+  Android's `onDevice: true` resolves to `createOnDeviceSpeechRecognizer`,
+  which fails with no downloaded language pack, and a palette command is
+  already waiting on a network call to the model anyway.
+  **A phrase that ends without a final transcript still gets reported as one**
+  (`_finalizePending`): the recognizer can deliver a run of partials and then
+  simply stop, and a final is what the page acts on — Web Speech's own `stop()`
+  delivers a last result for the same reason, so matching it keeps a page
+  written against the browser working unchanged. Not on an explicit
+  `dictateStop`, though: a user tapping the microphone off is cancelling, not
+  submitting.
 - **Deployment config is re-fetched on resume if it never loaded**
   (`_rewarmConfigIfFailed`). Riverpod caches a `FutureProvider` failure for the
   process, so a cold start with no connectivity — routine at an auction hall —

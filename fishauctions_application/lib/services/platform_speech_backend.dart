@@ -29,6 +29,10 @@ final _log = Logger();
 /// [stop], and end-of-utterance conditions that the platform reports as errors
 /// (`error_no_match`, `error_speech_timeout`) are treated as the normal end of
 /// a phrase rather than as failures.
+///
+/// A caller that wants the opposite — one sentence, then hand it back — asks
+/// for it with [SpeechSessionOptions.continuous]; [_endOfUtterance] is where
+/// the two part company, and its doc says why the choice has to be made here.
 class PlatformSpeechBackend implements SpeechBackend {
   PlatformSpeechBackend({SpeechToText? speech})
     : _speech = speech ?? SpeechToText();
@@ -50,6 +54,11 @@ class PlatformSpeechBackend implements SpeechBackend {
   /// while the operator is still looking at the screen.
   static const Duration _pauseFor = Duration(seconds: 3);
 
+  /// How many failures in a row end a continuous session. One is too few —
+  /// a recognizer that hiccups mid-auction should recover by itself — and
+  /// unlimited is a microphone that stays lit while nothing works.
+  static const int _maxConsecutiveFailures = 3;
+
   final SpeechToText _speech;
   final _events = StreamController<SpeechEvent>.broadcast();
 
@@ -58,6 +67,13 @@ class PlatformSpeechBackend implements SpeechBackend {
   bool _restartScheduled = false;
   bool _needsPermission = false;
   bool _onDevice = false;
+
+  /// Set once on-device recognition has been tried and failed, and never
+  /// cleared: a missing language pack doesn't arrive mid-session, and this
+  /// object is shared by both features, so paying the failed attempt once per
+  /// process is right. Downloading the pack takes effect on the next launch.
+  bool _onDeviceUnavailable = false;
+  int _consecutiveFailures = 0;
   Timer? _restartTimer;
   SpeechSessionOptions _options = const SpeechSessionOptions();
 
@@ -176,16 +192,32 @@ class PlatformSpeechBackend implements SpeechBackend {
       _events.add(SpeechEvent.error(readiness.errorKind, readiness.message));
       return;
     }
+    _consecutiveFailures = 0;
     _wantListening = true;
     await _listen();
   }
+
+  /// [_pauseFor], nudged by a millisecond once we've fallen back to network
+  /// recognition — a workaround for the plugin, not a tuning knob.
+  ///
+  /// Its Android side rebuilds the recognizer `Intent` only when the language
+  /// tag, partial-results flag, listen mode or pause length changes;
+  /// `onDevice` is not on that list, and it is what puts
+  /// `EXTRA_PREFER_OFFLINE` on the intent. So a fallback attempt inherits the
+  /// flag from the on-device attempt that just failed and fails the same way —
+  /// on any phone whose system locale differs from the voice config's, which
+  /// is the case where the flag gets set at all. Changing the pause forces the
+  /// rebuild; a millisecond is not observable anywhere else.
+  Duration get _pauseForNow => _onDeviceUnavailable
+      ? _pauseFor + const Duration(milliseconds: 1)
+      : _pauseFor;
 
   Future<void> _listen() async {
     if (!_wantListening || _speech.isListening) {
       return;
     }
     try {
-      _onDevice = _options.preferOnDevice;
+      _onDevice = _options.preferOnDevice && !_onDeviceUnavailable;
       // Two package defaults are load-bearing and so left unset rather than
       // restated: `partialResults` stays on (the transcript line and the
       // level meter are the only proof the microphone is alive), and
@@ -197,20 +229,29 @@ class PlatformSpeechBackend implements SpeechBackend {
         onSoundLevelChange: _onSoundLevel,
         listenOptions: SpeechListenOptions(
           listenFor: _listenFor,
-          pauseFor: _pauseFor,
+          pauseFor: _pauseForNow,
           localeId: _options.localeId,
-          onDevice: _options.preferOnDevice,
+          onDevice: _onDevice,
           listenMode: ListenMode.dictation,
         ),
       );
       _events.add(const SpeechEvent.state(listening: true));
     } on Object catch (e) {
       _log.w('Speech listen failed: $e');
+      if (!_options.continuous) {
+        _fail(
+          SpeechErrorKind.unknown,
+          'The microphone didn\'t start. Try again.',
+        );
+        return;
+      }
       _restartSoon(after: _errorBackoff);
     }
   }
 
   void _onResult(SpeechRecognitionResult result) {
+    // Words came back, so whatever went wrong before is behind us.
+    _consecutiveFailures = 0;
     final alternates = [
       for (final words in result.alternates)
         if (words.recognizedWords.trim().isNotEmpty)
@@ -242,12 +283,32 @@ class PlatformSpeechBackend implements SpeechBackend {
     if (status == SpeechToText.listeningStatus) {
       return;
     }
-    // 'notListening' / 'done' — the utterance ended. That's normal; re-arm.
-    if (_wantListening) {
-      _restartSoon();
-    } else {
+    // 'notListening' / 'done' — the utterance ended.
+    if (!_wantListening) {
       _events.add(const SpeechEvent.state(listening: false));
+      return;
     }
+    _endOfUtterance();
+  }
+
+  /// The recognizer finished a phrase, however it finished. A continuous
+  /// session re-arms; a one-shot one is over, and says so.
+  ///
+  /// Everything that ends a phrase routes through here rather than each caller
+  /// deciding, because they don't all look alike: a final result, three
+  /// seconds of silence, a no-match on a cough, the platform simply reporting
+  /// `notListening`. Only the first of those produces a transcript, so a
+  /// caller trying to close its own session on the transcript alone stays open
+  /// on the rest.
+  void _endOfUtterance() {
+    if (_options.continuous) {
+      _restartSoon();
+      return;
+    }
+    _wantListening = false;
+    _restartTimer?.cancel();
+    _restartScheduled = false;
+    _events.add(const SpeechEvent.state(listening: false));
   }
 
   void _onError(SpeechRecognitionError error) {
@@ -262,7 +323,7 @@ class PlatformSpeechBackend implements SpeechBackend {
     };
     if (benign.contains(error.errorMsg)) {
       if (_wantListening) {
-        _restartSoon();
+        _endOfUtterance();
       }
       return;
     }
@@ -274,14 +335,54 @@ class PlatformSpeechBackend implements SpeechBackend {
       'error_language_unavailable' => SpeechErrorKind.unavailable,
       _ => SpeechErrorKind.unknown,
     };
-    _log.w('Speech error: ${error.errorMsg} (permanent: ${error.permanent})');
-    if (kind == SpeechErrorKind.permission || error.permanent) {
-      _wantListening = false;
-      _events.add(SpeechEvent.error(kind, _messageFor(kind, error.errorMsg)));
+    // `permanent` is deliberately not consulted. Android's plugin sets it on
+    // *every* error it forwards — `speechError.put("permanent", true)`, with
+    // nothing behind the value — so trusting it ends the session on the first
+    // hiccup of a half-hour auction. What actually can't be retried is decided
+    // below, from the error itself.
+    _log.w('Speech error: ${error.errorMsg}');
+    if (kind == SpeechErrorKind.permission) {
+      _fail(kind, _messageFor(kind, error.errorMsg));
       return;
     }
-    _events.add(SpeechEvent.error(kind, _messageFor(kind, error.errorMsg)));
+    // The one failure with a known cure, and the reason voice set-winners
+    // reported "no speech recognition available" on a phone whose microphone
+    // demonstrably worked: on-device recognition was asked for (an auction
+    // hall's wifi is bad, so it's the default) and this phone has the
+    // recognition service without the downloaded language pack. Android
+    // answers that with ERROR_LANGUAGE_UNAVAILABLE — and the plugin's own
+    // availability check passes, because the *service* is there. Network
+    // recognition works on the same phone in the same breath, which is why
+    // palette dictation was fine while set-winners was not.
+    if (_onDevice && !_onDeviceUnavailable) {
+      _onDeviceUnavailable = true;
+      _onDevice = false;
+      _log.i(
+        'On-device recognition failed (${error.errorMsg}); '
+        'using network recognition from here on',
+      );
+      _restartSoon();
+      return;
+    }
+    _consecutiveFailures++;
+    if (!_options.continuous ||
+        _consecutiveFailures >= _maxConsecutiveFailures) {
+      _fail(kind, _messageFor(kind, error.errorMsg));
+      return;
+    }
+    // Not reported to the page: a transient failure that the next re-arm fixes
+    // two seconds later isn't news, and putting it on screen means the button
+    // resets itself while the microphone is in fact still coming back.
     _restartSoon(after: _errorBackoff);
+  }
+
+  /// End the session and tell the caller why. The only exit that carries a
+  /// message — everything else is an utterance ending, which is not a failure.
+  void _fail(SpeechErrorKind kind, String message) {
+    _wantListening = false;
+    _restartTimer?.cancel();
+    _restartScheduled = false;
+    _events.add(SpeechEvent.error(kind, message));
   }
 
   String _messageFor(SpeechErrorKind kind, String raw) => switch (kind) {

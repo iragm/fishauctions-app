@@ -49,6 +49,12 @@ class DictationService {
   DictationEventSink? _sink;
   bool _listening = false;
 
+  /// The last thing heard but not yet reported as final, and whether a final
+  /// has gone out. Together they make sure a phrase the recognizer never
+  /// promoted reaches the page anyway — see [_finalizePending].
+  String _pending = '';
+  bool _sentFinal = false;
+
   bool get isListening => _listening;
 
   SpeechBackend get _backend => Microphone.instance.backend;
@@ -86,11 +92,15 @@ class DictationService {
     await _subscription?.cancel();
     _subscription = _backend.events.listen(_onSpeechEvent);
     _listening = true;
-    // Continuous is wrong here and right for set-winners: an auctioneer talks
-    // for half an hour, but a palette command is one sentence and the user is
-    // waiting for it to be acted on. The backend's restart loop keeps the
-    // session alive across the platform's per-utterance API; a final result is
-    // what ends this one, in [_onSpeechEvent].
+    _pending = '';
+    _sentFinal = false;
+    // `continuous: false` is wrong for set-winners and right here: an
+    // auctioneer talks for half an hour, but a palette command is one sentence
+    // and the user is waiting for it to be acted on. The backend ends the
+    // session on whatever ends the phrase, which is the part that has to live
+    // down there — most of the ways a phrase ends produce no transcript at
+    // all, so stopping ourselves on the final result left the microphone lit
+    // on every silence and no-match.
     //
     // `preferOnDevice: false` is the one place this deliberately differs from
     // voice set-winners, which forces on-device because an auction hall's wifi
@@ -100,7 +110,9 @@ class DictationService {
     // than falling back — and a palette command is already waiting on a network
     // call to the language model, so there is nothing to protect here. Working
     // beats fast.
-    await _backend.start(const SpeechSessionOptions(preferOnDevice: false));
+    await _backend.start(
+      const SpeechSessionOptions(preferOnDevice: false, continuous: false),
+    );
     return true;
   }
 
@@ -116,13 +128,29 @@ class DictationService {
   void _onSpeechEvent(SpeechEvent event) {
     switch (event.type) {
       case SpeechEventType.state:
-        _listening = event.listening;
-        _emit({'type': 'state', 'listening': event.listening});
+        if (event.listening) {
+          _listening = true;
+          _emit({'type': 'state', 'listening': true});
+          return;
+        }
+        // A stop the *recognizer* decided on — the phrase ended. Ignored when
+        // we're already stopping, because [stop] clears `_listening` before
+        // the backend's own event can arrive and it emits the state itself;
+        // without that guard a cancelled session would finalize on its way
+        // out and submit the command the user was cancelling.
+        if (!_listening) {
+          return;
+        }
+        _finalizePending();
+        unawaited(stop());
       case SpeechEventType.level:
         _emit({'type': 'level', 'level': event.level});
       case SpeechEventType.partial:
+        _pending = event.bestText;
         _emit({'type': 'transcript', 'text': event.bestText, 'partial': true});
       case SpeechEventType.result:
+        _sentFinal = true;
+        _pending = '';
         _emit({'type': 'transcript', 'text': event.bestText, 'partial': false});
         // One sentence, then hand it back. Leaving the microphone open after a
         // command has been submitted means the answer being read out, or the
@@ -138,6 +166,26 @@ class DictationService {
     }
   }
 
+  /// Report what was heard as final when the session ended without the
+  /// recognizer ever saying so.
+  ///
+  /// It ends that way more often than it looks: the platform can deliver a
+  /// run of partials and then simply stop, and the page is waiting on a final
+  /// transcript to act on — that's what runs the command. Web Speech's own
+  /// `stop()` delivers a last result for exactly this reason, so matching it
+  /// keeps a page written against the browser working unchanged. Only ever on
+  /// the recognizer's own ending: a user who taps the microphone off is
+  /// cancelling, not submitting.
+  void _finalizePending() {
+    if (_sentFinal || _pending.isEmpty) {
+      return;
+    }
+    _sentFinal = true;
+    final text = _pending;
+    _pending = '';
+    _emit({'type': 'transcript', 'text': text, 'partial': false});
+  }
+
   void _emit(Map<String, dynamic> event) {
     try {
       _sink?.call(event);
@@ -151,5 +199,7 @@ class DictationService {
     _listening = false;
     _sink = null;
     _subscription = null;
+    _pending = '';
+    _sentFinal = false;
   }
 }

@@ -127,11 +127,29 @@ class SpeechSessionOptions {
   const SpeechSessionOptions({
     this.localeId = 'en_US',
     this.preferOnDevice = true,
+    this.continuous = true,
     this.biasPhrases = const [],
   });
 
   final String localeId;
   final bool preferOnDevice;
+
+  /// Whether the session outlives one utterance.
+  ///
+  /// True for voice set-winners: an auctioneer talks for half an hour and the
+  /// microphone has to survive every pause in it. False for dictation, which
+  /// is one sentence the page then acts on — the same contract as the Web
+  /// Speech API's `continuous = false`, so a page written against the browser
+  /// behaves the same way here.
+  ///
+  /// **A continuous backend can't be made one-shot from the outside**, which
+  /// is why this is an option rather than something the caller arranges. Only
+  /// the backend sees every way an utterance can end, and most of them produce
+  /// no final result at all — silence, a no-match, the platform simply
+  /// reporting `notListening`. A caller that stops on the final result stays
+  /// listening forever on all the others, which is exactly how the command
+  /// palette's microphone ended up stuck on until it was tapped a second time.
+  final bool continuous;
 
   /// The identifiers that exist in this auction. Not used by the default
   /// backend — `speech_to_text` exposes neither iOS `contextualStrings` nor

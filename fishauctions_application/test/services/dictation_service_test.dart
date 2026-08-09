@@ -69,6 +69,50 @@ void main() {
       expect(backend.lastOptions?.preferOnDevice, isFalse);
     });
 
+    // The palette's microphone stayed lit until it was tapped a second time,
+    // because most of the ways a phrase ends produce no final transcript to
+    // stop on. Ending the session is the recognizer's job, not this one's.
+    test('asks for a session that ends with the phrase', () async {
+      await DictationService.instance.start(sink: (_) {});
+      expect(backend.lastOptions?.continuous, isFalse);
+    });
+
+    test('reports what it heard when the recognizer ends itself', () async {
+      final events = <Map<String, dynamic>>[];
+      await DictationService.instance.start(sink: events.add);
+
+      backend
+        ..emit(const SpeechEvent.partial([SpeechHypothesis('lots for bob')]))
+        ..emit(const SpeechEvent.state(listening: false));
+      await Future<void>.delayed(Duration.zero);
+
+      // The page acts on a final transcript — that's what runs the command —
+      // and a run of partials followed by silence is a real way for a phrase
+      // to end. Web Speech's own stop() delivers a last result for exactly
+      // this reason.
+      final transcripts = events.where((e) => e['type'] == 'transcript');
+      expect(transcripts.last['text'], 'lots for bob');
+      expect(transcripts.last['partial'], isFalse);
+      expect(events.last['listening'], isFalse);
+      expect(DictationService.instance.isListening, isFalse);
+    });
+
+    test('a cancelled session submits nothing', () async {
+      final events = <Map<String, dynamic>>[];
+      await DictationService.instance.start(sink: events.add);
+      backend.emit(const SpeechEvent.partial([SpeechHypothesis('lots for')]));
+      await Future<void>.delayed(Duration.zero);
+
+      // Tapping the microphone off is cancelling, not submitting.
+      await DictationService.instance.stop();
+      await Future<void>.delayed(Duration.zero);
+
+      final finals = events.where(
+        (e) => e['type'] == 'transcript' && e['partial'] == false,
+      );
+      expect(finals, isEmpty);
+    });
+
     test('a refusal comes back as an error event', () async {
       backend.readiness = SpeechReadiness.deniedForever;
       final events = <Map<String, dynamic>>[];
