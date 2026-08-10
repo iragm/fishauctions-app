@@ -14,13 +14,13 @@ dependencies:
   crypto: ^3.0.7
   cupertino_icons: ^1.0.8
   # HTTP & Networking
-  dio: ^5.10.0
+  dio: ^5.11.0
   # Push notifications (FCM). The Firebase *client* config is delivered at
   # runtime via /api/mobile/config/ and passed to Firebase.initializeApp — no
   # bundled google-services.json, so one binary still serves any deployment
   # (see PushService + PUSH.md). No google-services Gradle plugin is applied.
-  firebase_core: ^4.12.1
-  firebase_messaging: ^16.4.3
+  firebase_core: ^4.13.0
+  firebase_messaging: ^16.5.0
   flutter:
     sdk: flutter
   # Bluetooth Low Energy — thermal label printing on iOS + Android. BLE (not
@@ -83,7 +83,7 @@ dependencies:
   # NSMotionUsageDescription on iOS.
   sensors_plus: ^7.1.0
   # Share sheet for downloaded CSV/PDF exports (save / open / share).
-  share_plus: ^13.2.1
+  share_plus: ^13.3.0
   # Square Mobile Payments SDK — in-person / Tap to Pay.
   # Requires Android minSdk 28 (set in android/app/build.gradle.kts) and the
   # public Square Maven repo (no token); iOS 16+ (set in the Xcode project) and
@@ -97,7 +97,7 @@ dependencies:
   # only through SpeechBackend: phrase biasing and cloud streaming are the
   # named upgrade paths, and neither is expressible through this package.
   speech_to_text: ^7.4.0
-  square_mobile_payments_sdk: ^2026.7.2
+  square_mobile_payments_sdk: ^2026.8.0
   # Open external / target=_blank links (connect banners, map directions, Google
   # Wallet) in the system browser instead of the in-app WebView.
   url_launcher: ^6.3.2
@@ -111,7 +111,7 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   freezed: ^3.2.5
-  json_serializable: ^6.14.0
+  json_serializable: ^6.14.1
   riverpod_generator: ^4.0.4
 
 dependency_overrides:
