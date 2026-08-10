@@ -1,6 +1,5 @@
 import 'dart:io' show Platform;
 
-import 'package:flutter_facebook_auth/flutter_facebook_auth.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:sign_in_with_apple/sign_in_with_apple.dart';
 
@@ -21,15 +20,21 @@ class SocialSignInUnavailable implements Exception {
 /// sites and their tests keep compiling.
 typedef GoogleSignInUnavailable = SocialSignInUnavailable;
 
-/// Runs the native sign-in flow for Google, Apple and Facebook, and hands the
-/// resulting provider credential to the caller.
+/// Runs the native sign-in flow for Google and Apple, and hands the resulting
+/// provider credential to the caller.
 ///
 /// **Why native rather than the website's buttons.** Google blocks its OAuth
 /// and One Tap flows inside embedded WebViews, so the app can't reuse the web
 /// buttons; and on iOS, Apple's App Review guideline 4.8 wants Sign in with
-/// Apple offered natively alongside them. The same three providers are also
-/// configured on the web through django-allauth, and both paths converge on the
-/// same `SocialAccount` rows because the app sends allauth's own provider ids.
+/// Apple offered natively alongside them. Both providers are also configured on
+/// the web through django-allauth, and both paths converge on the same
+/// `SocialAccount` rows because the app sends allauth's own provider ids.
+///
+/// **Facebook was removed 2026-08-10** and shouldn't come back without a
+/// reason that answers this: Facebook doesn't verify the email addresses it
+/// hands over, and an unverified address can't be trusted to identify an
+/// account — which meant every Facebook sign-in either landed in the web
+/// continuation flow or risked attaching a session to the wrong user.
 ///
 /// This class does exactly one job: obtain a credential. It never decides who
 /// the user is, never creates accounts, and never inspects an email — the
@@ -40,7 +45,6 @@ class SocialAuthService {
 
   final _google = GoogleSignIn.instance;
   bool _googleInitialized = false;
-  bool _facebookInitialized = false;
 
   /// Which providers this deployment + device can actually offer, in the order
   /// they should be shown.
@@ -49,7 +53,7 @@ class SocialAuthService {
   /// privacy-preserving option wherever a third-party login sets up the primary
   /// account, and Apple's Human Interface Guidelines expect its button to be
   /// presented at least as prominently as the others — putting it below Google
-  /// and Facebook is a documented review flag, not just a style choice.
+  /// is a documented review flag, not just a style choice.
   Future<List<SocialProvider>> availableProviders(AppConfig? config) async {
     if (config == null) {
       return const [];
@@ -60,9 +64,6 @@ class SocialAuthService {
     }
     if (config.googleServerClientId.isNotEmpty) {
       providers.add(SocialProvider.google);
-    }
-    if (config.facebookAppId.isNotEmpty) {
-      providers.add(SocialProvider.facebook);
     }
     return providers;
   }
@@ -89,7 +90,6 @@ class SocialAuthService {
       switch (provider) {
         SocialProvider.google => _signInWithGoogle(),
         SocialProvider.apple => _signInWithApple(),
-        SocialProvider.facebook => _signInWithFacebook(),
       };
 
   // ── Google ────────────────────────────────────────────────────────────────
@@ -189,99 +189,6 @@ class SocialAuthService {
     );
   }
 
-  // ── Facebook ──────────────────────────────────────────────────────────────
-
-  Future<SocialCredential?> _signInWithFacebook() async {
-    await _ensureFacebookInitialized();
-    // Limited Login on iOS: returns a nonce-bound OIDC ID token and — crucially
-    // — does **not** touch the advertising identifier, so it raises no App
-    // Tracking Transparency prompt. Apple treats a login that triggers ATT for
-    // no reason as a dark pattern, and we have no use for ad attribution.
-    //
-    // Android's Facebook SDK has no Limited Login, so it takes the classic
-    // path and returns an access token the backend verifies against Facebook's
-    // `debug_token` endpoint instead.
-    final useLimited = Platform.isIOS;
-    final nonce = SignInNonce.generate();
-    final LoginResult result;
-    try {
-      result = await FacebookAuth.instance.login(
-        // Same as the plugin's default, but stated because it's load-bearing:
-        // dropping `email` is what turns every Facebook sign-in into the
-        // no-email continuation flow.
-        // ignore: avoid_redundant_argument_values
-        permissions: const ['email', 'public_profile'],
-        loginTracking: useLimited
-            ? LoginTracking.limited
-            : LoginTracking.enabled,
-        // Facebook requires a nonce for limited login and rejects the request
-        // without one; it's meaningless on the classic path.
-        nonce: useLimited ? nonce.hashed : null,
-      );
-    } on Object catch (e) {
-      throw SocialSignInUnavailable('Facebook sign-in failed: $e');
-    }
-    switch (result.status) {
-      case LoginStatus.cancelled:
-        return null;
-      case LoginStatus.failed:
-        throw SocialSignInUnavailable(
-          'Facebook sign-in failed: ${result.message ?? 'unknown error'}',
-        );
-      case LoginStatus.operationInProgress:
-        // A previous attempt's dialog is still up; treat as a cancel rather
-        // than stacking a second prompt on top of it.
-        return null;
-      case LoginStatus.success:
-        break;
-    }
-    final token = result.accessToken;
-    if (token == null) {
-      throw SocialSignInUnavailable(
-        'Facebook did not return a token. Please try again.',
-      );
-    }
-    return switch (token) {
-      // The limited token's `tokenString` *is* the OIDC ID token.
-      LimitedToken() => SocialCredential(
-        provider: SocialProvider.facebook,
-        idToken: token.tokenString,
-        rawNonce: nonce.raw,
-        // Nullable, and routinely null: a Facebook account can have no email,
-        // or the user can decline the email permission. The backend decides
-        // what to do about that (see BACKEND_SPEC Part SOCIAL) — the app just
-        // reports what it got.
-        email: token.userEmail,
-      ),
-      ClassicToken() => SocialCredential(
-        provider: SocialProvider.facebook,
-        accessToken: token.tokenString,
-      ),
-      _ => throw SocialSignInUnavailable(
-        'Facebook returned an unrecognized token type.',
-      ),
-    };
-  }
-
-  Future<void> _ensureFacebookInitialized() async {
-    if (_facebookInitialized) {
-      return;
-    }
-    final appId = (await _config()).facebookAppId;
-    if (appId.isEmpty) {
-      throw SocialSignInUnavailable(
-        'Facebook sign-in is not configured for this deployment.',
-      );
-    }
-    // Nothing to initialize on iOS/Android — the SDK reads its app id from
-    // Info.plist / AndroidManifest at launch, which is why the id is also a
-    // build-time value there (see BACKEND_SPEC Part SOCIAL on why Facebook,
-    // unlike Google and Square, can't be fully deployment-configured). The
-    // config check above is what keeps a deployment that hasn't set Facebook up
-    // from showing a button that would fail.
-    _facebookInitialized = true;
-  }
-
   // ── Shared ────────────────────────────────────────────────────────────────
 
   Future<AppConfig> _config() async {
@@ -309,11 +216,6 @@ class SocialAuthService {
       }
     } on Object {
       // Sign-out is best-effort; ignore SDK errors.
-    }
-    try {
-      await FacebookAuth.instance.logOut();
-    } on Object {
-      // Ditto — and this also throws harmlessly when Facebook was never used.
     }
   }
 }

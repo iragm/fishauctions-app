@@ -37,7 +37,6 @@ dependencies:
   # build.gradle uses getDefaultProguardFile('proguard-android.txt'), which
   # AGP 9 (this project's toolchain) rejects with a hard error; 6.2.0-beta.3
   # switches to 'proguard-android-optimize.txt'. Move to 6.2.0 stable once out.
-  flutter_facebook_auth: ^7.2.0
   flutter_inappwebview: 6.2.0-beta.3
   # State management
   flutter_riverpod: ^3.3.2

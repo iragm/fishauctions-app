@@ -127,47 +127,27 @@
 				<string>com.googleusercontent.apps.1028419796918-0glbi1lhnfk32pg60v57lmv0qc6nv90g</string>
 			</array>
 		</dict>
-		<dict>
-			<key>CFBundleTypeRole</key>
-			<string>Editor</string>
-			<key>CFBundleURLSchemes</key>
-			<array>
-				<string>fb$(FACEBOOK_APP_ID)</string>
-			</array>
-		</dict>
-	</array>
-	<!-- Facebook Login. These are build-time values, which makes Facebook the
-	     one provider that breaks the app's "one binary serves any deployment"
-	     rule: the SDK reads its app id here at launch and registers an
-	     `fb<app-id>` URL scheme, neither of which can come from
-	     /api/mobile/config/ the way the Google client id and Square app id do.
-	     A fork with its own Facebook app therefore needs its own build.
+		<!-- No Facebook entry here, and nothing should add one back: Facebook
+		     login was removed outright (2026-08-10), because Facebook doesn't
+		     verify the email addresses it hands over and an unverified address
+		     can't be trusted to identify an account.
 
-	     Both values are substituted from Xcode build settings — set them in
-	     ios/Flutter/Debug.xcconfig and Release.xcconfig (or inject them in CI),
-	     never by pasting them here, so the numeric id isn't duplicated across
-	     three places. Leaving them empty is safe: /api/mobile/config/ decides
-	     whether the button is offered at all, so an unset id simply means no
-	     Facebook button.
+		     It's called out rather than just deleted because the empty version
+		     of it is what rejected version 2026.8.10 build 11. Plist
+		     substitution has no conditional, so `fb$(FACEBOOK_APP_ID)` with an
+		     unset id expanded to the literal, reserved scheme `fb`:
 
-	     The client token is NOT a secret (it ships in every build by design, the
-	     same way the Square application id does); the app *secret* stays on the
-	     Django side and is never in the app. -->
-	<key>FacebookAppID</key>
-	<string>$(FACEBOOK_APP_ID)</string>
-	<key>FacebookClientToken</key>
-	<string>$(FACEBOOK_CLIENT_TOKEN)</string>
-	<key>FacebookDisplayName</key>
-	<string>auction.fish</string>
-	<!-- Lets the SDK hand off to the Facebook app when it's installed, instead
-	     of always falling back to a web sheet. iOS requires every scheme an app
-	     probes with canOpenURL to be declared here. -->
-	<key>LSApplicationQueriesSchemes</key>
-	<array>
-		<string>fbapi</string>
-		<string>fb-messenger-share-api</string>
-		<string>fbauth2</string>
-		<string>fbshareextension</string>
+		         ITMS-90155: The following URL schemes found in your app are
+		         disallowed: [fb]
+
+		     Worth knowing how that failure presents, since it isn't obvious: the
+		     upload SUCCEEDS and CI goes green, then the binary is rejected
+		     during processing and the news arrives by email. Meanwhile the
+		     workflow's wait-for-processing step keeps polling for a VALID state
+		     that will never come, outlives its 20-minute App Store Connect JWT,
+		     and fails with a thoroughly misleading `401 NOT_AUTHORIZED`. A 401
+		     from that step means "go read the ITMS email", not "the API key is
+		     bad". -->
 	</array>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>

@@ -31,7 +31,7 @@ class AuthNotifier extends AsyncNotifier<AppUser?> {
     );
   }
 
-  /// Signs in with a native social credential (Google, Apple or Facebook).
+  /// Signs in with a native social credential (Google or Apple).
   ///
   /// Returns the backend's answer so the caller can act on the one outcome this
   /// notifier can't represent: a sign-in that needs the user to finish a web

@@ -55,7 +55,7 @@ class _OfflineNotice extends StatelessWidget {
 /// screens) until a sign-in succeeds, at which point the router redirect
 /// moves them on; this screen never navigates on success itself.
 ///
-/// The social buttons (Apple, Google, Facebook) and email/username + password
+/// The social buttons (Apple, Google) and email/username + password
 /// all produce the JWT the native features use; the WebView shell then bridges
 /// that session into its Django cookie session. The social buttons lead because
 /// they're the one-tap paths, and each renders only when the deployment has
@@ -64,10 +64,10 @@ class _OfflineNotice extends StatelessWidget {
 /// guidelines require (see `SocialAuthService.availableProviders`).
 ///
 /// A social sign-in doesn't always finish here. When the provider gives no
-/// usable email — routine with Facebook, and the reason Apple's private-relay
-/// addresses matter — the backend returns a web continuation the user completes
-/// in the restricted allauth WebView, after which the app swaps a pending token
-/// for the session. See `_finishInWebFlow` and `BACKEND_SPEC.md` Part SOCIAL.
+/// usable email, or one allauth still needs to confirm or link, the backend
+/// returns a web continuation the user completes in the restricted allauth
+/// WebView, after which the app swaps a pending token for the session. See
+/// `_finishInWebFlow` and `BACKEND_SPEC.md` Part SOCIAL.
 class LoginScreen extends ConsumerStatefulWidget {
   const LoginScreen({super.key});
 
@@ -174,8 +174,8 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     await _finishInWebFlow(result, provider);
   }
 
-  /// The provider gave us an identity but not enough to finish: no email at all
-  /// (routine with Facebook), or one that hasn't been verified.
+  /// The provider gave us an identity but not enough to finish: no email at
+  /// all, or one that hasn't been verified or is already taken.
   ///
   /// allauth already implements collecting and confirming an address properly —
   /// including the confirmation email — so the user finishes there, in the same

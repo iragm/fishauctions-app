@@ -157,8 +157,8 @@ class _AllauthWebScreenState extends ConsumerState<AllauthWebScreen> {
       '/confirm-email/',
       '/email/',
       // allauth's socialaccount signup form — where it asks for the email a
-      // provider didn't supply (routine with Facebook) — and the page it
-      // bounces to when the chosen address is already taken.
+      // provider didn't supply — and the page it bounces to when the chosen
+      // address is already taken.
       '/social/signup/',
       '/social/connections/',
     };

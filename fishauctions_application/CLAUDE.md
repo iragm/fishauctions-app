@@ -848,27 +848,43 @@ The app has **no anonymous browsing**. The router (`lib/config/router.dart`)
 traps signed-out users on three gate screens until a sign-in succeeds:
 
 - `/login` — native login: the social buttons on top, then the
-  username/password form. **Three providers — Apple, Google, Facebook** —
-  each rendering only when `/api/mobile/config/` says the deployment configured
-  it (`apple_sign_in_enabled`, `google_server_client_id`, `facebook_app_id`);
-  unconfigured ones simply aren't offered (no "not configured" error). All
-  three are also on the website through allauth, and the app sends **allauth's
-  own provider ids**, so native and web sign-ins land on the same
-  `SocialAccount` row with no mapping table. Backend contract:
-  `BACKEND_SPEC.md` Part SOCIAL. Google specifics: `GOOGLE_SIGNIN.md`.
+  username/password form. **Two providers — Apple and Google** — each
+  rendering only when `/api/mobile/config/` says the deployment configured it
+  (`apple_sign_in_enabled`, `google_server_client_id`); unconfigured ones
+  simply aren't offered (no "not configured" error). Both are also on the
+  website through allauth, and the app sends **allauth's own provider ids**, so
+  native and web sign-ins land on the same `SocialAccount` row with no mapping
+  table. Backend contract: `BACKEND_SPEC.md` Part SOCIAL. Google specifics:
+  `GOOGLE_SIGNIN.md`.
+  - **Facebook was removed on 2026-08-10** — the SDK, the buttons, the plist
+    and manifest entries, `facebookAppId`, and `SocialCredential.accessToken`
+    (Facebook classic was the only thing that ever set it). It doesn't verify
+    the email addresses it hands over, and an unverified address can't identify
+    an account, so every Facebook sign-in either fell into the web continuation
+    or risked attaching a session to the wrong user. The app now ignores
+    `facebook_app_id` even when a deployment still serves it for the website.
+    **Its parting shot is worth knowing**: `fb$(FACEBOOK_APP_ID)` in
+    `Info.plist` expanded to the literal reserved scheme `fb` when the id was
+    empty, and App Store Connect rejected version 2026.8.10 build 11 with
+    `ITMS-90155 … disallowed: [fb]`. That rejection arrives **by email after a
+    green CI run** — the upload succeeds, the binary is rejected during
+    processing, and `ios-release.yml`'s wait-for-processing step then polls a
+    state that never comes until its 20-minute App Store Connect JWT expires
+    and reports `401 NOT_AUTHORIZED`. **A 401 from that step is not a
+    credentials problem**; read the ITMS email first.
   - **Apple leads on iOS, and that ordering is a requirement, not taste.**
     Guideline 4.8 makes Sign in with Apple mandatory once any third-party login
     sets up the primary account, and its HIG expects the button at least as
     prominent as the others. `SocialAuthService.availableProviders` owns the
     order.
   - **Each button is the vendor's own artwork or spec** — Google's unmodified
-    PNGs (`assets/google/`), Apple's from `sign_in_with_apple`, Facebook's blue
-    with an asset slot for their logo (`facebookLogoAsset`). Never restyle any
-    of them into a house look, and never draw a substitute mark.
-  - **A social sign-in doesn't always finish natively.** Facebook often returns
-    no email at all (the account may have none, or the user declines the
-    permission), and an unverified address can't be trusted to identify an
-    account. The backend then returns a `continue_url` + `pending_token`; the
+    PNGs (`assets/google/`), Apple's from `sign_in_with_apple`. Never restyle
+    either into a house look, and never draw a substitute mark.
+  - **A social sign-in doesn't always finish natively.** Rarer now that
+    Facebook is gone — its unverified emails were the common trigger — but
+    Google and Apple still land here whenever allauth needs to confirm an
+    address or link one that already belongs to another account.
+    The backend then returns a `continue_url` + `pending_token`; the
     app runs allauth's own flow in the restricted WebView (`/social-continue`)
     and exchanges the token afterwards. Re-implementing email collection and
     confirmation natively would mean duplicating allauth's rate limiting,
@@ -878,14 +894,14 @@ traps signed-out users on three gate screens until a sign-in succeeds:
     authorization, never again. The app forwards them so the backend can
     persist them; they're hints, never identity (that's the verified token's
     `sub`).
-  - **Apple + Facebook Limited Login are nonce-bound**: the app sends
-    SHA-256(nonce) to the provider and the raw value to the backend, which
-    must check them. Without it a captured ID token is a working credential.
-  - **Facebook is the one thing that isn't deployment-configurable.** Its SDKs
-    read the app id from `Info.plist`/`AndroidManifest.xml` at launch and
-    register an `fb<app-id>` URL scheme, so it's compiled in too
-    (`ios/Flutter/*.xcconfig`, `android/.../res/values/facebook.xml` — both
-    empty until filled). A fork with its own Facebook app needs its own build.
+  - **Sign in with Apple is nonce-bound**: the app sends SHA-256(nonce) to
+    Apple and the raw value to the backend, which must check them. Without it a
+    captured ID token is a working credential.
+  - **Every provider is now deployment-configurable**, which wasn't true while
+    Facebook was in: its SDKs read the app id from
+    `Info.plist`/`AndroidManifest.xml` at launch, so it had to be compiled in
+    and a fork needed its own build. Nothing about sign-in is build-time any
+    more except the iOS `GIDClientID` and its reversed URL scheme.
 - `/signup`, `/password-reset` — the django-allauth web flows hosted in a
   restricted WebView (`AllauthWebScreen`). **Allauth is mounted at the site
   root** (`/signup/`, `/password/reset/`, `/login/`, `/logout/` — not under

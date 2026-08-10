@@ -1,17 +1,1 @@
 #include "Generated.xcconfig"
-
-// Facebook Login. Substituted into Info.plist (FacebookAppID,
-// FacebookClientToken, and the fb<app-id> URL scheme).
-//
-// Fill these in from developers.facebook.com → your app → Settings → Basic
-// (App ID) and Settings → Advanced (Client Token). Neither is a secret — both
-// ship in every build by design, exactly like the Square application id — but
-// the app *secret* belongs only on the Django side and must never appear here.
-//
-// Leaving them empty is safe and is the deliberate default: the Facebook button
-// is gated on `facebook_app_id` from /api/mobile/config/, so an unset id here
-// just means the app never offers Facebook. Do NOT set one without the other,
-// and make sure the id matches whatever the backend serves — a mismatch fails
-// at login time with an opaque SDK error.
-FACEBOOK_APP_ID=
-FACEBOOK_CLIENT_TOKEN=

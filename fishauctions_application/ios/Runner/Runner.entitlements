@@ -18,9 +18,11 @@
 	<string>production</string>
 
 	<!-- Sign in with Apple. Required by App Review guideline 4.8 because the app
-	     also offers Google and Facebook login: wherever a third-party service
-	     sets up the primary account, an equivalent privacy-preserving option
-	     must be offered too.
+	     also offers Google login: wherever a third-party service sets up the
+	     primary account, an equivalent privacy-preserving option must be
+	     offered too. (Facebook login was offered here as well until 2026-08-10;
+	     dropping it changes nothing for 4.8, since Google alone still triggers
+	     the requirement.)
 
 	     Unlike the Tap to Pay entitlement above, this one is self-serve — toggle
 	     "Sign In with Apple" on the App ID in Certificates, Identifiers &

@@ -13,7 +13,6 @@ void main() {
       // row. Renaming any of them silently forks a user's accounts in two.
       expect(SocialProvider.apple.id, 'apple');
       expect(SocialProvider.google.id, 'google');
-      expect(SocialProvider.facebook.id, 'facebook');
     });
 
     test('round-trips through fromId', () {
@@ -58,18 +57,6 @@ void main() {
       expect(json['nonce'], 'raw');
       expect(json['first_name'], 'Ada');
       expect(json['last_name'], 'Lovelace');
-    });
-
-    test('Facebook classic sends an access token, not an id token', () {
-      final json = const SocialCredential(
-        provider: SocialProvider.facebook,
-        accessToken: 'fbtok',
-      ).toJson();
-      expect(json['access_token'], 'fbtok');
-      expect(json.containsKey('id_token'), isFalse);
-      // No email key at all — a Facebook account may simply not have one, and
-      // that's what routes the user into the web continuation.
-      expect(json.containsKey('email'), isFalse);
     });
   });
 
@@ -116,12 +103,14 @@ void main() {
         'square_environment': '',
         'google_server_client_id': 'g-client',
         'apple_sign_in_enabled': true,
+        // Still served by deployments that configure Facebook for the
+        // *website*. The app dropped Facebook login on 2026-08-10 and must
+        // ignore this key rather than resurrect a button for it.
         'facebook_app_id': '1234567890',
         'brand_name': 'auction.fish',
       });
       expect(config.googleServerClientId, 'g-client');
       expect(config.appleSignInEnabled, isTrue);
-      expect(config.facebookAppId, '1234567890');
     });
 
     test('a deployment configuring none of them offers none', () {
@@ -134,7 +123,6 @@ void main() {
         'brand_name': 'auction.fish',
       });
       expect(config.appleSignInEnabled, isFalse);
-      expect(config.facebookAppId, isEmpty);
       expect(config.googleServerClientId, isEmpty);
     });
   });

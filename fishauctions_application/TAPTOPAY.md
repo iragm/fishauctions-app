@@ -267,8 +267,11 @@ to be accurate.
 
 **Guideline 4.8 (Login Services) — app side now done.** The app previously
 offered only Google, with no Sign in with Apple, which 4.8 requires whenever a
-third-party service sets up the primary account. Apple and Facebook sign-in are
-now implemented (Apple first on iOS, per its guidelines). Two things still
+third-party service sets up the primary account. Sign in with Apple is now
+implemented, and comes first on iOS per its guidelines. (Facebook sign-in was
+implemented alongside it and removed again on 2026-08-10 — Facebook doesn't
+verify the emails it returns — which changes nothing for 4.8: Google alone
+still triggers the requirement, and Apple still satisfies it.) Two things still
 gate it: the **Sign In with Apple capability** must be enabled on the App ID in
 Certificates, Identifiers & Profiles — it's self-serve, but until it's on, every
 signed build fails provisioning because `Runner.entitlements` now declares

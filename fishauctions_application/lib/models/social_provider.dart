@@ -7,15 +7,19 @@ import 'auth_models.dart';
 
 /// A social identity provider the app can sign in with natively.
 ///
-/// All three end up at the same backend endpoint (`auth/social/`), which runs
+/// Both end up at the same backend endpoint (`auth/social/`), which runs
 /// django-allauth's socialaccount pipeline — so the app's job is only to obtain
 /// a provider credential and hand it over. The `id` values are allauth's own
 /// provider ids, deliberately, so the app and the backend never need a mapping
 /// table and the same strings appear in `SocialAccount.provider` rows.
+///
+/// Facebook was offered until 2026-08-10 and was removed because it doesn't
+/// verify the email addresses it returns. Its allauth id was `facebook`; if a
+/// deployment still has `SocialAccount` rows with that provider, they're now
+/// reachable only through the website.
 enum SocialProvider {
   apple('apple', 'Apple'),
-  google('google', 'Google'),
-  facebook('facebook', 'Facebook');
+  google('google', 'Google');
 
   const SocialProvider(this.id, this.label);
 
@@ -23,7 +27,7 @@ enum SocialProvider {
   /// `SocialAccount.provider`.
   final String id;
 
-  /// Human name, for error messages ("Could not sign in with Facebook").
+  /// Human name, for error messages ("Could not sign in with Google").
   final String label;
 
   static SocialProvider? fromId(String id) {
@@ -43,11 +47,9 @@ enum SocialProvider {
 ///
 /// - **Google** and **Apple** return an OpenID Connect **ID token** (a signed
 ///   JWT), verified offline against the provider's public keys.
-/// - **Apple** and **Facebook Limited Login** bind that token to a **nonce**,
-///   which is the app's proof the token was minted for *this* sign-in attempt
-///   and not replayed. We send the raw nonce; the token carries its SHA-256.
-/// - **Facebook** on Android returns a classic **access token** instead, which
-///   the backend has to verify by calling Facebook (`debug_token`).
+/// - **Apple** binds that token to a **nonce**, which is the app's proof the
+///   token was minted for *this* sign-in attempt and not replayed. We send the
+///   raw nonce; the token carries its SHA-256.
 ///
 /// [email], [firstName] and [lastName] are best-effort extras, and Apple is the
 /// reason they exist at all: it returns the user's name and real email **only
@@ -60,7 +62,6 @@ class SocialCredential {
   const SocialCredential({
     required this.provider,
     this.idToken,
-    this.accessToken,
     this.authorizationCode,
     this.rawNonce,
     this.email,
@@ -70,11 +71,14 @@ class SocialCredential {
 
   final SocialProvider provider;
 
-  /// OIDC ID token — Google, Apple, and Facebook Limited Login.
+  /// OIDC ID token — both Google and Apple return one.
+  ///
+  /// There is deliberately no `accessToken` counterpart any more: the only
+  /// provider that ever sent a bare OAuth2 access token was Facebook classic
+  /// login on Android, and the backend had to verify it by calling out to
+  /// Facebook's `debug_token`. Both went with Facebook on 2026-08-10. The
+  /// backend still accepts an `access_token` key; the app just never sends one.
   final String? idToken;
-
-  /// OAuth2 access token — Facebook classic login (Android).
-  final String? accessToken;
 
   /// Apple's single-use authorization code. Only Apple issues one, and only the
   /// backend can redeem it (it needs the team's private key). Forwarded because
@@ -88,7 +92,7 @@ class SocialCredential {
   final String? rawNonce;
 
   /// Provider-asserted email, when it gave one. **Apple sends this only on the
-  /// first authorization**, and Facebook may never send it at all.
+  /// first authorization** — never again, for the life of the account.
   final String? email;
   final String? firstName;
   final String? lastName;
@@ -96,7 +100,6 @@ class SocialCredential {
   Map<String, dynamic> toJson() => {
     'provider': provider.id,
     if (idToken != null) 'id_token': idToken,
-    if (accessToken != null) 'access_token': accessToken,
     if (authorizationCode != null) 'authorization_code': authorizationCode,
     if (rawNonce != null) 'nonce': rawNonce,
     if (email != null) 'email': email,
@@ -108,11 +111,16 @@ class SocialCredential {
 /// What came back from `POST /api/mobile/auth/social/`: either a signed-in
 /// user, or a web flow the user has to finish first.
 ///
-/// The second case exists because a provider credential doesn't always carry a
-/// usable, verified email — Facebook may send none at all, and an unverified
-/// address can't be trusted to identify an account. Rather than rebuild
-/// allauth's email collection and confirmation natively, the backend points the
-/// app at the web flow that already does it correctly.
+/// The second case exists because a provider credential doesn't always resolve
+/// to an account on its own — the address may need confirming, or may already
+/// belong to someone else. Rather than rebuild allauth's email collection,
+/// confirmation and account-linking rules natively (where the bugs are account
+/// takeovers, not cosmetics), the backend points the app at the web flow that
+/// already does it correctly.
+///
+/// This got *rarer*, not obsolete, when Facebook was dropped on 2026-08-10:
+/// Facebook's unverified/absent emails were the common trigger, but Google and
+/// Apple still land here whenever allauth wants a confirmation or a link.
 class SocialLoginResult {
   const SocialLoginResult._({
     this.user,
@@ -150,11 +158,11 @@ class SocialLoginResult {
 
 /// A cryptographically random nonce and the SHA-256 hash to send the provider.
 ///
-/// Both Apple and Facebook Limited Login take a hashed nonce in the request and
-/// embed it in the returned ID token. The backend recomputes the hash from
-/// [raw] and compares — which is what stops an attacker replaying a token
-/// captured from another app or another session. Skipping the nonce turns a
-/// stolen ID token into a working credential, so neither path omits it.
+/// Sign in with Apple takes a hashed nonce in the request and embeds it in the
+/// returned ID token. The backend recomputes the hash from [raw] and compares —
+/// which is what stops an attacker replaying a token captured from another app
+/// or another session. Skipping the nonce turns a stolen ID token into a
+/// working credential, so the Apple path never omits it.
 class SignInNonce {
   SignInNonce._(this.raw, this.hashed);
 
@@ -172,7 +180,7 @@ class SignInNonce {
   /// Sent to the backend, which hashes it to check the token.
   final String raw;
 
-  /// Sent to Apple/Facebook, and echoed back inside the ID token. Lowercase hex
-  /// — the representation both providers document.
+  /// Sent to Apple, and echoed back inside the ID token. Lowercase hex — the
+  /// representation Apple documents.
   final String hashed;
 }

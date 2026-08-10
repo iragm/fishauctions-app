@@ -36,8 +36,7 @@ class AuthService {
     return _storeTokensAndFetchUser(res.data as Map<String, dynamic>);
   }
 
-  /// Log in with a credential from a native social sign-in (Google, Apple or
-  /// Facebook).
+  /// Log in with a credential from a native social sign-in (Google or Apple).
   ///
   /// The backend verifies the provider token and runs django-allauth's
   /// socialaccount pipeline, which either signs the user in — returning the
@@ -45,12 +44,13 @@ class AuthService {
   /// from the user before it can. That second case is not an error and is the
   /// whole reason this returns [SocialLoginResult] rather than an [AppUser]:
   ///
-  /// - **Facebook can return no email at all** (the account may have none, or
-  ///   the user declined the permission), so there is nothing to create an
-  ///   account with.
   /// - **An email the provider hasn't verified** must be confirmed before it
   ///   can be trusted, or anyone could take over an account by signing up to
-  ///   the provider with someone else's address.
+  ///   the provider with someone else's address. (This is exactly why Facebook
+  ///   login was dropped on 2026-08-10 — it never verifies them, so every
+  ///   Facebook sign-in was this case.)
+  /// - **The address already belongs to another account**, which allauth has to
+  ///   resolve by linking rather than by silently signing someone in.
   ///
   /// In both cases allauth already has the right web flow, so the backend
   /// returns a `continue_url` and the app hands the user to it in the
