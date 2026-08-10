@@ -11,6 +11,7 @@ import android.provider.Settings
 import android.speech.SpeechRecognizer
 import com.fishauctions.app.ar.ArCameraViewFactory
 import com.fishauctions.app.ar.ArEventBridge
+import com.fishauctions.app.speech.BiasedSpeechBridge
 import com.squareup.sdk.mobilepayments.MobilePaymentsSdk
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -21,6 +22,9 @@ import kotlin.math.atan
 class MainActivity : FlutterActivity() {
     private val channelName = "com.fishauctions.app/platform"
     private var arCameraViewFactory: ArCameraViewFactory? = null
+
+    // Held for the engine's lifetime: it owns the speech channels' handlers.
+    private var biasedSpeechBridge: BiasedSpeechBridge? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -56,6 +60,24 @@ class MainActivity : FlutterActivity() {
         arCameraViewFactory = factory
         flutterEngine.platformViewsController.registry
             .registerViewFactory("com.fishauctions.app/ar_camera", factory)
+
+        // Voice set-winners' `biased` backend (speech/BiasedSpeechBridge.kt): SpeechRecognizer
+        // driven directly so the auction's own lot and bidder numbers can be passed as
+        // EXTRA_BIASING_STRINGS. speech_to_text never sets that extra and has no way to, which is
+        // the only reason we own a recognizer at all — everything above one utterance stays in
+        // Dart (RestartingSpeechBackend).
+        //
+        // Registered here, at engine setup, for the same reason the AR channels are: Dart
+        // subscribes to the event stream from `ensureRecognizer()` before the first `start`, and a
+        // channel with no stream handler isn't registered with the messenger at all.
+        biasedSpeechBridge = BiasedSpeechBridge(
+            this,
+            MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.fishauctions.app/speech"),
+            EventChannel(
+                flutterEngine.dartExecutor.binaryMessenger,
+                "com.fishauctions.app/speech_events",
+            ),
+        )
     }
 
     // PlatformViews don't receive Activity lifecycle callbacks automatically — ARCore's Session

@@ -1,38 +1,8 @@
 import 'package:fishauctions_application/models/voice_command.dart';
-import 'package:fishauctions_application/models/voice_vocabulary.dart';
 import 'package:fishauctions_application/services/bundled_voice_grammar.dart';
-import 'package:fishauctions_application/services/voice_parser.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-/// A numeric auction, the common case.
-VoiceVocabulary numericAuction({bool wholeDollars = true}) => VoiceVocabulary(
-  lotNumbers: const ['1', '12', '42', '105'],
-  bidderNumbers: const ['4', '17', '50', '105'],
-  onlyWholeDollarBids: wholeDollars,
-);
-
-/// A seller-dash auction with text bidder numbers — `AuctionTOS.bidder_number`
-/// is a CharField and this is what it looks like when someone uses it.
-VoiceVocabulary textAuction() => VoiceVocabulary(
-  lotNumbers: const ['BOB-1', 'BOB-2', 'ANN-1', '3-1'],
-  bidderNumbers: const ['BOB', 'ANN', '3'],
-  onlyWholeDollarBids: true,
-);
-
-VoiceParser parserFor(VoiceVocabulary vocabulary) =>
-    VoiceParser(grammar: bundledVoiceGrammar(), vocabulary: vocabulary);
-
-List<VoiceCommand> heard(VoiceParser parser, String text, {double asr = -1}) =>
-    parser.parse([SpeechHypothesis(text, confidence: asr)]);
-
-VoiceCommand? slot(List<VoiceCommand> commands, VoiceSlot wanted) {
-  for (final command in commands) {
-    if (command.slot == wanted) {
-      return command;
-    }
-  }
-  return null;
-}
+import 'voice_parser_test_support.dart';
 
 void main() {
   group('anchored slots', () {
@@ -83,6 +53,69 @@ void main() {
       // "number five" as an identifier.
       final commands = heard(parserFor(numericAuction()), 'lot number twelve');
       expect(slot(commands, VoiceSlot.lot)?.value, '12');
+    });
+  });
+
+  // The thing set-winners was reported as getting wrong. American English
+  // flaps both consonants in "bidder" and "bitter" to the same sound, so no
+  // recognizer can tell them apart — there is nothing in the audio to tell
+  // apart — and at two plain edits the anchor was invisible to the fuzzy pass.
+  // A missed anchor is total: the bidder slot never opens and the whole
+  // command is silently dropped.
+  group('anchors the speaker did not actually pronounce differently', () {
+    test('"bitter" opens the bidder slot', () {
+      final commands = heard(
+        parserFor(numericAuction()),
+        'bitter seventeen twenty five dollars',
+      );
+      expect(slot(commands, VoiceSlot.bidder)?.value, '17');
+      expect(slot(commands, VoiceSlot.price)?.value, '25');
+    });
+
+    test('and lands in the unsure band, not filled silently', () {
+      // It is still a guess about what was said. Filling the field while
+      // visibly asking is the point: a wrong bidder costs money, and a
+      // recognizer's homophone is exactly where to be seen doubting.
+      final command = slot(
+        heard(parserFor(numericAuction()), 'bitter seventeen'),
+        VoiceSlot.bidder,
+      );
+      expect(command, isNotNull);
+      expect(command!.confidence, lessThan(bundledVoiceGrammar().confidentAt));
+      expect(command.confidence, greaterThan(bundledVoiceGrammar().unsureAt));
+    });
+
+    // "lot" is three characters, so the fuzzy pass skips it entirely and it
+    // had to be transcribed exactly — on the app's single most-used anchor.
+    // A trailing plural is the same word, not a guess about which word, so it
+    // is the one variation safe to accept at any length.
+    test('a plural still opens its slot', () {
+      final commands = heard(parserFor(numericAuction()), 'lots 42');
+      expect(slot(commands, VoiceSlot.lot)?.value, '42');
+    });
+
+    test('a plural is trusted more than a phonetic guess', () {
+      final plural = slot(
+        heard(parserFor(numericAuction()), 'lots 42'),
+        VoiceSlot.lot,
+      );
+      final phonetic = slot(
+        heard(parserFor(numericAuction()), 'bitter 17'),
+        VoiceSlot.bidder,
+      );
+      expect(plural!.confidence, greaterThan(phonetic!.confidence));
+    });
+
+    test('a plural with nothing resolvable after it stays quiet', () {
+      // "we have lots of nice fish" must not become a lot number.
+      expect(heard(parserFor(numericAuction()), 'lots of nice fish'), isEmpty);
+    });
+
+    test('does not fire on words that only look close in spelling', () {
+      // "collars"/"dollars" is two edits too, but c and d are not a voicing
+      // pair — nobody says one and is heard saying the other. Buying the
+      // homophones must not mean buying every two-edit neighbour.
+      expect(heard(parserFor(numericAuction()), 'collars thirty'), isEmpty);
     });
   });
 

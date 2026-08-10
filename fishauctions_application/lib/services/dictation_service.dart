@@ -55,7 +55,28 @@ class DictationService {
   /// "it doesn't turn the mic off the way the web does" was. A browser's own
   /// silence window is around this long, so matching it is also what makes a
   /// page written against Web Speech feel the same in the app.
+  ///
+  /// **It only ever runs against silence that follows speech** — see
+  /// [dictationWait]. Applied from the tap instead, which is what a single
+  /// pause window means in `speech_to_text`, it was far too tight, and that is
+  /// what "it stops listening far too soon" was.
   static const Duration dictationPause = Duration(milliseconds: 1500);
+
+  /// How long the user has to start talking after tapping the microphone.
+  ///
+  /// The browser's `no-speech` window, near enough. Someone who has just
+  /// opened the palette is frequently still deciding what to ask for, and
+  /// cutting them off before the first word is a worse failure than a
+  /// microphone that stays lit a moment too long: the phrase is gone, and the
+  /// only feedback is a button that quietly put itself back.
+  ///
+  /// Kept apart from [dictationPause] rather than averaged with it because
+  /// they answer different questions — how patient to be with a speaker who
+  /// hasn't begun, versus how quickly to notice one who has finished. One
+  /// number cannot be both, and picking a value that is tolerable for both is
+  /// what produced a microphone that was simultaneously too eager and too
+  /// slow.
+  static const Duration dictationWait = Duration(seconds: 8);
 
   StreamSubscription<SpeechEvent>? _subscription;
   DictationEventSink? _sink;
@@ -127,6 +148,7 @@ class DictationService {
         preferOnDevice: false,
         continuous: false,
         pauseFor: dictationPause,
+        waitForSpeech: dictationWait,
       ),
     );
     return true;

@@ -28,6 +28,11 @@ class FakeSpeechBackend implements SpeechBackend {
   @override
   bool get isOnDevice => true;
 
+  /// Settable, so a test can stand in for the `biased` backend that doesn't
+  /// exist yet and check the settings panel is told the truth either way.
+  @override
+  bool supportsPhraseBias = false;
+
   @override
   bool get needsPermission => !permitted;
 

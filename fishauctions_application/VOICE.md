@@ -152,7 +152,7 @@ Backends, in the order they'd be reached for:
 | id | implementation | when |
 |---|---|---|
 | `platform` | `speech_to_text` ^7.4.0 → `SFSpeechRecognizer` / `android.speech.SpeechRecognizer` | **v1 default.** Free, offline-capable, no keys, both platforms. |
-| `biased` | our own platform channel: `SFSpeechRecognitionRequest.contextualStrings` + `createOnDeviceSpeechRecognizer` | if snapping (§4.2) isn't enough. `speech_to_text` exposes neither, and phrase biasing is the one lever it can't pull. |
+| `biased` | **the default.** Our own channel: `SFSpeechRecognitionRequest.contextualStrings` / `EXTRA_BIASING_STRINGS`, over recognizers this app owns. `speech_to_text` exposes neither, and phrase biasing is the one lever it can't pull. Falls back to `platform` where the native side isn't there. |
 | `cloud` | Deepgram / Google STT streaming with keyword boost | best accuracy in noise; needs network *and* a short-lived token minted by Django — never a baked key. |
 | `spotter` | Picovoice Rhino (intent+slot, fixed grammar, offline) | the tool actually built for this problem. Commercial licence, so it's the escape hatch, not the default. |
 
@@ -343,6 +343,39 @@ Synonyms per anchor (`item`, `buyer`, `number`, `bucks`, `hammer`, …) live in
 the served grammar, because which words a given auctioneer actually uses is
 exactly the thing we'll be wrong about on day one.
 
+**A missed anchor loses the whole utterance**, which makes anchor matching the
+highest-leverage place to be forgiving — the opposite of value matching, where
+a wrong guess costs money. Beyond the served synonyms, `_fuzzyAnchor` takes a
+word one edit away (`bidders`, `dollar`) at quality 0.6, and counts a
+voiced/voiceless substitution as **no edit at all**. That last part came from
+the first real session: "bitter" for "bidder". It isn't a recognizer error to
+be tuned away — American English flaps both consonants to the same sound, so
+nothing in the audio distinguishes them, and the same goes for
+"ladder"/"latter" — but at two plain edits it was invisible here and the bidder
+slot silently never opened. Free substitution within a voicing pair (t/d, s/z,
+p/b, k/g, f/v) buys the homophones without buying every two-edit neighbour:
+"collars" is still not "dollars".
+
+A **trailing plural** is taken at any length and scored 0.8, ahead of both.
+That exception exists for one anchor in particular: `lot` is three characters,
+so the length guard skipped it entirely and the grammar's most-used word had to
+be transcribed exactly or the utterance was lost. A plural is the same word
+rather than a guess about which word, and "lots" cannot be confused with "got"
+or "not" the way a general 1-edit rule at three characters would be. "We have
+lots of nice fish" is still safe, because the tokens after the anchor have to
+resolve to a real identifier and they don't.
+
+### 4.1a What a missed anchor actually costs
+
+Worth stating plainly, because it drove three of the fixes above: the anchor is
+all-or-nothing. Miss it and the slot never opens, `_resolveValue` is never
+called, no command is emitted, and the operator gets **no feedback at all**
+beyond the transcript line — the app looks like it isn't listening. That
+asymmetry is why anchor matching should keep getting more forgiving (a wrong
+anchor still has to find a real identifier before anything is written) while
+value matching should not (a wrong identifier is a wrong bidder, and that
+costs money).
+
 ### 4.2 Match a closed vocabulary — the biggest single win
 
 **Lot and bidder identifiers are not numbers.** `AuctionTOS.bidder_number` is a
@@ -419,6 +452,24 @@ app where a bug means a stuck auction with no way to recover, and it stays as
 small as it is. Voice needs a live vocabulary to be trustworthy anyway; without
 one, every match would score 0.35 and everything would be amber.
 
+### 4.2a Getting the words out of the recognizer at all
+
+The accuracy work above is wasted if the transcript never arrives, and for a
+while it frequently didn't. Set-winners acts on **final** results only — a
+half-recognized number written into a field and then corrected reads as the app
+typing nonsense — but only one of the four ways a phrase can end produces a
+final. `ERROR_NO_MATCH`, `ERROR_SPEECH_TIMEOUT` and a bare "done" from the
+platform all leave the words in the last partial, and in a *continuous* session
+`PlatformSpeechBackend._endOfUtterance` emitted nothing, so there was no signal
+to act on either. Short utterances are the most likely to end that way, which
+is why "lot five" never filled anything while whole sentences did.
+
+`_flushPendingAsFinal` promotes the last partial when a phrase ends without a
+final. Web Speech's `stop()` does the same, and it belongs in the backend
+rather than in each caller — every future `SpeechBackend` has the same problem.
+An explicit `stop()` is excluded: that path doesn't go through
+`_endOfUtterance`, and someone switching the microphone off is cancelling.
+
 ### 4.3 Parse every alternate, not just the best
 
 Run all n-best hypotheses through the grammar and score each. The winner is the
@@ -484,6 +535,75 @@ amount of the above fixes that. A Bluetooth headset or a clip-on mic is the
 difference between working and not working, and should be in the on-screen help
 the first time voice is enabled.
 
+### 4.7 Reading the transcript with a language model — costed
+
+Asked after the first real session, where the recurring miss was "bitter" for
+"bidder" (§4.1). The palette already has an LLM seam (`auctions/llm.py`,
+`gpt-5-nano` by default, `reasoning_effort: minimal`) so this would be a new
+`/api/mobile/voice/interpret/` over the existing plumbing, not new
+infrastructure.
+
+**Token shape per call.** System prompt with the slot contract, the "a value
+needs its keyword" rule and a few examples ≈ 500. The auction's vocabulary is
+the bulk: ≈ 2 tokens per numeric identifier, ≈ 4–5 for a seller-dash one
+(`BOB-1`), so 400 lots + 100 bidders ≈ 1,000 and a large seller-dash auction
+≈ 4,000. Three n-best alternates plus framing ≈ 70. Output is small JSON
+(≈ 40) plus reasoning tokens, ≈ 200 billed all told.
+
+At $0.05/M input, $0.005/M cached input, $0.40/M output:
+
+| | warm cache | cold |
+|---|---|---|
+| 400 lots, numeric | $0.000091 | $0.00016 |
+| 800 lots, seller-dash | $0.00011 | $0.00031 |
+
+**Two things dominate, and neither is the vocabulary.**
+
+*Output tokens are ~85% of a warm call.* Prompt size barely matters once the
+prefix is cached, so there is no reason to trim the vocabulary and every reason
+to keep the reasoning budget minimal.
+
+*The cache is fragile in exactly the way this feature is built.* The vocabulary
+endpoint returns **unsold** lots and bidders added at the check-in desk, so a
+prompt regenerated per call has a different prefix every time and pays the
+10× uncached rate on all of it. Pin a per-session snapshot, refresh on a timer,
+and keep the utterance last.
+
+**Call volume is the number that decides this, not the per-call price.** A
+continuous recognizer fires on everything it hears — the chant, the crowd, side
+conversations — and today that is free because a non-matching phrase is parsed
+locally and dropped. Route every phrase to the model and all of it is billable:
+a 300-lot sale is maybe 900 command phrases and a couple of thousand ambient
+ones, so ~2,400 calls ≈ **$0.22 warm / $0.38 cold**; a long seller-dash auction
+at 6,000 calls ≈ **$1.90**. Gate it on the local parser having failed (nothing
+matched, or below `unsureAt`) and it falls to a few hundred calls ≈ **2–3¢**.
+
+**So cost is not the objection. These are:**
+
+1. **Latency, in the one place §3.1 says we can't afford it.** Set-winners
+   forces on-device recognition because an auction hall's wifi is bad and the
+   operator feels every round trip. This adds phone → Django → OpenAI → back,
+   ~1.5–3 s, and a gated design puts that delay precisely on the utterances the
+   operator is already repeating.
+2. **The local parser stays regardless** — offline, timeout and 404 all fall
+   back to it — so this is an addition, and the homophone handling has to exist
+   locally anyway.
+3. **A new error class.** A model will return a confident bidder number that
+   isn't what was said. The answer has to be validated against the vocabulary,
+   which is what `VoiceVocabulary` already does — leaving the model's real job
+   as "normalize the transcript", which is a large hammer.
+4. **It costs an app release and an endpoint**, where the grammar is already
+   served data a Django row edit can change.
+
+**The cheaper version of the same idea, and the recommendation:** use the model
+*offline*. Log the misses, batch them nightly, have it propose anchor synonyms,
+and push those into the `voice` config block. A handful of calls a day, nothing
+in the operator's path, and it feeds the tuning loop §7 step 5 already plans
+for. The blocker is that `VoiceCommandLog` is written **only when a command is
+accepted**, so an utterance that matched nothing — the entire "bitter" case —
+leaves no trace at all. That is VOICE-6 (§6), and it is worth doing whichever
+way this goes.
+
 ---
 
 ## 5. Confidence UX
@@ -510,6 +630,99 @@ Two things v1 had no answer for and that matter more than they look:
 twenty five dollars" and require "sold" or "yes". This is the real safety net for
 a hands-and-eyes-busy operator, and it's what makes auto-submit trustworthy.
 Needs `flutter_tts` and a duck of the recognizer while speaking.
+
+### 5.1 Settings the operator can move mid-auction
+
+`VoiceSettings` (device-local) over `voiceGetSettings` / `voiceSetSettings`,
+rendered as a panel on the set-winners page (`BACKEND_SPEC.md` Part VOICE-7).
+Three controls, chosen because each is a judgement we cannot make from here:
+
+| control | what it moves | why it's a knob, not a constant |
+|---|---|---|
+| confidence slider (0.6–0.9) | `confidentAt` | An operator watching the screen wants it low and will catch mistakes; one calling lots with their hands full wants it high and would rather retype. |
+| process on this phone | `preferOnDevice` | On-device survives bad wifi and is faster; network recognition is more accurate. The trade is per-room. |
+| bias towards lower numbers | `biasLowPrices` | A claim about *this* domain's price distribution, not about speech. |
+
+**Every field is nullable and null means "whatever the deployment served".** The
+grammar is served data precisely so it can be retuned centrally, and a device
+that stamped a copy of today's defaults the first time the panel was opened
+would never see a central improvement again. Only a control the operator
+actually moved is stored, and `VoiceCommandService.grammar` composes the two on
+*read* — so a change lands on the next utterance rather than the next session,
+which is the difference between tuning while selling and stopping to tune.
+
+Not server-held, which is the one place this project's "prefer the backend" rule
+doesn't apply: these describe a phone in a room — its microphone, its language
+pack, its noise floor — and syncing them would actively fight an operator with
+two handsets.
+
+### 5.2 Phrase biasing, and how prices get biased separately
+
+The recurring question is whether sell prices can be biased apart from bidder
+and lot numbers. **The APIs say no and the answer is still yes.**
+
+`SFSpeechRecognitionRequest.contextualStrings` and Android's
+`RecognizerIntent.EXTRA_BIASING_STRINGS` are both one flat array of strings for
+the whole utterance. Neither has a slot, a category or a weight, and the
+recognizer has no idea whether a number it is about to emit will land in the
+price field or the lot field.
+
+But both bias **phrases, not words** — and `"seventeen dollars"` is a different
+string from `"lot seventeen"`. Anchoring each biased value to the keyword that
+introduces it buys per-slot biasing out of an API that offers none. It is the
+same trick as the anchored grammar itself, for the same reason.
+
+The constraint that shapes `VoiceBiasPhrases` is the budget: Apple recommends
+around **100 phrases of one or two words**, and longer lists and longer phrases
+are both *less* effective, not more. A 400-lot auction has far more identifiers
+than that, so selection is by expected value — non-numeric bidder identifiers
+first (`NM`, `BOB`: a general recognizer has no chance at these unprompted, and
+there are few), then the low-price phrases, then seller-dash lots, then numeric
+bidders. Plain numeric lot numbers come last and usually don't fit, which is
+correct: they're what a recognizer already gets right, and four hundred of them
+would push out the handful of strings that needed help.
+
+**`speech_to_text` cannot deliver any of this**, which is why the app now drives
+its own recognizer. `SpeechListenOptions` has fixed fields, its native halves
+never touch either API, and its only extension point (`initialize(options:)`) is
+per-process and reads exactly one name. So `BiasedSpeechBackend` owns
+`android.speech.SpeechRecognizer` and `SFSpeechRecognizer` directly, over
+`com.fishauctions.app/speech` and its event channel, and `biased` is the default
+`VoiceGrammar.backend`. A build or device without the native side falls back to
+`platform` silently (`Microphone.backendFor`), and `"backend": "platform"` in the
+served config is the kill switch — a Django row edit, not a release.
+
+**The native halves are deliberately tiny: one utterance, no session.**
+Re-arming, the two silence windows, the on-device fallback, the three-strikes
+rule and promoting a last partial live in `RestartingSpeechBackend`, which both
+backends extend. That logic is identical on both platforms and has already been
+wrong three times; a second copy means fixing the fourth bug twice. The native
+sides also report `speech_to_text`'s own `error_*` strings, so "these codes are
+really just a speaker who stopped" is written once.
+
+`supportsPhraseBias` is a *runtime* question on Android — `EXTRA_BIASING_STRINGS`
+is API 33 against a minSdk of 28, so a real share of phones get the new
+recognizer without its point (fine; it still recognizes speech) and the settings
+panel is told rather than assuming. iOS has had `contextualStrings` since iOS 10.
+
+Two races the handoff has to get right, neither of which needs hardware to see:
+a recognizer asked to stop keeps calling back for a moment, so Android tags each
+utterance and ignores a predecessor's callbacks — otherwise the old one's
+`onResults` tears down the new one. And Dart's pause timer closes the utterance
+and waits for the *platform's* answer instead of declaring the phrase over
+itself: stopping a recognizer is asking for its final result, so ending the
+phrase first would flush a partial, re-arm, and land the real final inside the
+next utterance. A 1.5 s watchdog covers a recognizer that answers a stop with
+nothing, which would otherwise be a lit microphone that has quietly stopped
+listening.
+
+**The low-price tie-break is separate and works today.** Biasing changes what
+the recognizer *offers*; the tie-break chooses between readings it already
+returned. A price scores `keyword × match` with `match` pinned at 1, so
+"seventeen dollars" and "seventy dollars" tie *exactly* and the winner was
+whichever the platform happened to list first. Prices only — bidder and lot
+numbers have no such distribution, and quietly preferring the lower of two
+candidate bidders is how the wrong person gets charged.
 
 ---
 
@@ -538,6 +751,17 @@ button to anyone on an app build that ships no `voice*` handlers.
 implies the microphone has been granted (it never should have): a first visit
 answers `{supported: true, permission: false}` and the button must appear
 anyway.
+
+**VOICE-6 — log the misses, not only the hits.** `VoiceCommandLog` is written
+when a command is *accepted*, which means the utterances that produced nothing
+are invisible: "bitter" for "bidder" opened no slot, emitted no command, and so
+never reached the table whose whole purpose is answering "what are we getting
+wrong most often". The app should emit an event for a transcript that matched
+no anchor, or matched one below `unsureAt`, and the page should log it with the
+same `{heard, confidence}` shape and a null `chosen`. It is the cheapest
+accuracy work available: every row is a candidate anchor synonym for the served
+grammar, which is a Django row edit and needs no app release. It is also what
+makes the language-model option in §4.7 practical in its offline form.
 
 ---
 

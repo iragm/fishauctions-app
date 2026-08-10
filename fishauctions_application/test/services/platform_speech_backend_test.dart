@@ -14,6 +14,12 @@ import 'package:speech_to_text/speech_to_text.dart';
 /// platform insists is permanent when it isn't.
 class FakeSpeechToText implements SpeechToText {
   final List<SpeechListenOptions> listenCalls = [];
+
+  /// Every `changePauseFor` the backend made, in order. This is how the split
+  /// between "waiting for someone to start" and "they've stopped" is visible
+  /// from outside: one `listen` armed with the long window, then a shortening
+  /// once words arrive.
+  final List<Duration> pauseChanges = [];
   int stopCalls = 0;
   bool initializeResult = true;
 
@@ -63,6 +69,14 @@ class FakeSpeechToText implements SpeechToText {
     listenCalls.add(listenOptions ?? SpeechListenOptions());
     _listening = true;
     _onStatus?.call(SpeechToText.listeningStatus);
+  }
+
+  @override
+  void changePauseFor(Duration pauseFor) {
+    if (!_listening) {
+      throw ListenNotStartedException();
+    }
+    pauseChanges.add(pauseFor);
   }
 
   @override
@@ -267,6 +281,166 @@ void main() {
 
       expect(errorsIn(events), hasLength(1));
       expect(speech.listenCalls, isEmpty);
+    });
+  });
+
+  // Only one of the four ways a phrase can end produces a final result, and
+  // `VoiceCommandService` acts on final results only. So an utterance that
+  // ended any other way was heard, parsed into partials, and thrown away —
+  // which is what "saying 'lot five' never fills anything" was. Short phrases
+  // are the likeliest to go: they're what Android no-matches.
+  group('a phrase the platform never promoted to final', () {
+    test('is reported anyway when a no-match ends it', () async {
+      await backend.start(const SpeechSessionOptions(preferOnDevice: false));
+
+      speech
+        ..say('lot 5', isFinal: false)
+        ..fail('error_no_match');
+      await settle();
+
+      final result = events.singleWhere(
+        (e) => e.type == SpeechEventType.result,
+      );
+      expect(result.bestText, 'lot 5');
+    });
+
+    test('and when silence ends it', () async {
+      await backend.start(const SpeechSessionOptions(preferOnDevice: false));
+
+      speech
+        ..say('lot 5', isFinal: false)
+        ..fail('error_speech_timeout');
+      await settle();
+
+      expect(
+        events.where((e) => e.type == SpeechEventType.result).single.bestText,
+        'lot 5',
+      );
+    });
+
+    test('is not reported twice when the platform does promote it', () async {
+      await backend.start(const SpeechSessionOptions(preferOnDevice: false));
+
+      speech
+        ..say('lot', isFinal: false)
+        ..say('lot 5', isFinal: true);
+      await waitForRestart();
+
+      expect(
+        events.where((e) => e.type == SpeechEventType.result),
+        hasLength(1),
+      );
+    });
+
+    test('does not leak into the next utterance', () async {
+      await backend.start(const SpeechSessionOptions(preferOnDevice: false));
+
+      speech
+        ..say('lot 5', isFinal: false)
+        ..fail('error_no_match');
+      await waitForRestart();
+      // A fresh phrase that the platform no-matches with nothing heard at all
+      // must not re-report the previous one.
+      speech.fail('error_no_match');
+      await settle();
+
+      expect(
+        events.where((e) => e.type == SpeechEventType.result),
+        hasLength(1),
+      );
+    });
+
+    // Tapping the microphone off is cancelling, not submitting. This path
+    // never routes through _endOfUtterance, and that's the point.
+    test('is dropped when the user stops the session', () async {
+      await backend.start(const SpeechSessionOptions(preferOnDevice: false));
+
+      speech.say('lot 5', isFinal: false);
+      await backend.stop();
+      await settle();
+
+      expect(events.where((e) => e.type == SpeechEventType.result), isEmpty);
+    });
+  });
+
+  // The plugin runs one pause clock, it starts at listen() and only a
+  // *result* pushes it forward — sound level doesn't. So a single short window
+  // is a deadline on the user starting to talk, with network recognition's
+  // round trip inside the budget, and dictation stopped before anyone had
+  // finished the first word.
+  group('two silence windows, the way a browser has them', () {
+    const dictating = SpeechSessionOptions(
+      continuous: false,
+      preferOnDevice: false,
+      pauseFor: Duration(milliseconds: 1500),
+      waitForSpeech: Duration(seconds: 8),
+    );
+
+    test('waits out a slow start rather than the trailing silence', () async {
+      await backend.start(dictating);
+
+      expect(speech.listenCalls.single.pauseFor, const Duration(seconds: 8));
+      expect(speech.pauseChanges, isEmpty);
+      await backend.stop();
+    });
+
+    test('tightens to the trailing silence once words arrive', () async {
+      await backend.start(dictating);
+
+      // A partial is enough, and has to be: most of the ways a phrase ends
+      // never produce a final at all.
+      speech.say('show me my', isFinal: false);
+      await settle();
+
+      expect(speech.pauseChanges, [const Duration(milliseconds: 1500)]);
+      await backend.stop();
+    });
+
+    test('shortens once per utterance, not per partial', () async {
+      await backend.start(dictating);
+
+      speech
+        ..say('show', isFinal: false)
+        ..say('show me', isFinal: false)
+        ..say('show me my invoices', isFinal: false);
+      await settle();
+
+      expect(speech.pauseChanges, hasLength(1));
+      await backend.stop();
+    });
+
+    test('waits afresh for the speaker on every re-arm', () async {
+      await backend.start(
+        const SpeechSessionOptions(
+          preferOnDevice: false,
+          waitForSpeech: Duration(seconds: 8),
+        ),
+      );
+      speech.say('lot forty two', isFinal: true);
+      await waitForRestart();
+
+      expect(speech.listenCalls, hasLength(2));
+      expect(speech.listenCalls.last.pauseFor, const Duration(seconds: 8));
+      // …and the new utterance is shortened on its own first words.
+      speech.say('bidder seventeen', isFinal: false);
+      await settle();
+      expect(speech.pauseChanges, hasLength(2));
+      await backend.stop();
+    });
+
+    // Voice set-winners passes neither window, and must keep behaving exactly
+    // as it did: a continuous session that runs out of patience with a silent
+    // speaker only re-arms, so the two windows have never needed to differ
+    // there and touching it would risk the one half of voice that works.
+    test('leaves a continuous session on a single clock', () async {
+      await backend.start(const SpeechSessionOptions(preferOnDevice: false));
+
+      expect(speech.listenCalls.single.pauseFor, const Duration(seconds: 3));
+      speech.say('lot forty two', isFinal: false);
+      await settle();
+
+      expect(speech.pauseChanges, isEmpty);
+      await backend.stop();
     });
   });
 

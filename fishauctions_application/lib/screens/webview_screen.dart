@@ -422,6 +422,18 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
           return _voiceState();
         },
       )
+      // The operator's own tuning, held on this device (VOICE.md §5.1):
+      //   voiceGetSettings()      → {settings, settings_range, bias_supported}
+      //   voiceSetSettings({...}) → stores, answers with what's now in force
+      // Merged field by field, so the panel can send one control's value.
+      ..addJavaScriptHandler(
+        handlerName: 'voiceGetSettings',
+        callback: (_) => _voiceSettings(),
+      )
+      ..addJavaScriptHandler(
+        handlerName: 'voiceSetSettings',
+        callback: (List<dynamic> args) => _voiceSettings(_firstArg(args)),
+      )
       // Plain dictation, for any page that wants a field filled by talking —
       // the command palette's microphone first. Native for the same reason
       // voice set-winners is: `window.SpeechRecognition` exists in neither of
@@ -975,6 +987,27 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
         'listening': false,
         'error': error ?? 'Voice could not start. Try again.',
       };
+    }
+  }
+
+  /// Read, or write then read, the operator's device-local voice settings.
+  ///
+  /// One method for both handlers because the answer is the same either way —
+  /// what is now in force — and because a panel that had to reconcile a write
+  /// response against a separate read would drift the moment one of them
+  /// failed. Passing null reads; passing a map writes those fields and reads.
+  ///
+  /// Cannot throw, for the reason [_voiceState] gives: a rejected promise is
+  /// read by the page as "this build has no voice handlers", which would hide
+  /// the microphone button over a failed settings read.
+  Future<Map<String, dynamic>> _voiceSettings([Object? changes]) async {
+    try {
+      return changes == null
+          ? VoiceCommandService.instance.settingsState()
+          : await VoiceCommandService.instance.updateSettings(changes);
+    } on Object catch (e) {
+      debugPrint('voiceSettings failed: $e');
+      return {'error': 'Voice settings could not be saved.'};
     }
   }
 

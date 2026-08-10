@@ -12,7 +12,7 @@ class VoiceGrammar {
   const VoiceGrammar({
     required this.anchors,
     this.enabled = true,
-    this.backend = 'platform',
+    this.backend = 'biased',
     this.localeId = 'en_US',
     this.preferOnDevice = true,
     this.weights = const VoiceConfidenceWeights(),
@@ -21,6 +21,7 @@ class VoiceGrammar {
     this.autoSubmitOnSold = true,
     this.blockAutoSubmitWhenUnsure = true,
     this.maxAlternates = 3,
+    this.biasLowPrices = false,
   });
 
   /// Parse the `voice` block, falling back to [fallback] field by field so a
@@ -71,6 +72,9 @@ class VoiceGrammar {
       maxAlternates: json['max_alternates'] is int
           ? json['max_alternates'] as int
           : fallback.maxAlternates,
+      biasLowPrices: json['bias_low_prices'] is bool
+          ? json['bias_low_prices'] as bool
+          : fallback.biasLowPrices,
     );
   }
 
@@ -81,6 +85,16 @@ class VoiceGrammar {
   /// Which `SpeechBackend` to drive. Unknown values fall back to `platform`
   /// rather than disabling voice, so a config written for a newer build
   /// degrades instead of breaking.
+  ///
+  /// **Defaults to `biased`**, the recognizer this app drives itself, because
+  /// it is the only one that can be told the auction's lot and bidder numbers
+  /// — and a club whose bidder numbers are initials is otherwise asking a
+  /// general dictation model for strings it has no prior for. A build or
+  /// device without the native side falls back to `platform` on its own
+  /// (`Microphone.backendFor`), silently, so this costs nothing where it isn't
+  /// available. Setting `"backend": "platform"` in the served config is the
+  /// kill switch if the new one misbehaves in a hall — a Django row edit
+  /// rather than a release.
   final String backend;
 
   final String localeId;
@@ -115,6 +129,34 @@ class VoiceGrammar {
   /// How many recognizer hypotheses to score. Past about three the extra
   /// alternates are noise that only widens the chance of a false match.
   final int maxAlternates;
+
+  /// Break a tie between two equally-scored *price* readings by taking the
+  /// smaller one. `VoiceSettings.biasLowPrices` says why this is a price-only
+  /// rule and must stay one.
+  final bool biasLowPrices;
+
+  /// This grammar with a few fields replaced. Only the fields the operator's
+  /// device-local settings can override are here — everything else about a
+  /// grammar is the deployment's business, and a device that could quietly
+  /// rewrite the anchor lists would be a support call nobody could diagnose.
+  VoiceGrammar copyWith({
+    double? confidentAt,
+    bool? preferOnDevice,
+    bool? biasLowPrices,
+  }) => VoiceGrammar(
+    anchors: anchors,
+    enabled: enabled,
+    backend: backend,
+    localeId: localeId,
+    preferOnDevice: preferOnDevice ?? this.preferOnDevice,
+    weights: weights,
+    confidentAt: confidentAt ?? this.confidentAt,
+    unsureAt: unsureAt,
+    autoSubmitOnSold: autoSubmitOnSold,
+    blockAutoSubmitWhenUnsure: blockAutoSubmitWhenUnsure,
+    maxAlternates: maxAlternates,
+    biasLowPrices: biasLowPrices ?? this.biasLowPrices,
+  );
 
   /// The slot an anchor word belongs to, with how good the match was — 1.0 for
   /// the slot's first (canonical) word, 0.8 for a configured synonym. Fuzzy

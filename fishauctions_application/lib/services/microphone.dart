@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 
+import 'biased_speech_backend.dart';
 import 'platform_speech_backend.dart';
 import 'speech_backend.dart';
 
@@ -29,6 +30,66 @@ class Microphone {
   /// The shared recognizer. Created lazily — constructing it is cheap, but a
   /// user who never uses voice should never bring the plugin up at all.
   SpeechBackend get backend => _backend ??= PlatformSpeechBackend();
+
+  /// The shared recognizer, of the kind [id] names.
+  ///
+  /// **Still one object, not one per caller**, for the reason in this class's
+  /// doc: a phone has one recognition service and two of anything contend for
+  /// it. So asking for a different kind *replaces* the shared instance rather
+  /// than adding a second — and only ever between sessions, since the holder
+  /// is stopped first.
+  ///
+  /// In practice this is asked once, when voice set-winners starts and the
+  /// served grammar says which backend to use. Palette dictation never asks
+  /// and so inherits whatever is current, which is right: dictation has no
+  /// vocabulary to bias towards, so either recognizer serves it equally, and
+  /// swapping the shared object underneath it would be the expensive kind of
+  /// clever.
+  ///
+  /// An unknown id, or a backend that turns out not to be available on this
+  /// build, falls back to `platform` rather than disabling voice — a config
+  /// written for a newer app must degrade on an older one, not break it.
+  Future<SpeechBackend> backendFor(String id) async {
+    if (_pinned || _backend?.id == id) {
+      return backend;
+    }
+    if (id != 'biased') {
+      return _swapTo(PlatformSpeechBackend());
+    }
+    final biased = BiasedSpeechBackend();
+    if (await biased.isCapable()) {
+      return _swapTo(biased);
+    }
+    // No native recognizer in this build (or none on this device). Nothing is
+    // said to the user: `platform` is a working recognizer, it just can't be
+    // told what to expect, and `supportsPhraseBias` already reports that.
+    await biased.dispose();
+    return _backend?.id == 'platform'
+        ? _backend!
+        : _swapTo(PlatformSpeechBackend());
+  }
+
+  /// Replace the shared recognizer, stopping whoever is using it first.
+  ///
+  /// The order matters and is not obvious: whoever holds the microphone holds
+  /// it *through* the outgoing backend, so disposing it under them closes the
+  /// event stream they're listening to and leaves a lit button attached to a
+  /// dead recognizer. Voice set-winners selects its backend before it claims
+  /// the microphone — it has to, since a refused permission mustn't evict
+  /// palette dictation — so this is the moment the previous holder has to be
+  /// let go.
+  Future<SpeechBackend> _swapTo(SpeechBackend next) async {
+    final previous = _backend;
+    final release = _release;
+    _holder = null;
+    _release = null;
+    await release?.call();
+    _backend = next;
+    if (previous != null) {
+      await previous.dispose();
+    }
+    return next;
+  }
 
   String? _holder;
   Future<void> Function()? _release;
@@ -61,15 +122,24 @@ class Microphone {
     }
   }
 
+  /// Set when a test installs a stand-in, which [backendFor] must then never
+  /// swap out from under it. Production code never sets this, so the selection
+  /// logic above is exercised exactly as written everywhere else.
+  bool _pinned = false;
+
   @visibleForTesting
   SpeechBackend? get backendForTesting => _backend;
 
   @visibleForTesting
-  set backendForTesting(SpeechBackend? backend) => _backend = backend;
+  set backendForTesting(SpeechBackend? backend) {
+    _backend = backend;
+    _pinned = backend != null;
+  }
 
   @visibleForTesting
   void resetForTesting() {
     _backend = null;
+    _pinned = false;
     _holder = null;
     _release = null;
   }

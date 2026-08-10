@@ -129,13 +129,14 @@ class SpeechSessionOptions {
     this.preferOnDevice = true,
     this.continuous = true,
     this.pauseFor = const Duration(seconds: 3),
+    this.waitForSpeech = const Duration(seconds: 3),
     this.biasPhrases = const [],
   });
 
   final String localeId;
   final bool preferOnDevice;
 
-  /// How long a silence ends an utterance.
+  /// How long a silence ends an utterance **once the speaker has started**.
   ///
   /// **This is the whole of the delay between the speaker stopping and the
   /// microphone switching off**, so it belongs to the caller rather than the
@@ -151,6 +152,32 @@ class SpeechSessionOptions {
   /// exactly what "the app doesn't turn the microphone off the way the web
   /// does" was.
   final Duration pauseFor;
+
+  /// How long to wait for the speaker to begin, before the phrase counts as
+  /// never having happened.
+  ///
+  /// **Separate from [pauseFor] because the browser separates them, and
+  /// collapsing the two is what made dictation stop before the user had
+  /// finished the first word.** `speech_to_text` runs a single pause clock
+  /// that starts at `listen()` and is only ever pushed forward by a *result*
+  /// — sound level doesn't touch it — so one 1.5 s window meant the user had
+  /// 1.5 s from tapping the microphone to get a partial transcript back, with
+  /// network recognition's round trip inside that budget. Anyone who paused to
+  /// think, or spoke a beat late, got a microphone that switched itself off
+  /// having heard nothing.
+  ///
+  /// Web Speech has no such rule: Chrome waits several seconds for speech to
+  /// begin (then raises `no-speech`) and applies its short trailing-silence
+  /// endpointing only afterwards. This is that first window, and the backend
+  /// swaps to [pauseFor] the moment a transcript proves someone is talking.
+  ///
+  /// **Defaults to [pauseFor]'s default, which means one clock and the
+  /// behaviour that predates this option.** That is what a *continuous*
+  /// session wants and why voice set-winners doesn't set it: there, running
+  /// out of patience with a silent speaker only re-arms the recognizer, so the
+  /// two windows have never needed to differ. It is a one-shot session, where
+  /// the wait ends the session for good, that has to tell them apart.
+  final Duration waitForSpeech;
 
   /// Whether the session outlives one utterance.
   ///
@@ -221,6 +248,18 @@ abstract class SpeechBackend {
   /// Whether recognition is actually running locally. Only meaningful after
   /// [start]; platforms decide this themselves and may ignore the request.
   bool get isOnDevice;
+
+  /// Whether this backend does anything with
+  /// [SpeechSessionOptions.biasPhrases].
+  ///
+  /// False for `platform`: `speech_to_text` exposes neither iOS
+  /// `contextualStrings` nor Android's `EXTRA_BIASING_STRINGS`, which is the
+  /// one lever it can't pull and the reason the `biased` backend is on the
+  /// roadmap at all. Surfaced rather than assumed so the settings panel can
+  /// tell the operator which half of a feature they've got — the low-price
+  /// tie-break works with no biasing whatever, since it chooses between
+  /// readings the recognizer already returned.
+  bool get supportsPhraseBias => false;
 
   Stream<SpeechEvent> get events;
 

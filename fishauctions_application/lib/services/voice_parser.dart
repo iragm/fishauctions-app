@@ -102,8 +102,7 @@ class VoiceParser {
           ? considered[i].confidence
           : VoiceConfidenceInputs.neutralAsr;
       for (final parsed in readings[i]) {
-        final incumbent = best[parsed.slot];
-        if (incumbent == null || parsed.rank > incumbent.rank) {
+        if (_beats(parsed, best[parsed.slot])) {
           best[parsed.slot] = parsed;
           bestAsr[parsed.slot] = asr;
         }
@@ -147,6 +146,52 @@ class VoiceParser {
       return orderA.compareTo(orderB);
     });
     return commands;
+  }
+
+  /// Whether [challenger] should replace [incumbent] as the reading of its
+  /// slot.
+  ///
+  /// Score first, and for everything except a tie that is the whole story.
+  /// Ties are common and were being broken by nothing better than the order
+  /// the recognizer happened to list its alternates in: a price reading scores
+  /// `keyword × match` with `match` fixed at 1, so **"seventeen dollars" and
+  /// "seventy dollars" tie exactly**, and whichever the platform put first won.
+  bool _beats(_Parsed challenger, _Parsed? incumbent) {
+    if (incumbent == null) {
+      return true;
+    }
+    if (challenger.rank != incumbent.rank) {
+      return challenger.rank > incumbent.rank;
+    }
+    return _prefersLower(challenger, incumbent);
+  }
+
+  /// The low-price tie-break, on for [VoiceGrammar.biasLowPrices].
+  ///
+  /// A domain fact rather than a general heuristic: these lots mostly sell for
+  /// single-digit to twenty-dollar sums, so when the recognizer genuinely
+  /// can't tell "seventeen" from "seventy" the smaller reading is right far
+  /// more often. It costs nothing to be wrong occasionally here — the operator
+  /// is looking at the price field and a mistyped price is corrected in place.
+  ///
+  /// **Prices only, and it must stay that way.** Bidder and lot numbers have
+  /// no such distribution — they're drawn from whatever the auction assigned —
+  /// and quietly preferring the lower of two candidate *bidders* is how the
+  /// wrong person gets charged, silently, with the field looking confident.
+  ///
+  /// Note that this is a separate mechanism from phrase biasing and works with
+  /// no native code at all: biasing changes what the recognizer *offers*, this
+  /// changes which of two things it already offered we take.
+  bool _prefersLower(_Parsed challenger, _Parsed incumbent) {
+    if (!grammar.biasLowPrices || challenger.slot != VoiceSlot.price) {
+      return false;
+    }
+    final a = double.tryParse(challenger.value);
+    final b = double.tryParse(incumbent.value);
+    if (a == null || b == null) {
+      return false;
+    }
+    return a < b;
   }
 
   /// Fraction of the hypotheses that produced this slot at all and agreed with
@@ -293,7 +338,19 @@ class VoiceParser {
     return _fuzzyAnchor(token);
   }
 
-  /// An anchor one edit away — "bidders" for "bidder", "dollar" for "dollars".
+  /// An anchor one edit away — "bidders" for "bidder", "dollar" for "dollars"
+  /// — counting a voiced/voiceless swap as no edit at all, so "bitter" reaches
+  /// the bidder slot.
+  ///
+  /// That last part is not a loosened threshold, it's a different kind of
+  /// miss. "bitter" is two edits from "bidder" and was therefore invisible
+  /// here, but it is *zero* phonetic edits away: American English flaps both
+  /// consonants to the same sound, so the recognizer is not making a mistake
+  /// an acoustic model could fix — there is nothing in the audio that
+  /// distinguishes them. Raising the plain edit budget to 2 instead would have
+  /// caught it at the cost of matching genuinely different words ("dollars"
+  /// and "collars" are two apart); [boundedEditDistance]'s `ignoreVoicing`
+  /// buys the homophones and nothing else.
   ///
   /// Restricted to words of five characters or more, which is also why "lot"
   /// and "sold" never match fuzzily: at three or four characters an edit
@@ -301,10 +358,27 @@ class VoiceParser {
   /// ordinary speech would start firing anchors, which is exactly the failure
   /// this grammar exists to prevent.
   ///
+  /// The one exception is a **trailing plural**, checked first and at any
+  /// length ([_singular]). It is the most common variation a recognizer
+  /// produces, it is the same word rather than a guess about which word, and
+  /// it carries none of the risk the length guard exists for: "lots" stems to
+  /// "lot" and cannot be confused with "got" or "not". Without it the app's
+  /// single most-used anchor — three characters, so no fuzzy pass at all — had
+  /// to be transcribed exactly or the whole utterance was dropped.
+  ///
   /// A fuzzy anchor scores 0.6, which lands the resulting command just above
   /// the unsure threshold — so it fills the field and visibly asks, rather
-  /// than either ignoring the operator or quietly trusting a guess.
+  /// than either ignoring the operator or quietly trusting a guess. A plural
+  /// scores 0.8, the same as a configured synonym, because it isn't a guess.
   _AnchorHit? _fuzzyAnchor(String token) {
+    final singular = _singular(token);
+    if (singular != null) {
+      final stem = grammar.anchorFor(singular);
+      if (stem != null) {
+        final quality = stem.quality < 0.8 ? stem.quality : 0.8;
+        return _AnchorHit(stem.slot, quality, 1);
+      }
+    }
     if (token.length < 5) {
       return null;
     }
@@ -313,10 +387,29 @@ class VoiceParser {
         if (word.contains(' ') || (word.length - token.length).abs() > 1) {
           continue;
         }
-        if (boundedEditDistance(token, word, 1) <= 1) {
+        if (boundedEditDistance(token, word, 1, ignoreVoicing: true) <= 1) {
           return _AnchorHit(entry.key, 0.6, 1);
         }
       }
+    }
+    return null;
+  }
+
+  /// [token] with a trailing plural removed, or null if it has none.
+  ///
+  /// Deliberately the crude rule and not a stemmer: anchors are a fixed
+  /// handful of short common nouns and verbs, and every irregular plural in
+  /// English is a word this grammar will never contain. A stemmer would buy
+  /// nothing here and would happily turn "pass" into "pas".
+  static String? _singular(String token) {
+    if (token.length > 4 && token.endsWith('es')) {
+      return token.substring(0, token.length - 2);
+    }
+    // Not "ss": "pass" and "dollars" must not stem to "pas" and "dollar" by
+    // this route — the first is already an anchor and the second is reached
+    // exactly, both before this runs.
+    if (token.length > 3 && token.endsWith('s') && !token.endsWith('ss')) {
+      return token.substring(0, token.length - 1);
     }
     return null;
   }

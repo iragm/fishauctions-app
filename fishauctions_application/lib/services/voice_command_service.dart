@@ -5,10 +5,13 @@ import 'package:logger/logger.dart';
 
 import '../models/voice_command.dart';
 import '../models/voice_grammar.dart';
+import '../models/voice_settings.dart';
 import 'bundled_voice_grammar.dart';
 import 'microphone.dart';
 import 'speech_backend.dart';
+import 'voice_bias_phrases.dart';
 import 'voice_parser.dart';
+import 'voice_settings_service.dart';
 import 'voice_vocabulary_service.dart';
 
 final _log = Logger();
@@ -37,7 +40,12 @@ class VoiceCommandService {
   SpeechBackend? _backend;
   StreamSubscription<SpeechEvent>? _subscription;
   VoiceEventSink? _sink;
-  VoiceGrammar _grammar = bundledVoiceGrammar();
+
+  /// What `/api/mobile/config/` served, untouched. The operator's overrides
+  /// are applied on read in [grammar] rather than folded in here, so a
+  /// deployment retuning its grammar still reaches a device whose owner has
+  /// moved one unrelated slider.
+  VoiceGrammar _served = bundledVoiceGrammar();
 
   /// The last value accepted per slot, and how sure we were. Drives the
   /// `blocked_by` list on a `sold`, which is the whole reason a "sold" heard
@@ -65,7 +73,7 @@ class VoiceCommandService {
   /// capability — so the dialog appeared on page load and the answer was
   /// `supported: false` on every phone that had not already granted it.
   Future<bool> isSupported() async {
-    if (!_grammar.enabled) {
+    if (!grammar.enabled) {
       return false;
     }
     return _ensureBackend().isCapable();
@@ -82,11 +90,20 @@ class VoiceCommandService {
   /// the rest.
   void applyConfig(Object? voiceBlock) {
     if (voiceBlock is Map<String, dynamic>) {
-      _grammar = VoiceGrammar.fromJson(voiceBlock, fallback: _grammar);
+      _served = VoiceGrammar.fromJson(voiceBlock, fallback: _served);
     }
   }
 
-  VoiceGrammar get grammar => _grammar;
+  /// The grammar actually in force: what the deployment served, with this
+  /// operator's device-local overrides on top.
+  ///
+  /// Computed on read rather than stored, so a setting changed mid-auction
+  /// takes effect on the *next utterance* rather than the next session. That
+  /// is the whole point of the settings panel — the operator is tuning while
+  /// the auction runs, and "stop voice, change it, start voice" would make
+  /// them stop selling to do it.
+  VoiceGrammar get grammar =>
+      VoiceSettingsService.instance.current.applyTo(_served);
 
   /// The backend named by [VoiceGrammar.backend].
   ///
@@ -98,11 +115,22 @@ class VoiceCommandService {
   /// Comes from [Microphone] rather than being constructed here: palette
   /// dictation listens through the same recognizer, and two of them contend
   /// for one platform service rather than giving you two.
-  SpeechBackend _ensureBackend() {
-    if (_grammar.backend != 'platform') {
-      _log.i('Unknown voice backend "${_grammar.backend}"; using platform');
+  SpeechBackend _ensureBackend() => _backend ??= Microphone.instance.backend;
+
+  /// The backend the served grammar asks for, brought up if it isn't already.
+  ///
+  /// Async and separate from [_ensureBackend] because `biased` has to ask the
+  /// platform whether it exists on this build before it can be chosen, and
+  /// nothing on the `voiceGetState` path may wait on a channel — that call
+  /// runs when the page loads and decides whether the microphone button
+  /// appears at all. So capability questions live here, on the Listen tap.
+  Future<SpeechBackend> _selectBackend() async {
+    final wanted = grammar.backend;
+    final backend = await Microphone.instance.backendFor(wanted);
+    if (backend.id != wanted) {
+      _log.i('Voice backend "$wanted" unavailable; using ${backend.id}');
     }
-    return _backend ??= Microphone.instance.backend;
+    return _backend = backend;
   }
 
   /// Start listening for [auctionSlug], reporting everything to [sink].
@@ -120,7 +148,11 @@ class VoiceCommandService {
     _sink = sink;
     _slots.clear();
     _lastEmitted.clear();
-    final backend = _ensureBackend();
+    // Before `grammar` is read for anything: the getter is synchronous, so an
+    // unloaded store would silently run the session on the deployment's
+    // defaults and make the panel look like it had done nothing.
+    await VoiceSettingsService.instance.load();
+    final backend = await _selectBackend();
     final readiness = await backend.prepare();
     if (readiness != SpeechReadiness.ready) {
       _emit({
@@ -137,13 +169,20 @@ class VoiceCommandService {
     await _subscription?.cancel();
     _subscription = backend.events.listen(_onSpeechEvent);
     _listening = true;
+    final inForce = grammar;
     await backend.start(
       SpeechSessionOptions(
-        localeId: _grammar.localeId,
-        preferOnDevice: _grammar.preferOnDevice,
-        // Ignored by the platform backend, which can't express biasing;
-        // carried so the `biased`/`cloud` backends need no signature change.
-        biasPhrases: [...vocabulary.lotNumbers, ...vocabulary.bidderNumbers],
+        localeId: inForce.localeId,
+        preferOnDevice: inForce.preferOnDevice,
+        // Ignored by the `platform` backend, which has no way to express
+        // biasing — `speech_to_text` exposes neither iOS `contextualStrings`
+        // nor Android's `EXTRA_BIASING_STRINGS`. Built and carried anyway so
+        // the `biased` backend is a backend swap rather than a rewrite, and
+        // so the selection logic can be tested long before native code exists.
+        biasPhrases: VoiceBiasPhrases.build(
+          vocabulary: vocabulary,
+          grammar: inForce,
+        ),
       ),
     );
     return true;
@@ -190,7 +229,7 @@ class VoiceCommandService {
 
   void _handleResult(SpeechEvent event) {
     final parser = VoiceParser(
-      grammar: _grammar,
+      grammar: grammar,
       vocabulary: VoiceVocabularyService.instance.current,
     );
     final commands = parser.parse(event.alternates);
@@ -218,7 +257,7 @@ class VoiceCommandService {
       return command;
     }
     final blockers = <String>[];
-    if (!_grammar.autoSubmitOnSold) {
+    if (!grammar.autoSubmitOnSold) {
       blockers.add('disabled');
     }
     for (final slot in [VoiceSlot.lot, VoiceSlot.bidder, VoiceSlot.price]) {
@@ -227,8 +266,8 @@ class VoiceCommandService {
         blockers.add(slot.wireName);
         continue;
       }
-      if (_grammar.blockAutoSubmitWhenUnsure &&
-          state.confidence < _grammar.confidentAt) {
+      if (grammar.blockAutoSubmitWhenUnsure &&
+          state.confidence < grammar.confidentAt) {
         blockers.add(slot.wireName);
       }
     }
@@ -297,16 +336,63 @@ class VoiceCommandService {
       'permission': supported && await _ensureBackend().hasPermission(),
       'backend': backendId,
       'on_device': isOnDevice,
-      'confident_at': _grammar.confidentAt,
-      'unsure_at': _grammar.unsureAt,
+      'confident_at': grammar.confidentAt,
+      'unsure_at': grammar.unsureAt,
+      ...await settingsState(),
     };
+  }
+
+  /// What the settings panel renders itself from — the values *in force*, the
+  /// slider's endpoints, and which controls are worth showing at all.
+  ///
+  /// The effective values rather than the stored overrides, because the panel
+  /// has to show the operator where they actually are: a fresh device has no
+  /// overrides and its controls still need positions, and they come from the
+  /// deployment's grammar.
+  ///
+  /// `bias_supported` is the same idea as `supported` on the microphone
+  /// button. The low-price tie-break works today with no native code — it
+  /// picks between readings the recognizer already offered — but the phrase
+  /// biasing that would *also* improve it needs a `SpeechBackend` that can
+  /// express it, and a page shouldn't have to know which builds have one.
+  Future<Map<String, dynamic>> settingsState() async {
+    // The one place the stored settings are guaranteed to have been read: the
+    // panel asks for this before it can draw itself, and `state()` folds it in
+    // so `voiceGetState` on page load warms the cache too.
+    await VoiceSettingsService.instance.load();
+    final inForce = grammar;
+    return {
+      'settings': {
+        'confident_at': inForce.confidentAt,
+        'prefer_on_device': inForce.preferOnDevice,
+        'bias_low_prices': inForce.biasLowPrices,
+      },
+      'settings_range': {
+        'confident_min': VoiceSettings.minConfidentAt,
+        'confident_max': VoiceSettings.maxConfidentAt,
+      },
+      'bias_supported': _backend?.supportsPhraseBias ?? false,
+    };
+  }
+
+  /// Store settings from the panel and report what is now in force.
+  ///
+  /// Takes effect on the next utterance — [grammar] is computed on read — so
+  /// the operator can tune while selling rather than stopping to do it.
+  Future<Map<String, dynamic>> updateSettings(Object? raw) async {
+    if (raw is Map) {
+      await VoiceSettingsService.instance.save(
+        VoiceSettings.fromJson(Map<String, dynamic>.from(raw)),
+      );
+    }
+    return settingsState();
   }
 
   @visibleForTesting
   void resetForTesting() {
     _slots.clear();
     _lastEmitted.clear();
-    _grammar = bundledVoiceGrammar();
+    _served = bundledVoiceGrammar();
     _listening = false;
     _backend = null;
     _sink = null;

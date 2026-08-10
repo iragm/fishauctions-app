@@ -512,10 +512,60 @@ List<String> spokenFormsFor(String value) {
   return normalized.toList();
 }
 
+/// Consonants a recognizer transcribing American English confuses because the
+/// *speaker* doesn't distinguish them, mapped to a shared class id.
+///
+/// These are the voiced/voiceless pairs, and the reason they matter here is
+/// intervocalic flapping: "bidder" and "bitter" are both [ˈbɪɾɚ] in ordinary
+/// American speech, and so are "ladder"/"latter" and "coated"/"coded". No
+/// amount of acoustic model quality separates them, because there is nothing
+/// in the audio to separate — which is why "bitter" came back for "bidder"
+/// often enough to be reported as the thing voice set-winners gets wrong.
+///
+/// Vowels are deliberately absent. They carry most of the distinctions between
+/// the identifiers this grammar has to keep apart, and blurring them would
+/// make anchors fire on ordinary speech, which is the failure the closed
+/// grammar exists to prevent.
+const _voicingClass = <String, int>{
+  't': 0,
+  'd': 0,
+  's': 1,
+  'z': 1,
+  'p': 2,
+  'b': 2,
+  'k': 3,
+  'g': 3,
+  'f': 4,
+  'v': 4,
+};
+
+final _voicingClassByCode = <int, int>{
+  for (final entry in _voicingClass.entries)
+    entry.key.codeUnitAt(0): entry.value,
+};
+
+bool _sameVoicingClass(int a, int b) {
+  final classA = _voicingClassByCode[a];
+  return classA != null && classA == _voicingClassByCode[b];
+}
+
 /// Levenshtein distance, bounded: returns [limit] + 1 as soon as it's clear
 /// the real distance exceeds [limit]. The fuzzy pass runs this against every
 /// key in the index on every utterance, so the early exit matters.
-int boundedEditDistance(String a, String b, int limit) {
+///
+/// [ignoreVoicing] makes a substitution within [_voicingClass] free, which
+/// turns "bitter"/"bidder" into a distance of zero rather than two. Off by
+/// default, and deliberately not used when matching *values*: a bidder number
+/// is picked out of a closed set where these letters are doing real work, and
+/// the whole point of a vocabulary is that "ten" and "den" are not the same
+/// answer. Anchors are the opposite case — a fixed handful of words, where
+/// missing one costs the operator a whole re-spoken command.
+int boundedEditDistance(
+  String a,
+  String b,
+  int limit, {
+  bool ignoreVoicing = false,
+}) {
   if ((a.length - b.length).abs() > limit) {
     return limit + 1;
   }
@@ -528,7 +578,12 @@ int boundedEditDistance(String a, String b, int limit) {
     current[0] = i;
     var best = current[0];
     for (var j = 1; j <= b.length; j++) {
-      final cost = a.codeUnitAt(i - 1) == b.codeUnitAt(j - 1) ? 0 : 1;
+      final left = a.codeUnitAt(i - 1);
+      final right = b.codeUnitAt(j - 1);
+      final cost =
+          left == right || (ignoreVoicing && _sameVoicingClass(left, right))
+          ? 0
+          : 1;
       current[j] = math.min(
         math.min(current[j - 1] + 1, previous[j] + 1),
         previous[j - 1] + cost,

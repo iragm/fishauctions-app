@@ -16,6 +16,8 @@ import UIKit
   private static var squareInitializedAppId: String?
   // Retained for the engine's lifetime — it owns the AR event channels' stream handlers.
   private var arEvents: ArEventBridge?
+  // Same: it owns the voice `biased` backend's method + event channels.
+  private var speechBridge: BiasedSpeechBridge?
 
   override func application(
     _ application: UIApplication,
@@ -106,6 +108,15 @@ import UIKit
       ArCameraViewFactory(events: arEvents!),
       withId: "com.fishauctions.app/ar_camera"
     )
+
+    // Voice set-winners' `biased` backend (BiasedSpeechBridge.swift): SFSpeechRecognizer driven
+    // directly so the auction's own lot and bidder numbers can be passed as `contextualStrings`.
+    // speech_to_text never sets that property and has no way to, which is the only reason we own
+    // a recognizer at all — everything above one utterance stays in Dart
+    // (RestartingSpeechBackend). Constructed here, at engine setup, for the same reason as the AR
+    // channels: Dart subscribes to the event stream before its first `start`, and a channel with
+    // no stream handler isn't registered with the messenger at all.
+    speechBridge = BiasedSpeechBridge(messenger: registrar.messenger())
   }
 
   // Horizontal field of view of the back wide camera in degrees, or nil when

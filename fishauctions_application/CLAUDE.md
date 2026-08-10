@@ -454,10 +454,116 @@ bridge.
   chant can't corrupt a field. **`sold` is guarded** — it submits only when all
   three fields are filled and confident, otherwise it arrives with `blocked_by`
   populated and the page says what's missing.
+- **Only one of the four ways a phrase can end produces a final result, and
+  set-winners acts on final results only — so a whole command could be heard
+  and silently discarded** (`PlatformSpeechBackend._flushPendingAsFinal`,
+  fixed 2026-08-09). `ERROR_NO_MATCH` (what Android answers for a *short* or
+  noisy utterance), `ERROR_SPEECH_TIMEOUT`, and the platform simply reporting
+  done all leave the words sitting in the last partial; `VoiceCommandService`
+  parses finals only, deliberately, because writing every partial into a field
+  reads as the app typing nonsense. Worse, a **continuous** session's
+  `_endOfUtterance` emits no event at all, so the caller had no way to notice
+  and finalize for itself. This is why "lot five" — two words, the most
+  no-matchable length there is — never filled anything while longer phrases
+  worked. The backend now promotes the last partial when a phrase ends without
+  a final, which is what Web Speech's `stop()` does and what
+  `DictationService._finalizePending` was already doing one layer up. Not on an
+  explicit `stop()`: that never routes through `_endOfUtterance`, because
+  switching the microphone off is cancelling, not submitting.
+- **A missed anchor loses the whole command, so anchor matching forgives the
+  confusions the *speaker* makes** (`boundedEditDistance(…, ignoreVoicing:
+  true)` in `VoiceParser._fuzzyAnchor`, added 2026-08-09). The first thing
+  reported from real use was "bitter" for "bidder" — which is not an acoustic
+  model failing: American English flaps both consonants to the same sound, so
+  there is nothing in the audio distinguishing them, and "ladder"/"latter" go
+  the same way. At two plain edits it was invisible to a fuzzy pass capped at
+  one, and with no anchor the bidder slot never opened and the utterance was
+  dropped in silence. Substitutions *within a voicing pair* (t/d, s/z, p/b,
+  k/g, f/v) now cost nothing, which buys the homophones without buying every
+  two-edit neighbour — "collars" is still not "dollars". Values are matched
+  with plain distance, deliberately: a vocabulary exists precisely so "ten"
+  and "den" are different answers. A fuzzy anchor still scores 0.6, so the
+  field fills and visibly asks rather than being trusted. A **trailing plural**
+  is checked first and at any length (`_singular`, 0.8): it's the same word
+  rather than a guess about which word, and it's the only way `lot` — three
+  characters, so excluded from the fuzzy pass entirely — tolerates anything at
+  all, which mattered because it is the most-used anchor in the grammar.
 - **The grammar is served data** (`voice` block in `/api/mobile/config/`, over
   `bundled_voice_grammar.dart`), same pattern as `ThermalPrinterProfile`. Which
   words a given auctioneer uses is exactly what we'll be wrong about on day one,
   and v1 had no tuning loop at all.
+- **Three settings sit on top of that, device-local, movable mid-auction**
+  (`VoiceSettings` + `voiceGetSettings`/`voiceSetSettings`; the page half is
+  `BACKEND_SPEC.md` Part VOICE-7): a confidence slider (0.6–0.9 → `confidentAt`),
+  "process on this phone" (`preferOnDevice`) and "bias towards lower numbers"
+  (`biasLowPrices`). Device-local is the one place the "prefer the backend" rule
+  doesn't apply — these describe a phone in a room, its microphone, its language
+  pack, its noise floor, and syncing them would fight an operator with two
+  handsets. **Every field is nullable and null means "whatever the deployment
+  served"**: a device that stamped a copy of today's defaults the first time the
+  panel opened would never see a central retune again. `VoiceCommandService.grammar`
+  composes served + overrides on *read*, so a change lands on the next utterance
+  rather than the next session.
+- **Prices *can* be biased separately from bidders and lots, and the APIs are
+  the reason it looks impossible.** `contextualStrings` (iOS) and
+  `EXTRA_BIASING_STRINGS` (Android) are each one flat array for the whole
+  utterance with no slot, category or weight — but both bias **phrases**, and
+  `"seventeen dollars"` is a different string from `"lot seventeen"`. Anchoring
+  each biased value to its keyword buys per-slot biasing out of an API offering
+  none, the same trick as the anchored grammar. `VoiceBiasPhrases` builds the
+  list against Apple's ~100-phrase / one-to-two-word guidance, spending the
+  budget by expected value: non-numeric bidder ids (`NM`, `BOB` — no general
+  recognizer produces these unprompted) first, then low prices, then seller-dash
+  lots, then numeric bidders. Plain numeric lot numbers come last and usually
+  don't fit, which is right — they're what a recognizer already gets right.
+- **`speech_to_text` cannot deliver phrase biasing at all**, which is why the
+  app now drives its own recognizer: `SpeechListenOptions` has fixed fields,
+  neither native half touches either API, and the only extension point
+  (`initialize(options:)`) is per-process and reads exactly one name
+  (`noBluetooth`). `BiasedSpeechBackend` + `BiasedSpeechBridge.kt` /
+  `BiasedSpeechBridge.swift` own `android.speech.SpeechRecognizer` and
+  `SFSpeechRecognizer` directly over `com.fishauctions.app/speech`(`_events`),
+  and **`biased` is now the default** (`VoiceGrammar.backend`) — a build or
+  device without the native side falls back to `platform` silently in
+  `Microphone.backendFor`, and `"backend": "platform"` in the served config is
+  the kill switch, a Django row edit rather than a release.
+- **The native halves handle exactly one utterance and know nothing about
+  sessions.** Re-arming, the two silence windows, the on-device fallback, the
+  three-strikes rule and promoting a last partial all live in
+  `RestartingSpeechBackend`, which both backends extend — that logic is
+  identical on both platforms and has already been wrong three times, so a
+  second copy would mean fixing the fourth bug twice. The native sides also
+  report `speech_to_text`'s own `error_*` strings, so error classification
+  happens in one place for both backends and both platforms.
+- **`supportsPhraseBias` is a runtime question on Android.**
+  `EXTRA_BIASING_STRINGS` is API 33 and `minSdk` is 28, so a real share of
+  phones get the new recognizer without its point (still fine — it recognizes
+  speech), and the settings panel is told rather than assuming. iOS has
+  `contextualStrings` since iOS 10, well under the deployment target, so it's
+  unconditionally true there.
+- **Two races the handoff has to get right, both found by construction rather
+  than on hardware.** A recognizer asked to stop keeps calling back for a
+  moment, so Android tags each utterance and ignores a predecessor's callbacks
+  (`BiasedSpeechBridge.Utterance`) — otherwise the old one's `onResults` tears
+  down the new one. And Dart's pause timer closes the utterance and waits for
+  the *platform's* answer rather than declaring the phrase over itself:
+  stopping a recognizer is asking for its final result, and ending the phrase
+  first would flush a partial, re-arm, and land the real final inside the next
+  utterance. A 1.5 s watchdog covers a recognizer that answers a stop with
+  nothing at all, which would otherwise be a lit microphone that has quietly
+  stopped listening.
+- **Swapping backends stops the current holder first** (`Microphone._swapTo`).
+  Voice selects its backend *before* it claims the microphone — it has to,
+  since a refused permission mustn't evict palette dictation — so disposing the
+  outgoing backend is the moment dictation's event stream would otherwise close
+  under it.
+- **The low-price tie-break is a separate mechanism that works today.** Biasing
+  changes what the recognizer *offers*; the tie-break picks between readings it
+  already returned. A price scores `keyword × match` with `match` pinned at 1, so
+  "seventeen dollars" and "seventy dollars" tie **exactly** and the winner was
+  whichever the platform happened to list first. Prices only, permanently: bidder
+  and lot numbers have no such distribution, and quietly preferring the lower of
+  two candidate bidders is how the wrong person gets charged.
 - **The recognizer is swappable** (`SpeechBackend`). `platform` is the only one
   today; `biased` (phrase biasing over a platform channel), `cloud` and a
   fixed-grammar spotter are the named upgrade paths, selected by config.
@@ -920,6 +1026,23 @@ JWT auth is bridged into the WebView's Django cookie session:
   browser's time to notice, which is what "it doesn't turn the mic off the way
   the web does" was (fixed 2026-08-09; the earlier fix that day made it stop
   by itself at all).
+  **A browser has *two* silence windows and `speech_to_text` has one, and
+  collapsing them is what made dictation stop before the user had finished
+  the first word** (fixed 2026-08-09, third round). The plugin runs a single
+  pause clock that starts at `listen()` and is pushed forward only by a
+  *result* — sound level does not touch it — so 1.5 s was not "1.5 s after you
+  stop talking", it was a 1.5 s deadline on getting a transcript back at all,
+  with network recognition's round trip inside the budget. Chrome instead
+  waits several seconds for speech to *begin* (then `no-speech`) and applies
+  its short trailing-silence endpointing only afterwards. So
+  `SpeechSessionOptions` now carries `waitForSpeech` (dictation: 8 s) beside
+  `pauseFor`, `PlatformSpeechBackend` arms each listen with the long one and
+  calls the plugin's `changePauseFor` on an utterance's **first partial** to
+  drop to the short one — which is precisely what that API exists for. The
+  default `waitForSpeech` equals the default `pauseFor`, i.e. one clock and
+  the old behaviour, because a *continuous* session that runs out of patience
+  with a silent speaker only re-arms: voice set-winners passes neither value
+  and is deliberately untouched.
   **A phrase that ends without a final transcript still gets reported as one**
   (`_finalizePending`): the recognizer can deliver a run of partials and then
   simply stop, and a final is what the page acts on — Web Speech's own `stop()`
