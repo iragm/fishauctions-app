@@ -41,7 +41,7 @@ dependencies:
   # State management
   flutter_riverpod: ^3.3.2
   # Secure token storage
-  flutter_secure_storage: ^10.3.1
+  flutter_secure_storage: ^11.0.0
   # Serialization
   freezed_annotation: ^3.1.0
   # Device location → latitude/longitude cookies for the WebView (auction/lot
