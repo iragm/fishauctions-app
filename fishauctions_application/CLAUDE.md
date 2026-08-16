@@ -819,8 +819,7 @@ that shaped the app:
 ## CI/CD
 
 GitHub Actions live in `.github/workflows/` (repo root, above `fishauctions_application/`):
-- **ci.yml** — PRs + master/main pushes: pub get, generated-code freshness check, `dart format` check, `flutter analyze`, `flutter test`, **and a debug APK build** (on since 2026-08-16, see below). The steps themselves live in the composite action `.github/actions/flutter-verify` so `dependencies.yml` can run *the same* checks — it has to run them itself, since a branch pushed with `GITHUB_TOKEN` never triggers `ci.yml`.
-  - **"Nothing in a normal PR touches Gradle" was false, and it cost six days of a broken `main`.** A pub bump reaches Gradle through each plugin's *own* Android module: `square_mobile_payments_sdk` 2026.8.0 (merged by Dependabot 2026-08-10) rewrote its `android/build.gradle` into Kotlin DSL, whose `targetSdk = 36` on a **library** module binds to `LibraryDefaultConfig.setTargetSdk(Integer)` — removed in AGP 9, which this project has used since its first commit. The old Groovy DSL let the identical line through, so the version bump looked like a patch. Nothing caught it because no CI job had ever invoked Gradle; the first thing that did (`dependencies.yml`'s APK build) failed on its first run. The app is pinned to `2026.7.2` until Square drops the line — `2026.8.1`'s `android/` is byte-identical to `2026.8.0`'s.
+- **ci.yml** — PRs + master/main pushes: pub get, generated-code freshness check, `dart format` check, `flutter analyze`, `flutter test`. No Gradle — deliberately, it costs minutes on every push and the weekly updater is where dependency-driven Gradle breakage actually shows up. The steps themselves live in the composite action `.github/actions/flutter-verify` so `dependencies.yml` can run *the same* checks — it has to run them itself, since a branch pushed with `GITHUB_TOKEN` never triggers `ci.yml`.
 - **android-release.yml** — **manual** (`workflow_dispatch`, pick a Play track): runs the CI suite as a gate, restores the upload keystore from secrets (fails fast if `ANDROID_KEYSTORE_BASE64` is missing — a release must be real-signed), builds the signed prod `.aab` **and uploads it to Google Play** on the chosen track (`PLAY_SERVICE_ACCOUNT_JSON`; prerequisites satisfied), plus a signed sideloadable APK artifact.
 - **ios-release.yml** — **manual** (`workflow_dispatch`) on a `macos-latest` runner, same CI gate. Default run is an unsigned `flutter build ios --no-codesign` (works today, no secrets — the macOS equivalent of the Android compile gate; it's what verifies `AppDelegate.swift`/plugins actually build on Apple toolchain). The `distribute: true` path (signed `.ipa` → TestFlight via an App Store Connect API key) is scaffolded and fails fast until the signing secrets exist (see `IOS.md`).
 - **dependencies.yml** — **weekly** (Mondays 06:23 UTC, plus `workflow_dispatch`), and the reason there is no `dependabot.yml` any more (removed 2026-08-15). Dependabot's problem wasn't the PR count, it was that **nothing it opened had been shown to work together**: each ecosystem moved in its own PR against a CI run that never builds Gradle and never touches Xcode. This updates everything in one pass — pub constraints via `pub upgrade --major-versions`, then AGP/Kotlin/Maven coordinates/the Gradle wrapper/`uses:` pins via `.github/scripts/bump_versions.py`, which *discovers* the pins rather than listing them, so a dependency added later needs no script edit — and then verifies the result with `flutter-verify` **plus a real debug APK build and an unsigned iOS build**. Only then does it open one PR, on one rolling branch.
@@ -829,6 +828,30 @@ GitHub Actions live in `.github/workflows/` (repo root, above `fishauctions_appl
   - **Hold lists live in the workflow's `env:`** (`PUB_HOLD`/`GRADLE_HOLD`/`ACTIONS_HOLD`), each entry with the reason it can't just be bumped — `flutter_inappwebview`'s deliberate beta pin, `freezed_annotation`'s `dependency_overrides` twin, the native Square SDK that has to match the plugin's. Held packages are still *reported* as available, so a hold can't quietly become permanent.
   - **The pinned Flutter SDK is read from `ci.yml` at run time, never bumped by default.** `workflow_dispatch` with `bump-flutter` turns it on; the verify steps then re-read the pin from the working tree, so the bump is checked against the version it moved to rather than the one the run started with.
   - Needs **Settings → Actions → General → "Allow GitHub Actions to create and approve pull requests"** enabled, or `gh pr create` 403s.
+
+**AGP is held below 9.x, and that is not staleness — it is what keeps the
+payments SDK current.** AGP 9.0 removed `targetSdk` from the *library* DSL
+(`LibraryBaseFlavor.setTargetSdk` is absent from the 9.0.1/9.2.1/9.3.1 jars and
+present in 8.13.2), and `square_mobile_payments_sdk`'s Android module still sets
+it, so every AGP 9 build dies while configuring the payments plugin. Square
+documents "AGP 8.4.2 or later" and never mentions AGP 9. The alternative was
+pinning the plugin back to 2026.7.2, which on iOS would also drag the pod down to
+`SquareMobilePaymentsSDK ~> 2.5.0` — Android has an app-side override
+(`implementation("com.squareup.sdk:mobile-payments-sdk:2.6.0")`, highest wins),
+iOS has nothing, so pinning the plugin means shipping an older payments SDK on
+one platform. Holding AGP costs nothing comparable. `GRADLE_CEILING` in
+`dependencies.yml` enforces it while still letting 8.13.x patches through, and
+the PR body reports the withheld bump every week so the cap can't go stale. Lift
+it when Square ships a module without that line.
+
+Two related facts worth keeping: **Flutter 3.44.1 only knows AGP up to 9.1 and
+KGP up to 2.3.20** (`maxKnownAndSupportedAgpVersion` /
+`maxKnownAndSupportedKgpVersion` in
+`flutter_tools/lib/src/android/gradle_utils.dart`), so the AGP 9.3.1 and Kotlin
+2.4.10 that unattended bumps had reached were both past what this SDK supports.
+And AGP 8.13 requires **Gradle ≥ 8.13** with no upper bound in Flutter's table,
+so the 9.7.0 wrapper stays — if that pairing turns out not to hold, the wrapper
+is the thing to move, not the AGP pin.
 
 The app's own bytecode target is Java 17 (`sourceCompatibility`/`targetCompatibility`/Kotlin
 `jvmTarget` in `android/app/build.gradle.kts`) — unrelated to the JDK actually

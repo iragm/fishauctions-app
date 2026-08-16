@@ -67,8 +67,19 @@ def parse_version(text: str) -> tuple:
     return tuple(parts[:3])
 
 
-def pick_latest(current: str, candidates: list[str], max_bump: str) -> str | None:
-    """Newest stable candidate strictly above `current`, or None."""
+def pick_latest(
+    current: str,
+    candidates: list[str],
+    max_bump: str,
+    ceiling: tuple | None = None,
+) -> str | None:
+    """Newest stable candidate strictly above `current`, or None.
+
+    `ceiling` is an exclusive upper bound: it is how a version that must not
+    move past a line — AGP, held on 8.x because AGP 9 removed an API a
+    dependency still calls — keeps receiving patch releases instead of being
+    frozen outright by the hold list.
+    """
     current_parts = parse_version(current)
     best: tuple | None = None
     best_text: str | None = None
@@ -80,9 +91,29 @@ def pick_latest(current: str, candidates: list[str], max_bump: str) -> str | Non
             continue
         if max_bump == "minor" and parts[0] != current_parts[0]:
             continue
+        if ceiling is not None and parts >= ceiling:
+            continue
         if best is None or parts > best:
             best, best_text = parts, candidate
     return best_text
+
+
+def parse_ceilings(text: str) -> dict[str, tuple]:
+    """`"com.android.application<9,com.foo:bar<2.5"` -> {key: exclusive max}."""
+    ceilings: dict[str, tuple] = {}
+    for entry in text.split(","):
+        entry = entry.strip()
+        if not entry or "<" not in entry:
+            continue
+        key, _, bound = entry.partition("<")
+        ceilings[key.strip()] = parse_version(bound.strip())
+    return ceilings
+
+
+def note_cap(notes: list[str], what: str, current: str, capped: str | None, uncapped: str | None) -> None:
+    """Record a bump a ceiling withheld, so the cap can't quietly go stale."""
+    if uncapped and uncapped != capped:
+        notes.append(f"| {what} | {current} | {capped or current} | {uncapped} |")
 
 
 # ── network ────────────────────────────────────────────────────────────────────
@@ -156,7 +187,9 @@ def gradle_files(root: Path) -> list[Path]:
     return sorted(p for p in (root / "fishauctions_application" / "android").rglob("*.gradle.kts"))
 
 
-def bump_gradle(root: Path, hold: set[str], max_bump: str) -> list[Change]:
+def bump_gradle(
+    root: Path, hold: set[str], max_bump: str, ceilings: dict, notes: list[str]
+) -> list[Change]:
     files = gradle_files(root)
     repos = list(DEFAULT_MAVEN_REPOS)
     for path in files:
@@ -179,7 +212,8 @@ def bump_gradle(root: Path, hold: set[str], max_bump: str) -> list[Change]:
                 # Expected for dev.flutter.* — those come from the Flutter SDK's
                 # included build, not from a repository.
                 continue
-            latest = pick_latest(current, versions, max_bump)
+            latest = pick_latest(current, versions, max_bump, ceilings.get(plugin_id))
+            note_cap(notes, f"plugin `{plugin_id}`", current, latest, pick_latest(current, versions, max_bump))
             if not latest:
                 continue
             replacement = match.group(0).replace(f'"{current}"', f'"{latest}"')
@@ -194,7 +228,8 @@ def bump_gradle(root: Path, hold: set[str], max_bump: str) -> list[Change]:
             versions = maven_versions(repos, group, artifact)
             if not versions:
                 continue
-            latest = pick_latest(current, versions, max_bump)
+            latest = pick_latest(current, versions, max_bump, ceilings.get(coordinate))
+            note_cap(notes, f"`{coordinate}`", current, latest, pick_latest(current, versions, max_bump))
             if not latest:
                 continue
             if rewrite(path, match.group(0), f'"{group}:{artifact}:{latest}"'):
@@ -207,7 +242,9 @@ def bump_gradle(root: Path, hold: set[str], max_bump: str) -> list[Change]:
 WRAPPER_URL = re.compile(r"gradle-([0-9][0-9A-Za-z.\-]*)-(all|bin)\.zip")
 
 
-def bump_wrapper(root: Path, hold: set[str], max_bump: str) -> list[Change]:
+def bump_wrapper(
+    root: Path, hold: set[str], max_bump: str, ceilings: dict, notes: list[str]
+) -> list[Change]:
     if "gradle" in hold:
         return []
     path = (
@@ -262,7 +299,9 @@ def latest_action_tag(repo: str) -> str | None:
     return max(stable, key=parse_version) if stable else None
 
 
-def bump_actions(root: Path, hold: set[str], max_bump: str) -> list[Change]:
+def bump_actions(
+    root: Path, hold: set[str], max_bump: str, ceilings: dict, notes: list[str]
+) -> list[Change]:
     changes: list[Change] = []
     resolved: dict[str, str | None] = {}
     for path in action_files(root):
@@ -293,7 +332,9 @@ def bump_actions(root: Path, hold: set[str], max_bump: str) -> list[Change]:
 FLUTTER_PIN = re.compile(r"FLUTTER_VERSION:\s*([0-9][0-9A-Za-z.\-]*)")
 
 
-def bump_flutter(root: Path, hold: set[str], max_bump: str) -> list[Change]:
+def bump_flutter(
+    root: Path, hold: set[str], max_bump: str, ceilings: dict, notes: list[str]
+) -> list[Change]:
     if "flutter" in hold:
         return []
     body = fetch("https://storage.googleapis.com/flutter_infra_release/releases/releases_linux.json")
@@ -336,6 +377,11 @@ def main(argv: list[str]) -> int:
     )
     parser.add_argument("--hold", default="", help="plugin ids, group:artifact, owner/repo, 'gradle', 'flutter'")
     parser.add_argument(
+        "--ceiling",
+        default="",
+        help="exclusive upper bounds, e.g. 'com.android.application<9' (comma-separated)",
+    )
+    parser.add_argument(
         "--max-bump",
         choices=("major", "minor"),
         default="major",
@@ -348,11 +394,14 @@ def main(argv: list[str]) -> int:
     hold = {name.strip() for name in args.hold.split(",") if name.strip()}
     wanted = [name.strip() for name in args.only.split(",") if name.strip()]
 
+    ceilings = parse_ceilings(args.ceiling)
+    notes: list[str] = []
+
     collected: list[Change] = []
     for name in wanted:
         if name not in SECTIONS:
             raise SystemExit(f"unknown section {name!r}")
-        collected.extend(SECTIONS[name](root, hold, args.max_bump))
+        collected.extend(SECTIONS[name](root, hold, args.max_bump, ceilings, notes))
 
     # The same pin lives in several files (checkout@v7 in three workflows,
     # FLUTTER_VERSION in three more); the PR should say so once.
@@ -373,6 +422,15 @@ def main(argv: list[str]) -> int:
         lines.append("| --- | --- | --- |")
         for change in rows:
             lines.append(f"| {change.what} | {change.old} | {change.new} |")
+        lines.append("")
+    if notes:
+        lines.append(f"#### Capped by policy ({len(notes)})")
+        lines.append("")
+        lines.append("| What | Current | Applied | Newest |")
+        lines.append("| --- | --- | --- | --- |")
+        lines.extend(notes)
+        lines.append("")
+        lines.append("These sit under a `--ceiling` in the workflow. Check whether the reason still holds.")
         lines.append("")
     Path(args.out).write_text("\n".join(lines))
 
