@@ -825,6 +825,7 @@ GitHub Actions live in `.github/workflows/` (repo root, above `fishauctions_appl
 - **dependencies.yml** — **weekly** (Mondays 06:23 UTC, plus `workflow_dispatch`), and the reason there is no `dependabot.yml` any more (removed 2026-08-15). Dependabot's problem wasn't the PR count, it was that **nothing it opened had been shown to work together**: each ecosystem moved in its own PR against a CI run that never builds Gradle and never touches Xcode. This updates everything in one pass — pub constraints via `pub upgrade --major-versions`, then AGP/Kotlin/Maven coordinates/the Gradle wrapper/`uses:` pins via `.github/scripts/bump_versions.py`, which *discovers* the pins rather than listing them, so a dependency added later needs no script edit — and then verifies the result with `flutter-verify` **plus a real debug APK build and an unsigned iOS build**. Only then does it open one PR, on one rolling branch.
   - **If the combined update fails, it retries without the breaking changes** rather than giving up, so a week where one package went bad still lands the rest. The PR body says which tier it is and carries the reverted constraint diff — that diff is the whole "which major broke it" answer.
   - **A PR whose checks all passed is opened ready for review; anything else is a draft.** There are no checks on the PR itself to read (a `GITHUB_TOKEN` push starts no workflow run), so draft-vs-ready *is* the signal.
+  - **The run itself goes red whenever a verification failed** (the `gate` job, added 2026-08-16), because a scheduled workflow's conclusion is the only thing that mails anybody. The two `Verify` steps are `continue-on-error` by design — tier 2 exists *because* tier 1 may fail — and until the gate landed that made the whole run green no matter what happened; the week AGP 8.13.2 met the Gradle 9.7.0 wrapper, both tiers watched `assembleDevDebug` fail, the fallback reverted everything, nothing was left to commit, **no PR was opened at all**, and the run reported a green check. So the gate runs last (the PR is already open by then) and fails on: tier `safe` (a new major broke the build — mergeable PR, still needs a human), tier `failed`, an iOS build failure, or a failed `gh pr create`. Tier `none` — nothing available to update — stays green, since nothing was built and nothing is being claimed. Red here means *read the run summary*, not "the automation broke".
   - **Hold lists live in the workflow's `env:`** (`PUB_HOLD`/`GRADLE_HOLD`/`ACTIONS_HOLD`), each entry with the reason it can't just be bumped — `flutter_inappwebview`'s deliberate beta pin, `freezed_annotation`'s `dependency_overrides` twin, the native Square SDK that has to match the plugin's. Held packages are still *reported* as available, so a hold can't quietly become permanent.
   - **The pinned Flutter SDK is read from `ci.yml` at run time, never bumped by default.** `workflow_dispatch` with `bump-flutter` turns it on; the verify steps then re-read the pin from the working tree, so the bump is checked against the version it moved to rather than the one the run started with.
   - Needs **Settings → Actions → General → "Allow GitHub Actions to create and approve pull requests"** enabled, or `gh pr create` 403s.
@@ -849,9 +850,18 @@ KGP up to 2.3.20** (`maxKnownAndSupportedAgpVersion` /
 `maxKnownAndSupportedKgpVersion` in
 `flutter_tools/lib/src/android/gradle_utils.dart`), so the AGP 9.3.1 and Kotlin
 2.4.10 that unattended bumps had reached were both past what this SDK supports.
-And AGP 8.13 requires **Gradle ≥ 8.13** with no upper bound in Flutter's table,
-so the 9.7.0 wrapper stays — if that pairing turns out not to hold, the wrapper
-is the thing to move, not the AGP pin.
+**Holding AGP on 8.x also caps the Gradle wrapper at 9.5.x**, and missing that
+is what broke every Android build on 2026-08-16. Gradle 9.6 removed
+`org.gradle.api.problems.internal.InternalProblems`, an internal API AGP 8.x
+calls, so rolling AGP back to 8.13.2 while leaving the wrapper at 9.7.0 meant
+`com.android.application` could not be *applied* at all — `Failed to create
+service … AndroidProblemReporterProvider`, before any of the app's own code was
+looked at. Gradle names the pairing in its own upgrade guide
+(`#agp_8x_incompatible`) and says to use 9.5. AGP 8.13 needs Gradle ≥ 8.13, so
+the usable window is **8.13 … 9.5.x** and the wrapper sits at its top (9.5.1);
+`gradle<9.6` is a second `GRADLE_CEILING` entry so patches keep flowing and the
+weekly PR keeps reporting the withheld 9.7.x. Both ceilings lift together — the
+day Square's module drops `targetSdk`, and not before.
 
 The app's own bytecode target is Java 17 (`sourceCompatibility`/`targetCompatibility`/Kotlin
 `jvmTarget` in `android/app/build.gradle.kts`) — unrelated to the JDK actually

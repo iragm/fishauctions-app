@@ -242,6 +242,42 @@ def bump_gradle(
 WRAPPER_URL = re.compile(r"gradle-([0-9][0-9A-Za-z.\-]*)-(all|bin)\.zip")
 
 
+def gradle_releases() -> list[str]:
+    """Every final Gradle release, newest first.
+
+    The full list rather than `versions/current`, because the wrapper takes a
+    ceiling too (Gradle 9.6 removed an internal API AGP 8.x calls) and a ceiling
+    is only worth having if patch releases under it still flow — with one
+    version to choose from, a capped wrapper would freeze at whatever it
+    happened to be pinned to.
+
+    Filtered on the API's own flags, not on the version string: a milestone is
+    published as `9.7.0-milestone-3`, which `PRERELEASE` does not match and
+    `parse_version` truncates to plain `9.7.0`.
+    """
+    body = fetch("https://services.gradle.org/versions/all")
+    if not body:
+        return []
+    try:
+        entries = json.loads(body)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(entries, list):
+        return []
+    return [
+        entry["version"]
+        for entry in entries
+        if isinstance(entry, dict)
+        and entry.get("version")
+        and not entry.get("snapshot")
+        and not entry.get("nightly")
+        and not entry.get("releaseNightly")
+        and not entry.get("broken")
+        and not entry.get("rcFor")
+        and not entry.get("milestoneFor")
+    ]
+
+
 def bump_wrapper(
     root: Path, hold: set[str], max_bump: str, ceilings: dict, notes: list[str]
 ) -> list[Change]:
@@ -261,14 +297,11 @@ def bump_wrapper(
     if not match:
         return []
     current = match.group(1)
-    body = fetch("https://services.gradle.org/versions/current")
-    if not body:
+    releases = gradle_releases()
+    if not releases:
         return []
-    try:
-        latest = json.loads(body).get("version", "")
-    except json.JSONDecodeError:
-        return []
-    chosen = pick_latest(current, [latest], max_bump)
+    chosen = pick_latest(current, releases, max_bump, ceilings.get("gradle"))
+    note_cap(notes, "Gradle wrapper", current, chosen, pick_latest(current, releases, max_bump))
     if not chosen:
         return []
     if not rewrite(path, match.group(0), f"gradle-{chosen}-{match.group(2)}.zip"):

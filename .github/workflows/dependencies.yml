@@ -77,7 +77,14 @@ env:
   #   documents "AGP 8.4.2 or later" and doesn't mention AGP 9. Lift this when
   #   Square ships a build.gradle.kts without that line; see
   #   android/settings.gradle.kts.
-  GRADLE_CEILING: com.android.application<9
+  # gradle<9.6 — the other half of the same hold, and the reason a ceiling is
+  #   written down rather than remembered: Gradle 9.6 removed
+  #   `org.gradle.api.problems.internal.InternalProblems`, which AGP 8.x calls,
+  #   so an 8.x plugin on a 9.6+ wrapper fails to apply at all. Rolling AGP back
+  #   to 8.13.2 on 2026-08-16 left the wrapper at 9.7.0, which broke every
+  #   Android build until this cap was added. Lifts with the AGP ceiling, not
+  #   before.
+  GRADLE_CEILING: com.android.application<9,gradle<9.6
 
   ACTIONS_HOLD: ""
 
@@ -218,13 +225,22 @@ jobs:
           format-mode: fix
           android-build: "true"
 
+      # Always runs, including the week there was nothing to update: this is
+      # what the gate job at the bottom reads, and "no checks ran" has to be
+      # distinguishable from "the checks passed" — a green run must not be able
+      # to mean the build was never attempted.
       - name: Determine outcome
         id: result
-        if: steps.apply.outputs.changed == 'true'
         env:
+          CHANGED: ${{ steps.apply.outputs.changed }}
           ALL: ${{ steps.verify-all.outcome }}
           SAFE: ${{ steps.verify-safe.outcome }}
         run: |
+          if [ "$CHANGED" != "true" ]; then
+            echo "tier=none" >> "$GITHUB_OUTPUT"
+            echo "verified=skipped" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [ "$ALL" = "success" ]; then
             tier=all; verified=true; source="$RUNNER_TEMP/other-all.md"
           elif [ "$SAFE" = "success" ]; then
@@ -417,3 +433,82 @@ jobs:
           else
             gh pr create --head "$UPDATE_BRANCH" --title "$TITLE" --body-file "$BODY" --draft
           fi
+
+  # A scheduled workflow's conclusion is its only notification channel: a failed
+  # run emails whoever owns the schedule, and nothing else here reaches anybody.
+  # So a week where the app did not compile must end red. It used to end green —
+  # the two verify steps are `continue-on-error` (deliberately: tier 2 exists
+  # precisely because tier 1 may fail), and when the fallback reverted
+  # everything there was nothing left to commit, so no PR was opened either. A
+  # green check on a run that watched `assembleDevDebug` fail twice and then
+  # said nothing is worse than no run at all; it reads as "checked, all good".
+  #
+  # Runs last, and only reports — the PR is already open by now, draft or not.
+  # Red here means "read the run summary", not "the automation broke".
+  gate:
+    name: Verification gate
+    needs: [update, verify-ios, pull-request]
+    # Skipped on a fork (where `update` is skipped) and on a cancelled run,
+    # neither of which is a verification result.
+    if: always() && !cancelled() && needs.update.result != 'skipped'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail the run if anything did not pass
+        env:
+          UPDATE: ${{ needs.update.result }}
+          IOS: ${{ needs.verify-ios.result }}
+          PR: ${{ needs.pull-request.result }}
+          TIER: ${{ needs.update.outputs.tier }}
+        run: |
+          set -uo pipefail
+          fail=0
+          RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
+          # The tier is only meaningful if the job that computes it finished; a
+          # job that died at `flutter pub upgrade` has no verification result to
+          # report, only its own failure.
+          if [ "$UPDATE" != "success" ]; then
+            echo "::error::The update job itself did not finish ($UPDATE): $RUN_URL"
+            exit 1
+          fi
+
+          case "$TIER" in
+            none)
+              echo "Nothing to update this week — no build ran, nothing to report."
+              ;;
+            all)
+              echo "Every available update passed the Dart checks and the Android build."
+              ;;
+            safe)
+              # Still a mergeable PR, and still a failed build: some package's
+              # new major broke the app and a human has to decide what to do
+              # about it. The PR body carries the reverted constraint diff.
+              echo "::error::The full update failed verification; only the non-breaking subset passed. See the 'Verify (all updates)' step in $RUN_URL and the reverted constraint diff in the PR body."
+              fail=1
+              ;;
+            failed)
+              # Both tiers failed, which usually means the breakage is not in
+              # the bumps at all — the non-breaking tier verifies a tree that is
+              # nearly what is already on the default branch.
+              echo "::error::Neither the full update nor the non-breaking subset passed verification. The checks are failing on this repository's current dependencies, not only on the new ones: $RUN_URL"
+              fail=1
+              ;;
+            *)
+              echo "::error::The update job reported no outcome (tier='$TIER')."
+              fail=1
+              ;;
+          esac
+
+          if [ "$IOS" = "failure" ]; then
+            echo "::error::The iOS build failed (the Dart checks and the Android build passed)."
+            fail=1
+          fi
+          if [ "$PR" = "failure" ]; then
+            echo "::error::Opening the pull request failed — check that Settings > Actions > General allows Actions to create pull requests."
+            fail=1
+          fi
+
+          if [ "$fail" = "1" ]; then
+            echo "This run is marked failed on purpose, so it sends mail. The PR (if one was opened) says what to do." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$fail"
