@@ -78,12 +78,32 @@ SQUARE_SETUP_PHASE_NAME = 'Square Mobile Payments SDK setup'.freeze
 
 # Guarded on the file existing so a Debug/simulator build, or any future build
 # that doesn't pull the pod, doesn't fail on a missing script.
+#
+# Guarded on code signing being ON for a second reason: hoisting the nested
+# frameworks out of SquareMobilePaymentsSDK.framework is only half of what
+# Square's `setup` does — it re-signs each one it moves, with the build's own
+# identity. `flutter build ios --no-codesign` sets CODE_SIGNING_ALLOWED=NO and
+# empties the identity variables, so that re-sign runs as
+# `codesign --force --sign '' …/CorePaymentCard.framework`, which fails with
+# "no identity found" and takes the whole build down as
+# "Command PhaseScriptExecution failed with a nonzero exit code" — the failure
+# is Uncategorized in the .xcresult, so Flutter then prints the Development Team
+# block instead (see the CI/CD note in CLAUDE.md). Both unsigned builds hit this:
+# dependencies.yml's weekly gate and ios-release.yml's default path.
+#
+# Skipping costs nothing there: an unsigned build is never distributed, and the
+# App Store rejection this phase exists to prevent is only reachable through the
+# signed path — which is unaffected (it archives with CODE_SIGN_IDENTITY=-, and
+# ad-hoc is a real identity as far as codesign is concerned) and carries its own
+# "Verify Square framework was cleaned up" step.
 SQUARE_SETUP_SCRIPT = <<~SH.freeze
   SETUP="${BUILT_PRODUCTS_DIR}/${FRAMEWORKS_FOLDER_PATH}/SquareMobilePaymentsSDK.framework/setup"
-  if [ -x "$SETUP" ]; then
-    "$SETUP"
-  else
+  if [ ! -x "$SETUP" ]; then
     echo "note: no SquareMobilePaymentsSDK setup script at $SETUP, skipping"
+  elif [ "${CODE_SIGNING_ALLOWED}" = "NO" ]; then
+    echo "note: code signing is off (--no-codesign); skipping the SquareMobilePaymentsSDK setup phase"
+  else
+    "$SETUP"
   fi
 SH
 

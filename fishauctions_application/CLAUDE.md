@@ -853,6 +853,23 @@ carry a `Show the real Xcode error` step that re-runs with `-v` (which drops
 so it fails again at the same target in a fraction of the time. Read that step,
 never the signing block.
 
+**The first thing that step ever caught was `--no-codesign` colliding with
+Square's own setup phase, and the collision had been sitting there since the
+phase landed** (2026-07-29 → found 2026-08-16, when the weekly gate executed for
+the first time). Hoisting the nested frameworks out of
+`SquareMobilePaymentsSDK.framework` is only half of what Square's `setup` does —
+it also **re-signs each framework it moves**, and an unsigned build has no
+identity to re-sign with, so the phase runs `codesign --force --sign ''` and
+exits non-zero (`: no identity found`). Every green iOS run since July had taken
+the `distribute: true` path, which archives with `CODE_SIGN_IDENTITY=-` — ad-hoc
+is a real identity to `codesign` — so nothing had ever exercised the unsigned
+path with the phase in place. The `.xcresult` records it as one `Uncategorized`
+error, which is precisely the "no parsed issues" case above: hence the signing
+lecture on the job that wasn't signing. `ios/Podfile` now skips the phase when
+`CODE_SIGNING_ALLOWED=NO`; the App Store rejection it prevents is only reachable
+through the signed path, which still runs it and still verifies the cleanup.
+Nothing about this was a dependency problem — the weekly PR was a bystander.
+
 **AGP is held below 9.x, and that is not staleness — it is what keeps the
 payments SDK current.** AGP 9.0 removed `targetSdk` from the *library* DSL
 (`LibraryBaseFlavor.setTargetSdk` is absent from the 9.0.1/9.2.1/9.3.1 jars and
