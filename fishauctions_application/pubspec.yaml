@@ -97,7 +97,17 @@ dependencies:
   # only through SpeechBackend: phrase biasing and cloud streaming are the
   # named upgrade paths, and neither is expressible through this package.
   speech_to_text: ^7.4.0
-  square_mobile_payments_sdk: ^2026.8.0
+  # Pinned exactly, not with a caret. 2026.8.0 rewrote the plugin's
+  # android/build.gradle into Kotlin DSL (build.gradle.kts), where its
+  # `targetSdk = 36` on a *library* module binds to
+  # LibraryDefaultConfig.setTargetSdk(Integer) — gone in AGP 9, which this
+  # project has used since its first commit. The old Groovy DSL let the same
+  # line through; the Kotlin one fails at configuration time with
+  # "'void com.android.build.api.dsl.LibraryDefaultConfig.setTargetSdk(java.lang.Integer)'".
+  # 2026.8.1's android/ directory is byte-identical to 2026.8.0's, so the pin
+  # holds until Square drops the line. Keep the package in the weekly updater's
+  # PUB_HOLD too, or it rewrites this back into a caret range.
+  square_mobile_payments_sdk: 2026.7.2
   # Open external / target=_blank links (connect banners, map directions, Google
   # Wallet) in the system browser instead of the in-app WebView.
   url_launcher: ^6.3.2

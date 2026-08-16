@@ -46,14 +46,22 @@ env:
   # Anything here is reported as available but never bumped, because the version
   # is load-bearing beyond "newest that resolves". Trim it when the reason goes
   # away; each entry says what would have to be true.
+  #
+  # PUB_HOLD stops *constraint rewrites*, which is all pub gives us to work with:
+  # there is no "upgrade everything except X". A package that must not move at
+  # all needs an exact version in pubspec.yaml — the hold is then what stops this
+  # workflow from rewriting that pin back into a caret range. All three below are
+  # exact-pinned for that reason.
 
-  # flutter_inappwebview — deliberately pinned to the 6.2.0-beta line: the 6.1.5
-  #   stable Android module uses proguard-android.txt, which AGP 9 rejects
-  #   outright. Unhold once 6.2.0 stable ships (see pubspec.yaml's note).
+  # flutter_inappwebview — pinned to the 6.2.0-beta line: the 6.1.5 stable
+  #   Android module uses proguard-android.txt, which AGP 9 rejects outright.
+  # square_mobile_payments_sdk — pinned to 2026.7.2: 2026.8.0 moved to Kotlin DSL
+  #   and its library-module `targetSdk` no longer exists in AGP 9. This is what
+  #   the 2026-08-16 run caught; see pubspec.yaml for the full story.
   # freezed_annotation — has a dependency_overrides entry (Square's plugin pins
   #   ^2.4.4). Bumping the dependency without the override just makes the two
   #   disagree, and pub keeps the override's version regardless.
-  PUB_HOLD: flutter_inappwebview,freezed_annotation
+  PUB_HOLD: flutter_inappwebview,square_mobile_payments_sdk,freezed_annotation
 
   # com.squareup.sdk:mobile-payments-sdk — must stay in step with the version
   #   square_mobile_payments_sdk's own Gradle module pulls; it is on the app's

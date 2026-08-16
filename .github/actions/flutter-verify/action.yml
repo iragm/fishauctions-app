@@ -43,9 +43,10 @@ inputs:
     default: check
   android-build:
     description: >
-      Build a debug APK. Off in CI (nothing in a normal PR touches Gradle, and
-      it costs minutes on every push); on for dependency updates, where it is
-      the *only* thing that verifies an AGP/Kotlin/Gradle/Maven bump at all.
+      Build a debug APK — the only check that runs Gradle at all, and therefore
+      the only one that sees a Flutter plugin's own Android module. Default is
+      off because it costs minutes; both ci.yml and the dependency updater turn
+      it on.
     required: false
     default: "false"
 

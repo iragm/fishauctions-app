@@ -1401,10 +1401,10 @@ packages:
     dependency: "direct main"
     description:
       name: square_mobile_payments_sdk
-      sha256: "299d7337cdebba353a8d38740d67532ad51d8233217e078b9a09a98ff7043b36"
+      sha256: "0e29d0474936fc4043bccddccaf9a85bb4638ce7ff1a9d5f64cdd3ccdf93b6a9"
       url: "https://pub.dev"
     source: hosted
-    version: "2026.8.0"
+    version: "2026.7.2"
   stack_trace:
     dependency: transitive
     description:

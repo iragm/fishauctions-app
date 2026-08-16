@@ -30,3 +30,9 @@ jobs:
       - uses: ./.github/actions/flutter-verify
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
+          # On since 2026-08-16. A pub bump reaches Gradle through the plugins'
+          # own build files, so "nothing in a PR touches Gradle" was never true:
+          # square_mobile_payments_sdk 2026.8.0 rewrote its module in Kotlin DSL
+          # around an API AGP 9 had removed, and it sat on main for six days
+          # because no CI job had ever run Gradle. Costs a few minutes a push.
+          android-build: "true"
