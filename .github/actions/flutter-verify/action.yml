@@ -1,0 +1,141 @@
+name: Flutter verify
+description: >
+  The project's compatibility gate: codegen, format, analyze, test, and
+  optionally a real Gradle build. Lives here rather than inline in ci.yml so the
+  weekly dependency-update workflow can run the *same* checks before it opens a
+  PR — a bot-authored PR doesn't trigger ci.yml (GITHUB_TOKEN pushes never start
+  a new workflow run), so if this drifted, dependency bumps would be merged
+  against checks nobody actually ran.
+
+inputs:
+  flutter-version:
+    description: >
+      Flutter SDK version to install. Left empty, it is read from the working
+      tree's ci.yml — which is what the dependency-update workflow needs, since
+      a run that just bumped the pinned SDK has to verify against the *new* one
+      to have proved anything. Ignored when setup-flutter is false.
+    required: false
+    default: ""
+  setup-flutter:
+    description: >
+      Install the Flutter SDK. Set false when the caller already installed it
+      (the update workflow needs `flutter pub upgrade` before it can verify).
+    required: false
+    default: "true"
+  working-directory:
+    description: The Flutter app's directory, relative to the repo root.
+    required: false
+    default: fishauctions_application
+  strict-generated:
+    description: >
+      "true" fails when build_runner output differs from what's committed (the
+      CI contract). "false" regenerates and leaves the result in the working
+      tree, which is what a dependency bump wants — a generator upgrade is
+      *supposed* to change generated files.
+    required: false
+    default: "true"
+  format-mode:
+    description: >
+      "check" fails on unformatted code; "fix" rewrites it. Same reasoning as
+      strict-generated: a new Dart formatter version reformatting the tree is a
+      result to commit, not a failure.
+    required: false
+    default: check
+  android-build:
+    description: >
+      Build a debug APK. Off in CI (nothing in a normal PR touches Gradle, and
+      it costs minutes on every push); on for dependency updates, where it is
+      the *only* thing that verifies an AGP/Kotlin/Gradle/Maven bump at all.
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve Flutter version
+      id: sdk
+      if: inputs.setup-flutter == 'true'
+      shell: bash
+      env:
+        REQUESTED: ${{ inputs.flutter-version }}
+      # sed, not grep -P: this also runs on the macOS runners, whose BSD grep
+      # has no -P.
+      run: |
+        version="$REQUESTED"
+        if [ -z "$version" ]; then
+          version=$(sed -n 's/^ *FLUTTER_VERSION: *\([0-9][^ ]*\).*/\1/p' \
+            .github/workflows/ci.yml | head -1)
+        fi
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+
+    - uses: subosito/flutter-action@v2
+      if: inputs.setup-flutter == 'true'
+      with:
+        flutter-version: ${{ steps.sdk.outputs.version }}
+        channel: stable
+        cache: true
+
+    - name: Flutter version
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: flutter --version
+
+    - name: Install dependencies
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: flutter pub get
+
+    - name: Generate code
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: dart run build_runner build --delete-conflicting-outputs
+
+    - name: Verify generated code is up to date
+      if: inputs.strict-generated == 'true'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        git diff --exit-code || {
+          echo "::error::Generated code is stale. Run 'dart run build_runner build --delete-conflicting-outputs' and commit the result.";
+          exit 1;
+        }
+
+    - name: Check formatting
+      if: inputs.format-mode == 'check'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: dart format --output=none --set-exit-if-changed .
+
+    - name: Apply formatting
+      if: inputs.format-mode == 'fix'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: dart format .
+
+    - name: Analyze
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: flutter analyze
+
+    - name: Run tests
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: flutter test
+
+    # JDK 21, not the app's Java 17 bytecode target: AGP 9's bundled lint
+    # crashes under JDK 17 (NoSuchMethodError on java.util.List.removeLast()).
+    # Same reasoning as android-release.yml — see the note there.
+    - uses: actions/setup-java@v5
+      if: inputs.android-build == 'true'
+      with:
+        distribution: temurin
+        java-version: "21"
+
+    - name: Build debug APK
+      if: inputs.android-build == 'true'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      # Debug + the dev flavor: this proves the Gradle graph resolves and the
+      # Kotlin sources still compile, which is all a dependency bump needs.
+      # Release signing is out of scope (and has no secrets on this path).
+      run: flutter build apk --debug --flavor dev

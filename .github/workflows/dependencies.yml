@@ -1,0 +1,399 @@
+name: Weekly dependency update
+
+# Replaces Dependabot (removed 2026-08-15). Dependabot opened one PR per
+# ecosystem per week and could not tell whether the result compiled — this runs
+# the *whole* update at once, verifies it against the real checks (codegen,
+# format, analyze, test, a Gradle build and an Xcode build), and only then opens
+# a single PR. If the combined update doesn't survive verification it retries
+# with the breaking changes dropped, so a week where one package went bad still
+# produces a mergeable PR instead of nothing.
+#
+# One rolling branch and therefore one open PR at a time: the branch is rebuilt
+# from the default branch on every run, so an unmerged PR is replaced by a
+# fresher one rather than accumulating.
+
+on:
+  schedule:
+    # Mondays, 06:23 UTC. Off the hour because scheduled runs queue up (and get
+    # delayed) at :00.
+    - cron: "23 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      allow-breaking:
+        description: Rewrite constraints to reach new major versions
+        type: boolean
+        default: true
+      bump-flutter:
+        description: Also bump the pinned Flutter SDK version
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: dependency-update
+  cancel-in-progress: false
+
+env:
+  # No FLUTTER_VERSION here on purpose: ci.yml's pin is the one source of truth,
+  # and this workflow may rewrite it mid-run (--only …,flutter), after which
+  # verifying against a version read at trigger time would prove nothing.
+  UPDATE_BRANCH: automation/dependency-update
+
+  # ── Hold lists ───────────────────────────────────────────────────────────────
+  # Anything here is reported as available but never bumped, because the version
+  # is load-bearing beyond "newest that resolves". Trim it when the reason goes
+  # away; each entry says what would have to be true.
+
+  # flutter_inappwebview — deliberately pinned to the 6.2.0-beta line: the 6.1.5
+  #   stable Android module uses proguard-android.txt, which AGP 9 rejects
+  #   outright. Unhold once 6.2.0 stable ships (see pubspec.yaml's note).
+  # freezed_annotation — has a dependency_overrides entry (Square's plugin pins
+  #   ^2.4.4). Bumping the dependency without the override just makes the two
+  #   disagree, and pub keeps the override's version regardless.
+  PUB_HOLD: flutter_inappwebview,freezed_annotation
+
+  # com.squareup.sdk:mobile-payments-sdk — must stay in step with the version
+  #   square_mobile_payments_sdk's own Gradle module pulls; it is on the app's
+  #   compile classpath only because MainActivity initializes the SDK directly.
+  #   Moving it is a two-file change with a runtime failure mode no build sees.
+  GRADLE_HOLD: com.squareup.sdk:mobile-payments-sdk
+
+  ACTIONS_HOLD: ""
+
+jobs:
+  update:
+    name: Resolve and verify updates
+    runs-on: ubuntu-latest
+    # A fork inherits the schedule; without this it would run weekly there and
+    # fail trying to push.
+    if: github.repository == 'iragm/fishauctions-app'
+    outputs:
+      changed: ${{ steps.commit.outputs.changed }}
+      tier: ${{ steps.result.outputs.tier }}
+      verified: ${{ steps.result.outputs.verified }}
+      body: ${{ steps.describe.outputs.body }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Resolve pinned Flutter version
+        id: sdk
+        run: |
+          echo "version=$(sed -n 's/^ *FLUTTER_VERSION: *\([0-9][^ ]*\).*/\1/p' \
+            .github/workflows/ci.yml | head -1)" >> "$GITHUB_OUTPUT"
+
+      # Resolves and upgrades run on the currently pinned SDK; the verify steps
+      # below re-resolve from the working tree, so a Flutter bump is checked
+      # against the version it just moved to.
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ steps.sdk.outputs.version }}
+          channel: stable
+          cache: true
+
+      # ── What is available ──────────────────────────────────────────────────
+      - name: Resolve current dependencies
+        working-directory: fishauctions_application
+        run: |
+          flutter pub get
+          cp pubspec.lock "$RUNNER_TEMP/pubspec.lock.before"
+
+      - name: Collect available pub updates
+        working-directory: fishauctions_application
+        run: |
+          flutter pub outdated --json > "$RUNNER_TEMP/outdated.json"
+          python3 "$GITHUB_WORKSPACE/.github/scripts/pub_updates.py" plan \
+            --outdated "$RUNNER_TEMP/outdated.json" \
+            --hold "$PUB_HOLD" \
+            --targets-out "$RUNNER_TEMP/targets.txt" \
+            --report-out "$RUNNER_TEMP/held.md"
+
+      # ── Tier 1: everything, breaking changes included ──────────────────────
+      - name: Apply all available updates
+        id: apply
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # `inputs` is empty on a scheduled run, and an empty string compares
+          # equal to false — so the default has to be spelled out per event
+          # rather than written as `inputs.allow-breaking != false`.
+          ALLOW_BREAKING: ${{ github.event_name != 'workflow_dispatch' || inputs.allow-breaking }}
+          SECTIONS: ${{ (github.event_name == 'workflow_dispatch' && inputs.bump-flutter) && 'gradle,wrapper,actions,flutter' || 'gradle,wrapper,actions' }}
+        run: |
+          set -euo pipefail
+          cd fishauctions_application
+          if [ "$ALLOW_BREAKING" = "true" ] && [ -s "$RUNNER_TEMP/targets.txt" ]; then
+            # --major-versions is the only thing that rewrites pubspec.yaml
+            # constraints, and it takes explicit package names — so held
+            # packages are simply never passed to it.
+            xargs flutter pub upgrade --major-versions < "$RUNNER_TEMP/targets.txt"
+          fi
+          flutter pub upgrade
+          cd "$GITHUB_WORKSPACE"
+          python3 .github/scripts/bump_versions.py \
+            --only "$SECTIONS" \
+            --hold "$GRADLE_HOLD,$ACTIONS_HOLD" \
+            --max-bump major \
+            --out "$RUNNER_TEMP/other-all.md"
+          # Most weeks there is nothing to do; verifying an unchanged tree would
+          # burn an Android build and a macOS runner to prove that.
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Everything is already up to date." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Verify (all updates)
+        id: verify-all
+        if: steps.apply.outputs.changed == 'true'
+        continue-on-error: true
+        uses: ./.github/actions/flutter-verify
+        with:
+          # No flutter-version: read from the working tree, see the action.
+          strict-generated: "false"
+          format-mode: fix
+          android-build: "true"
+
+      # ── Tier 2: only what the current constraints already allow ────────────
+      # Reached only when tier 1 failed. This is the update Dependabot's "minor
+      # and patch" group would have produced, so the week still ends with
+      # something mergeable; the PR body names the tier so nobody assumes the
+      # majors landed.
+      - name: Fall back to non-breaking updates
+        if: steps.verify-all.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Keep the constraint rewrites before discarding them: they are the
+          # single most useful thing the PR can say about a failed week — the
+          # exact major bumps that need a human.
+          git diff -- fishauctions_application/pubspec.yaml > "$RUNNER_TEMP/failed-majors.diff"
+          git checkout -- .
+          git clean -fd
+          cd fishauctions_application
+          flutter pub upgrade
+          cd "$GITHUB_WORKSPACE"
+          python3 .github/scripts/bump_versions.py \
+            --only gradle,wrapper,actions \
+            --hold "$GRADLE_HOLD,$ACTIONS_HOLD" \
+            --max-bump minor \
+            --out "$RUNNER_TEMP/other-safe.md"
+
+      - name: Verify (non-breaking updates)
+        id: verify-safe
+        if: steps.verify-all.outcome == 'failure'
+        continue-on-error: true
+        uses: ./.github/actions/flutter-verify
+        with:
+          # No flutter-version: read from the working tree, see the action.
+          strict-generated: "false"
+          format-mode: fix
+          android-build: "true"
+
+      - name: Determine outcome
+        id: result
+        if: steps.apply.outputs.changed == 'true'
+        env:
+          ALL: ${{ steps.verify-all.outcome }}
+          SAFE: ${{ steps.verify-safe.outcome }}
+        run: |
+          if [ "$ALL" = "success" ]; then
+            tier=all; verified=true; source="$RUNNER_TEMP/other-all.md"
+          elif [ "$SAFE" = "success" ]; then
+            tier=safe; verified=true; source="$RUNNER_TEMP/other-safe.md"
+          else
+            tier=failed; verified=false; source="$RUNNER_TEMP/other-safe.md"
+          fi
+          [ -f "$source" ] || source="$RUNNER_TEMP/other-all.md"
+          cp "$source" "$RUNNER_TEMP/other.md"
+          echo "tier=$tier" >> "$GITHUB_OUTPUT"
+          echo "verified=$verified" >> "$GITHUB_OUTPUT"
+
+      # ── Report ─────────────────────────────────────────────────────────────
+      - name: Describe what changed
+        id: describe
+        if: steps.apply.outputs.changed == 'true'
+        env:
+          TIER: ${{ steps.result.outputs.tier }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/pub_updates.py lock-diff \
+            --before "$RUNNER_TEMP/pubspec.lock.before" \
+            --after fishauctions_application/pubspec.lock \
+            --out "$RUNNER_TEMP/pub.md"
+
+          RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          {
+            case "$TIER" in
+              all)
+                echo "Every available update, verified green on the Dart checks and an Android build."
+                ;;
+              safe)
+                echo "⚠️ The full update did not pass verification, so this is the **non-breaking**"
+                echo "**subset** — no constraint rewrites, nothing moved off its current major."
+                echo "The major bumps that failed are below; see the failed *Verify (all updates)*"
+                echo "step in [the run]($RUN_URL) for what they broke."
+                ;;
+              *)
+                echo "❌ **Neither the full update nor the non-breaking subset passed verification.**"
+                echo "Opened as a draft so the breakage is visible — do not merge as-is."
+                echo "Logs: [the run]($RUN_URL)."
+                ;;
+            esac
+            echo
+            cat "$RUNNER_TEMP/pub.md"
+            cat "$RUNNER_TEMP/other.md"
+            if [ -s "$RUNNER_TEMP/failed-majors.diff" ]; then
+              echo "#### Held back: failed verification"
+              echo
+              echo "<details><summary>Constraint changes that were reverted</summary>"
+              echo
+              echo '```diff'
+              cat "$RUNNER_TEMP/failed-majors.diff"
+              echo '```'
+              echo
+              echo "</details>"
+              echo
+            fi
+            if [ -s "$RUNNER_TEMP/held.md" ]; then
+              echo "#### Not attempted"
+              echo
+              cat "$RUNNER_TEMP/held.md"
+            fi
+            echo "---"
+            echo
+            echo "Checks ran in [the update workflow]($RUN_URL), not on this PR: a branch pushed"
+            echo "with \`GITHUB_TOKEN\` never triggers \`ci.yml\`. Both use the same"
+            echo "\`.github/actions/flutter-verify\`, so they are the same checks."
+          } > "$RUNNER_TEMP/pr-body.md"
+          cat "$RUNNER_TEMP/pr-body.md" | tee -a "$GITHUB_STEP_SUMMARY"
+
+          # Carried as a job output rather than an artifact: it keeps the PR job
+          # free of any upload/download action to keep in sync.
+          {
+            echo "body<<PR_BODY_EOF"
+            cat "$RUNNER_TEMP/pr-body.md"
+            echo "PR_BODY_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Commit and push
+        id: commit
+        if: steps.apply.outputs.changed == 'true'
+        env:
+          TIER: ${{ steps.result.outputs.tier }}
+        run: |
+          set -euo pipefail
+          # Re-checked because the fallback tier may have reverted everything:
+          # if the only thing available this week was a major that failed, the
+          # non-breaking retry legitimately leaves an unchanged tree.
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Nothing left to commit after the fallback."
+            exit 0
+          fi
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          git add -A
+          git commit -m "chore(deps): weekly dependency update" \
+            -m "Automated by .github/workflows/dependencies.yml (tier: $TIER)."
+          # Force: the branch is rebuilt from the default branch every week and
+          # is owned entirely by this workflow.
+          git push --force origin "HEAD:refs/heads/$UPDATE_BRANCH"
+
+  # The only check that runs Apple's toolchain, and the only one that exercises
+  # CocoaPods — where a plugin bump breaks iOS while Android stays green. Same
+  # role the unsigned build plays in ios-release.yml. Skipped when the update
+  # already failed on Linux: the PR is a draft either way, and this is a macOS
+  # runner.
+  verify-ios:
+    name: Verify on iOS
+    needs: update
+    if: needs.update.outputs.changed == 'true' && needs.update.outputs.verified == 'true'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.UPDATE_BRANCH }}
+
+      - name: Resolve pinned Flutter version
+        id: sdk
+        run: |
+          echo "version=$(sed -n 's/^ *FLUTTER_VERSION: *\([0-9][^ ]*\).*/\1/p' \
+            .github/workflows/ci.yml | head -1)" >> "$GITHUB_OUTPUT"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ steps.sdk.outputs.version }}
+          channel: stable
+          cache: true
+
+      - name: Install dependencies
+        working-directory: fishauctions_application
+        run: flutter pub get
+
+      - name: Generate code
+        working-directory: fishauctions_application
+        run: dart run build_runner build --delete-conflicting-outputs
+
+      # Debug rather than release: this is a "does it still compile, link and
+      # pod-install" gate, and --no-codesign keeps it free of certificates.
+      - name: Build iOS app (unsigned)
+        working-directory: fishauctions_application
+        run: flutter build ios --debug --no-codesign --dart-define=FLAVOR=staging
+
+  pull-request:
+    name: Open pull request
+    needs: [update, verify-ios]
+    if: always() && needs.update.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Create or update the PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BODY_MD: ${{ needs.update.outputs.body }}
+          IOS_RESULT: ${{ needs.verify-ios.result }}
+          VERIFIED: ${{ needs.update.outputs.verified }}
+        run: |
+          set -euo pipefail
+          BODY="$RUNNER_TEMP/pr-body.md"
+          printf '%s\n' "$BODY_MD" > "$BODY"
+
+          # 'skipped' only happens when the Linux tier already failed, which the
+          # body has said far more usefully already.
+          if [ "$VERIFIED" = "true" ] && [ "$IOS_RESULT" != "success" ]; then
+            printf '\n> ⚠️ The iOS build did not pass (`%s`). The Dart checks and the Android build did.\n' \
+              "$IOS_RESULT" >> "$BODY"
+          fi
+
+          # Draft whenever a human has to look before merging. A ready-for-review
+          # PR from this workflow means every check it knows how to run is green.
+          READY=true
+          if [ "$VERIFIED" != "true" ] || [ "$IOS_RESULT" != "success" ]; then
+            READY=false
+          fi
+
+          TITLE="chore(deps): weekly dependency update ($(date -u +%Y-%m-%d))"
+          EXISTING=$(gh pr list --head "$UPDATE_BRANCH" --state open --json number --jq '.[0].number // empty')
+
+          if [ -n "$EXISTING" ]; then
+            gh pr edit "$EXISTING" --title "$TITLE" --body-file "$BODY"
+            if [ "$READY" = "true" ]; then
+              gh pr ready "$EXISTING"
+            else
+              gh pr ready "$EXISTING" --undo
+            fi
+            echo "Updated PR #$EXISTING"
+          elif [ "$READY" = "true" ]; then
+            gh pr create --head "$UPDATE_BRANCH" --title "$TITLE" --body-file "$BODY"
+          else
+            gh pr create --head "$UPDATE_BRANCH" --title "$TITLE" --body-file "$BODY" --draft
+          fi

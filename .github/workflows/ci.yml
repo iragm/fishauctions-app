@@ -3,6 +3,10 @@ name: CI
 # Lint + test on every PR, and on pushes to the default branch as a safety net.
 # Also callable from other workflows (workflow_call) so the release workflow can
 # reuse these exact checks as a gate instead of a copy that could drift.
+#
+# The checks themselves live in .github/actions/flutter-verify so the weekly
+# dependency-update workflow can run them too — it has to run them itself,
+# because a PR pushed with GITHUB_TOKEN never triggers this workflow.
 on:
   pull_request:
   push:
@@ -12,11 +16,6 @@ on:
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
-
-defaults:
-  run:
-    # The Flutter app lives in a subdirectory of the repo.
-    working-directory: fishauctions_application
 
 env:
   FLUTTER_VERSION: 3.44.1
@@ -28,30 +27,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: subosito/flutter-action@v2
+      - uses: ./.github/actions/flutter-verify
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
-          channel: stable
-          cache: true
-
-      - run: flutter --version
-
-      - name: Install dependencies
-        run: flutter pub get
-
-      - name: Verify generated code is up to date
-        run: |
-          dart run build_runner build --delete-conflicting-outputs
-          git diff --exit-code || {
-            echo "::error::Generated code is stale. Run 'dart run build_runner build --delete-conflicting-outputs' and commit the result.";
-            exit 1;
-          }
-
-      - name: Check formatting
-        run: dart format --output=none --set-exit-if-changed .
-
-      - name: Analyze
-        run: flutter analyze
-
-      - name: Run tests
-        run: flutter test
