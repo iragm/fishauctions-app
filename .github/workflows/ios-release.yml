@@ -99,6 +99,34 @@ jobs:
           --build-number=${{ github.run_number }}
           --build-name=$BUILD_NAME
 
+      # Flutter can fail an iOS build and print none of the reason: it passes
+      # xcodebuild `-quiet` unless verbose, and on failure prints a diagnosis
+      # instead of the output — with no parsed .xcresult issues it takes
+      # ios/mac.dart's `noDevelopmentTeamInstruction` branch ("Building a
+      # deployable iOS app requires a selected Development Team"), which sets
+      # issueDetected and so skips `_parseIssueInStdout`, the only thing that
+      # would have dumped stdout/stderr. On a --no-codesign build that message
+      # is pure noise and the real compiler error is nowhere in the log. `-v`
+      # drops `-quiet`; the rebuild is incremental, so it fails again at the
+      # same target quickly. Same step as in dependencies.yml.
+      - name: Show the real Xcode error
+        if: ${{ failure() && !inputs.distribute }}
+        run: |
+          flutter build ios --release --no-codesign \
+            --dart-define=FLAVOR=${{ inputs.flavor }} \
+            --build-number=${{ github.run_number }} \
+            --build-name=$BUILD_NAME -v \
+            > "$RUNNER_TEMP/ios-build.log" 2>&1 || true
+          {
+            echo "### Xcode errors"
+            echo '```'
+            grep -E "error:|The following build commands failed|nonzero exit code" \
+              "$RUNNER_TEMP/ios-build.log" | head -60 || echo "(no error: lines matched)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "──────── last 400 lines of the verbose build ────────"
+          tail -n 400 "$RUNNER_TEMP/ios-build.log"
+
       - name: Upload unsigned .app artifact
         if: ${{ !inputs.distribute }}
         uses: actions/upload-artifact@v7

@@ -828,7 +828,30 @@ GitHub Actions live in `.github/workflows/` (repo root, above `fishauctions_appl
   - **The run itself goes red whenever a verification failed** (the `gate` job, added 2026-08-16), because a scheduled workflow's conclusion is the only thing that mails anybody. The two `Verify` steps are `continue-on-error` by design — tier 2 exists *because* tier 1 may fail — and until the gate landed that made the whole run green no matter what happened; the week AGP 8.13.2 met the Gradle 9.7.0 wrapper, both tiers watched `assembleDevDebug` fail, the fallback reverted everything, nothing was left to commit, **no PR was opened at all**, and the run reported a green check. So the gate runs last (the PR is already open by then) and fails on: tier `safe` (a new major broke the build — mergeable PR, still needs a human), tier `failed`, an iOS build failure, or a failed `gh pr create`. Tier `none` — nothing available to update — stays green, since nothing was built and nothing is being claimed. Red here means *read the run summary*, not "the automation broke".
   - **Hold lists live in the workflow's `env:`** (`PUB_HOLD`/`GRADLE_HOLD`/`ACTIONS_HOLD`), each entry with the reason it can't just be bumped — `flutter_inappwebview`'s deliberate beta pin, `freezed_annotation`'s `dependency_overrides` twin, the native Square SDK that has to match the plugin's. Held packages are still *reported* as available, so a hold can't quietly become permanent.
   - **The pinned Flutter SDK is read from `ci.yml` at run time, never bumped by default.** `workflow_dispatch` with `bump-flutter` turns it on; the verify steps then re-read the pin from the working tree, so the bump is checked against the version it moved to rather than the one the run started with.
+  - **The iOS job runs the *release* build, byte for byte the command
+    `ios-release.yml` runs.** It gates that workflow, so a difference between
+    them is only a way for the gate to be wrong. It was `--debug` for its first
+    four runs (never once executed — the job is gated on the Linux tier passing,
+    which it hadn't) and that was worse twice over: no one in this project can
+    make a debug iOS build at all, Debug is the only configuration that pulls
+    `RunnerDebug.entitlements` and its Tap to Pay *development* key, and no AOT
+    means gen_snapshot failures sail through.
   - Needs **Settings → Actions → General → "Allow GitHub Actions to create and approve pull requests"** enabled, or `gh pr create` 403s.
+
+**"Building a deployable iOS app requires a selected Development Team" on a
+`--no-codesign` build is not about signing, and the real error is not in the
+log.** `flutter build ios` passes xcodebuild `-quiet` unless it is verbose, and
+on failure prints a *diagnosis* rather than the output. When the `.xcresult`
+yields no parsed issues — nothing matched, or `xcresulttool`'s JSON moved under
+a newer Xcode — `ios/mac.dart` falls to the `noDevelopmentTeamInstruction`
+branch, which sets `issueDetected` and therefore **skips
+`_parseIssueInStdout`**, the one thing that would have dumped stdout/stderr. So
+a four-minute build fails with a signing lecture, on a job that was never trying
+to sign anything, and the compiler error appears nowhere. Both iOS workflows now
+carry a `Show the real Xcode error` step that re-runs with `-v` (which drops
+`-quiet` and makes `printTrace` visible) on failure; the rebuild is incremental,
+so it fails again at the same target in a fraction of the time. Read that step,
+never the signing block.
 
 **AGP is held below 9.x, and that is not staleness — it is what keeps the
 payments SDK current.** AGP 9.0 removed `targetSdk` from the *library* DSL

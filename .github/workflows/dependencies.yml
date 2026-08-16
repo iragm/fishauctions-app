@@ -378,11 +378,50 @@ jobs:
         working-directory: fishauctions_application
         run: dart run build_runner build --delete-conflicting-outputs
 
-      # Debug rather than release: this is a "does it still compile, link and
-      # pod-install" gate, and --no-codesign keeps it free of certificates.
+      # The exact command ios-release.yml's unsigned path runs, deliberately:
+      # this gate exists to predict that workflow, so any difference between
+      # them is a way for it to be wrong. It was `--debug` until 2026-08-16,
+      # which was worse on both counts — nobody in this project can produce a
+      # debug iOS build at all (no Mac; see IOS.md), Debug is the one
+      # configuration that pulls RunnerDebug.entitlements and its Tap to Pay
+      # development key, and skipping AOT means gen_snapshot failures pass.
+      # --no-codesign is what keeps it free of certificates; that part is
+      # unrelated to the build mode.
       - name: Build iOS app (unsigned)
         working-directory: fishauctions_application
-        run: flutter build ios --debug --no-codesign --dart-define=FLAVOR=staging
+        run: flutter build ios --release --no-codesign --dart-define=FLAVOR=staging
+
+      # Flutter can fail an iOS build and print none of the reason.
+      # `flutter build ios` passes xcodebuild `-quiet` unless it is verbose, and
+      # on failure it prints a *diagnosis* rather than the output: if the
+      # .xcresult yields no parsed issues, ios/mac.dart takes the
+      # `noDevelopmentTeamInstruction` branch — the "Building a deployable iOS
+      # app requires a selected Development Team" block — which sets
+      # issueDetected and therefore skips `_parseIssueInStdout`, the only thing
+      # that would have dumped stdout/stderr. The result is a four-minute build
+      # that fails with a signing lecture and no compiler error anywhere, on a
+      # job that was never trying to sign anything. That is exactly what run #4
+      # produced, and it is why this step exists.
+      #
+      # `-v` drops `-quiet` and makes printTrace visible (so an xcresulttool
+      # parsing failure also shows up). The rebuild is incremental — the
+      # DerivedData from the step above is still there — so it fails again at
+      # the same target for a fraction of the time.
+      - name: Show the real Xcode error
+        if: failure()
+        working-directory: fishauctions_application
+        run: |
+          flutter build ios --release --no-codesign --dart-define=FLAVOR=staging -v \
+            > "$RUNNER_TEMP/ios-build.log" 2>&1 || true
+          {
+            echo "### Xcode errors"
+            echo '```'
+            grep -E "error:|The following build commands failed|nonzero exit code" \
+              "$RUNNER_TEMP/ios-build.log" | head -60 || echo "(no error: lines matched)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "──────── last 400 lines of the verbose build ────────"
+          tail -n 400 "$RUNNER_TEMP/ios-build.log"
 
   pull-request:
     name: Open pull request
