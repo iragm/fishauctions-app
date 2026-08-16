@@ -914,6 +914,25 @@ doesn't invoke Gradle at all (`flutter analyze`/`test`/build_runner are pure
 Dart), so it has no JDK setup step and isn't affected. `minSdk` is **28**
 (Square SDK floor).
 
+**No CI job runs R8, so a release-only build failure is invisible until the
+manual release workflow.** The single Android build in `flutter-verify` is
+`flutter build apk --debug --flavor dev`, and debug doesn't minify — which is
+how the Square SDK 2.5.0 → 2.6.0 bump (2026-07-27) sat green for three weeks
+and then failed `bundleProdRelease` on 2026-08-16 at
+`:app:minifyProdReleaseWithR8`. `mobile-payments-sdk-internals:2.6.0` declares
+SQLDelight's **JVM** driver at compile scope beside the Android one
+(`app.cash.sqldelight:sqlite-driver` → `org.xerial:sqlite-jdbc`), so a desktop
+JDBC library lands on an Android classpath referencing `java.sql.JDBCType`
+(Android's `java.sql` has no `JDBCType`) and `org.slf4j` — and **R8 treats a
+missing class as an error, not a warning**. The `-dontwarn java.sql.**` /
+`org.sqlite.**` / `org.slf4j.**` block in `proguard-rules.pro` is the fix; none
+of it is reachable at runtime, since Square drives SQLDelight through
+`android-driver`. That jar also ships desktop JNI binaries as *java resources*,
+and AGP's defaults drop the `.so` files but not the `.dll`/`.dylib` ones, so
+6.2 MB of Windows and macOS libraries were being packaged into every build —
+hence `packaging { resources { excludes += "org/sqlite/native/**" } }`. Both go
+away if Square fixes the POM.
+
 **Release artifacts are retained for 1 day** (`retention-days: 1` on every
 `upload-artifact` in both release workflows). This is a **public** repo, so
 anyone can download any run's artifacts — a 30-day `.apk` artifact is a

@@ -41,6 +41,19 @@ android {
         versionName = flutter.versionName
     }
 
+    packaging {
+        resources {
+            // Square's mobile-payments-sdk-internals 2.6.0 drags in the *JVM*
+            // SQLDelight driver (org.xerial:sqlite-jdbc — see the -dontwarn
+            // block in proguard-rules.pro), whose jar carries desktop JNI
+            // binaries as plain java resources. AGP's defaults drop the .so
+            // files but not the Windows .dll / macOS .dylib ones, so 6.2 MB of
+            // them were being packaged into every APK/AAB (verified in
+            // app-staging-debug.apk). Nothing on Android can load them.
+            excludes += "org/sqlite/native/**"
+        }
+    }
+
     flavorDimensions.add("env")
 
     productFlavors {
@@ -106,7 +119,7 @@ dependencies {
     // compile classpath. The square_mobile_payments_sdk plugin pulls the same
     // artifact as `implementation`, which doesn't expose it here. Keep this
     // version in sync with squareSdkVersion in the plugin's android/build.gradle
-    // (currently 2.5.0); the Square maven repo is declared in the root
+    // (currently 2.6.0); the Square maven repo is declared in the root
     // android/build.gradle.kts.
     implementation("com.squareup.sdk:mobile-payments-sdk:2.6.0")
 
