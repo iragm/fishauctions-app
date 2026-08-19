@@ -17,6 +17,7 @@ import '../screens/print_label_screen.dart';
 import '../screens/splash_screen.dart';
 import '../screens/tap_to_pay_screen.dart';
 import '../screens/webview_screen.dart';
+import '../services/deep_link_service.dart';
 
 /// The sign-in gate: the screens an anonymous user is allowed on, and — because
 /// they exist only to get an account — the screens a *signed-in* user is
@@ -71,7 +72,30 @@ final routerProvider = Provider<GoRouter>((ref) {
   return GoRouter(
     initialLocation: '/',
     refreshListenable: refresh,
+    // Anything that matched no route and wasn't a site link (a deep link for
+    // another host, a mistaken push) goes home rather than to go_router's
+    // default error page, which in a release build is a red screen with a
+    // stack trace and no way back.
+    onException: (context, state, router) {
+      debugPrint('No route for ${state.uri}; going home');
+      router.go('/');
+    },
     redirect: (context, state) {
+      // An OS deep link — an Android App Link or an iOS Universal Link —
+      // arrives as an *absolute* URL pushed into the router, and there is no
+      // app route for `https://auction.fish/lots/123`. Park it for the shell
+      // and carry on as if the app had been opened normally: signed in that
+      // lands on `/` and the shell loads it; signed out it goes through the
+      // login trap and the link is still waiting afterwards.
+      //
+      // This has to happen in `redirect` rather than only in [onException],
+      // because the top-level redirect runs on an *error* match list too — so
+      // a signed-out deep link would be turned into `/login?from=<absolute
+      // url>` and never reach the exception handler at all, and `_safeFrom`
+      // (rightly) refuses a non-relative `from`.
+      if (DeepLinkService.instance.offer(state.uri)) {
+        return '/';
+      }
       final auth = ref.read(authProvider);
       final location = state.matchedLocation;
       // Only the launch-time session restore is ever loading (login attempts

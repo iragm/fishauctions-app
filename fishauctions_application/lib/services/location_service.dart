@@ -65,6 +65,58 @@ class LocationService {
     return _read();
   }
 
+  /// A fix good enough to *write down* as a place, for the admin "set this
+  /// auction's location from my phone" flow. Null when one can't be had.
+  ///
+  /// Everything else here reads a position to answer "roughly how far away is
+  /// this?", where [LocationAccuracy.medium] and a stale cached fallback are
+  /// the right trade. Pinning an auction is the opposite problem: the value is
+  /// stored permanently, and from then on it *is* the geofence every attendee
+  /// is measured against — a 500 ft welcome radius centered on a fix that was
+  /// itself 100+ m out, or was taken at the last place the phone happened to
+  /// look, is worse than the geocoded street address it replaced. So this asks
+  /// for the best fix the hardware has, waits longer for it, and then checks
+  /// what it got: an [accuracyFloorMetres] radius of error or a fix older than
+  /// [maxFixAge] is refused rather than silently pinned.
+  ///
+  /// This is also the one place the coarse-location loophole matters. Android's
+  /// "Approximate" grant and iOS's "Precise Location: off" both leave
+  /// [hasPermission] true while handing back a fix good to a city block or
+  /// worse; the accuracy check is what notices, and the caller turns it into
+  /// "couldn't get an accurate position" instead of a wrong pin nobody can see
+  /// is wrong.
+  Future<Position?> precisePosition({
+    double accuracyFloorMetres = 50,
+    Duration maxFixAge = const Duration(minutes: 2),
+  }) async {
+    if (!await hasPermission() ||
+        !await Geolocator.isLocationServiceEnabled()) {
+      return null;
+    }
+    final Position position;
+    try {
+      position = await Geolocator.getCurrentPosition(
+        // LocationSettings already defaults to LocationAccuracy.best; the
+        // long time limit is the deliberate part — a cold GPS fix at a venue
+        // takes far longer than the 10 s a distance figure is allowed.
+        locationSettings: const LocationSettings(
+          timeLimit: Duration(seconds: 30),
+        ),
+      );
+    } on Object {
+      // Deliberately no last-known fallback: the whole point is that this
+      // reading describes where the phone is *now*.
+      return null;
+    }
+    if (position.accuracy > accuracyFloorMetres) {
+      return null;
+    }
+    if (DateTime.now().difference(position.timestamp) > maxFixAge) {
+      return null;
+    }
+    return position;
+  }
+
   Future<Position?> _read() async {
     if (!await Geolocator.isLocationServiceEnabled()) {
       return null;

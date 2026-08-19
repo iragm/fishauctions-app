@@ -134,10 +134,17 @@ class CheckinService {
   }
 
   /// Pins [auctionSlug]'s location to this phone's current position
-  /// (admin-gated server-side). Returns false when no fix was available or
-  /// the server refused.
+  /// (admin-gated server-side). Returns false when no accurate fix was
+  /// available or the server refused.
+  ///
+  /// Uses [LocationService.precisePosition], not the ordinary read: this
+  /// coordinate is stored permanently and becomes the center of the 500 ft
+  /// welcome geofence every attendee is then measured against, so a fix that
+  /// is merely good enough for a "12 miles away" listing is not good enough
+  /// here. A refusal is reported to the admin, who can walk outside and try
+  /// again — an inaccurate pin is invisible and un-fixable from the app.
   Future<bool> setAuctionLocation(String auctionSlug) async {
-    final position = await LocationService.instance.positionIfPermitted();
+    final position = await LocationService.instance.precisePosition();
     if (position == null) {
       return false;
     }

@@ -107,7 +107,7 @@ GET  /api/mobile/labels/<lot_pk>/                   # RGB PNG (default fmt)
 GET  /api/mobile/labels/<lot_pk>/?fmt=png&resolution=WxH&dpi=N   # exact raster
 GET  /api/mobile/labels/<lot_pk>/?fmt=pdf           # single-lot PDF (WeasyPrint, user's prefs)
 GET  /api/mobile/labels/prefs/   + PATCH            # UserLabelPrefs + computed warnings
-POST /api/mobile/labels/printed/                    # mark label_printed (BACKEND_SPEC Part W — NOT implemented yet)
+POST /api/mobile/labels/printed/                    # mark label_printed (live)
 GET  /api/mobile/printers/profiles/                 # ThermalPrinterProfile rows (ETag'd)
 ```
 
@@ -123,13 +123,25 @@ GET  /api/mobile/printers/profiles/                 # ThermalPrinterProfile rows
   resets it). Every time after, a "No printer connected" snackbar with a **Set
   up** action, because a print button that keeps yanking the user off their
   page is worse than no printer.
-- **Multi-lot:** `fishauctions://print/?lots=12,13,14` (`lotPksFromPrintLink`)
-  loops the single-lot raster path with one connect and a progress count.
-  Emitting it from the bulk label buttons is backend work — `BACKEND_SPEC.md`
-  Part W, along with `labels/printed/`, without which native printing never
-  clears the website's unprinted-label lists (the PDF views set
-  `label_printed` as a side effect of rendering; nothing on the native path
-  does).
+- **Multi-lot works end to end, and Part W is done** (verified 2026-08-19;
+  this used to say the backend still owed it). `fishauctions://print/?lots=12,13,14`
+  (`lotPksFromPrintLink`) loops the single-lot raster path with one connect and
+  a progress count, and the backend now emits it: `LotLabelView.get()` returns
+  `label_bluetooth_redirect.html` — a page whose script clicks the deep link and
+  then goes `history.back()` — instead of the PDF, gated on
+  `is_mobile_app and print_method == 'bluetooth'` in the **view** rather than in
+  each template, so every bulk entry point (users table, `?printredirect=`, the
+  palette, print-after-bulk-add, a bookmark) routes to the printer. Capped at
+  `MAX_DEEP_LINK_LOTS`, with the page telling the user to use "print only
+  unprinted labels" for the rest. `labels/printed/` is live too, so natively
+  printed labels now clear the website's unprinted lists.
+- **A batch link with unreadable prefs prints anyway** (fixed 2026-08-19). The
+  old fallback was "not the Bluetooth method ⇒ the page is stale ⇒ reload it",
+  which is right when prefs say *some other* method and an infinite loop when
+  prefs are simply **null** (an offline or failed `labels/prefs/` fetch): the
+  reload re-renders the same handoff page, whose script clicks the same link,
+  and the fetch fails again. A batch link only exists because the server decided
+  this user prints over Bluetooth, so a null answer defers to the server.
 - **PDF / System printer** — the same WeasyPrint PDFs the website makes;
   System routes them into the OS print dialog (`printing` package), both from
   WebView downloads and the `fishauctions://print/<lot_pk>` deep link.
@@ -293,6 +305,17 @@ beacon records the scan). Entry: app-only web buttons →
 `fishauctions://ar/<auction_slug>` (rules page) and `?locate=<lot_pk>` (lot
 page "Locate with AR").
 
+Each chip and the detail card also draw the lot's **other** name under its own
+(`ArLotMeta.secondLine`): a lot called "Yellow lab" gets *Labidochromis
+caeruleus* under it, one called "Labidochromis caeruleus" gets "Yellow lab", and
+the scientific half is italicised. The rule is the backend's — `scientific_name`
+and `common_name` on `ar/lots/` are `Lot.scientific_name_line` /
+`Lot.common_name_line`, one display rule with two halves, at most one filled —
+so the app never has to know whether a blank means hardware, a mixed lot, or an
+auction with `use_scientific_name` off. Worth the space in a way almost nothing
+else on a chip is: in a hall you can read a lot's name across the room but not
+its label, and the species is what a buyer is scanning for.
+
 Interactions are reported to `ar/events/` (de-duped per lot per type per
 session): `scanned` when a label is read, `zoomed` when the user aims at one
 label up close, `zoomed_full` when the detail card opens. The backend stores
@@ -314,6 +337,21 @@ scanned cluster — or, when too few are visible, from the bearing/distance of
 the bearing-only resection (≥3 sighted mapped lots) with an assumed table
 height for its on-screen height. Locating **one** lot the user explicitly
 asked for is the only thing the map drives.
+
+**Back closes the card before it leaves the screen** (`PopScope`, `canPop:
+_cardPk == null`), which covers the app-bar arrow too since that routes through
+`Navigator.maybePop`. And **back from a lot page opened out of scanning returns
+to scanning**, aimed at that lot — which had been dead code: it keyed on the
+`?src=ar` marker in the current URL, and `base_page_view.html` runs a
+`history.replaceState` on every page load that strips `src` (and `uid`), so the
+marker is gone before the user can press anything. It now keys on the path, and
+the screen pops an `ArLotPageRequest` carrying the real **pk** instead of the
+shell re-deriving one from the URL — which it could not do: an in-auction lot's
+URL is `/auctions/<slug>/lots/<lot_number>/<lot-slug>/`, where the segment after
+`lots/` is `lot_number_display` (often `BOB-1`, and a *different* integer from
+the pk when it is numeric). The web page's own "Back to scanning" bar renders in
+the wrong template block and appears at the bottom of the page — backend,
+`BACKEND_SPEC.md` Part AR-1.
 
 **This is the only screen in the app that raises an OS permission dialog
 directly** (`_offerLocation`, 700 ms after the camera view paints, and only if
@@ -596,6 +634,43 @@ bridge.
   consecutive failures; the ones in between are retried and not reported,
   since a failure the next re-arm fixes two seconds later isn't news and
   putting it on screen resets the button while the microphone is coming back.
+- **Both recognizers write money as a symbol, and that alone kept the price
+  field empty on every phone** (fixed 2026-08-19). iOS
+  `SFTranscription.formattedString` and Android's `RESULTS_RECOGNITION` are
+  *formatted* transcripts: "twenty five dollars" comes back as `$25`. The digits
+  are an improvement; losing the word is not, because the price slot is a
+  **suffix**-anchored one and "dollars" is the anchor. Then `normalizePhrase`
+  strips the symbol, leaving a bare number — which the grammar correctly refuses
+  to write anywhere. `VoiceParser._spellOutCurrency` reads a currency symbol
+  immediately in front of a number as the anchor it stands for, before
+  tokenizing, using the *canonical* word of `anchors["price"]` so a renamed
+  anchor still works. Everything downstream is untouched: the seam with an open
+  lot/bidder slot, cents, `only_whole_dollar_bids`.
+- **On iOS `.duckOthers` is illegal on the `.record` category**, and
+  `setCategory` rejecting it lands in the same `catch` as everything else —
+  reported as `error_audio_error` and ending the session before the audio engine
+  has started. It bought nothing either (`.record` already interrupts other
+  audio), so it's gone; the error now carries the platform's own text.
+- **The event channel is subscribed once per backend and never re-subscribed.**
+  `prepare()` runs twice per session (`VoiceCommandService.start` calls it, then
+  `RestartingSpeechBackend.start` does), and it used to cancel and re-listen
+  each time. Cancelling a broadcast subscription doesn't wait for
+  `EventChannel`'s `onCancel`, which both messages the platform *and* clears the
+  binary messenger's handler for the channel name — the one the new subscription
+  just installed under the same name.
+- **A recognizer that says nothing at all is the one failure it cannot report**
+  (`BiasedSpeechBackend.platformSilenceTimeout`, 6 s). Both native halves emit a
+  `status` the instant they start and a level stream after that, so silence
+  longer than that is a broken pipe, not a quiet room — and the UI it produces is
+  the worst one available: the page says "Listening", iOS shows its microphone
+  indicator, the meter sits at zero, and the operator keeps talking to a dead
+  microphone. It now ends the session with a message instead.
+- **Every final transcript is logged with what it parsed to**
+  (`VoiceCommandService._handleResult`), including the vocabulary size on an
+  empty parse. From outside the app "it misheard me" and "it never got a final
+  result" look identical — the page shows a transcript either way — and this is
+  the only place the difference is visible. `flutter logs` / the Xcode console
+  is the first stop for any voice report.
 - **No offline fallback for the vocabulary**, deliberately: it never reads
   `OfflineStore`. Offline mode is where a bug means a stuck auction, and it
   stays small.
@@ -606,16 +681,68 @@ While the shell is up, `CheckinService` POSTs the phone's position (only when
 location permission already exists — it never prompts) at mount/resume and
 every 10 min; the server decides whether the user just arrived at an
 in-person auction and returns display-ready actions the shell surfaces:
-join offer (bottom sheet: Join without rules-scrolling → lands on rules
-page), auto-check-in confirmation (snackbar), and the admin "set location for
-this auction from my phone" dialog (auctions with `exact_location_set`
-false). All copy comes from the server; unknown action types are ignored.
+join offer (Join without rules-scrolling → lands on rules page),
+auto-check-in confirmation, and the admin "set location for this auction from
+my phone" offer (auctions with `exact_location_set` false). All copy comes from
+the server; unknown action types are ignored.
 
 ```
 POST /api/mobile/checkin/ping/           # {latitude, longitude} → {actions: [...]}
-POST /api/mobile/checkin/join/           # join + auto-checkin, returns rules_url
+POST /api/mobile/checkin/join/           # join + auto-checkin → {joined, checked_in, bidder_number, rules_url}
 POST /api/mobile/checkin/set-location/   # admin: pin auction location to phone position
 ```
+
+**The bidder number is the deliverable, and the app used to throw it away**
+(fixed 2026-08-19). `checkin/join/` has always returned it; `CheckinJoinResult`
+parsed three fields and not that one, so the app said "you're checked in!" and
+never said the number — which is the one thing the user needs, because *nothing
+a just-arrived bidder can reach shows it*: not the rules page they land on, not
+`auction.html`, not the app. (`invoice.html` and the bulk-add-lots pages do, but
+those belong to people who have already bought or are selling;
+`self_check_in.html` is the door kiosk, on an admin's screen.) It is read as a
+**string** — `AuctionTOS.bidder_number` is a `CharField` and is routinely text —
+and any message carrying one gets a 12-second snackbar instead of the default
+four, because it is something to read off the screen in a noisy room and there
+is no way to bring it back.
+
+**A nudge is an OS notification, not a modal** (changed 2026-08-19;
+`LocalNotificationService`). These arrive on the *ping loop's* schedule — mount,
+resume, every ten minutes — which has nothing to do with what the user is
+looking at, and a bottom sheet fired at that moment landed on top of whatever
+screen was up, the lot-scanning camera included. A tray notification is the
+right shape for news that arrives on someone else's schedule: it waits, it
+survives the app being backgrounded, and the user opens it when they choose. It
+also fixes the bidder number properly — a notification stays in the shade until
+it's swiped, where the 12-second snackbar above expired with nowhere to look the
+number up.
+- **Nothing about this prompts.** The plugin is initialized with every
+  `request*Permission` off, and posting reports `false` rather than asking. The
+  app still asks for notifications in exactly the two places `PushPromptService`
+  documents, and arriving at an auction is not one of them.
+- **So the in-app fallback has to stay**, and for most users it's the live path
+  (no notification permission ⇒ nothing would be displayed). It is deferred, not
+  dropped: `_deferredCheckin` holds it until the shell is the *visible* route
+  (`ModalRoute.isCurrent`), draining on resume and on return from AR, so a join
+  prompt still cannot land over the camera.
+- **The tap has to work after the app is dead.** Android routinely kills the
+  process that posted a notification, so the whole action is carried in the
+  payload (`CheckinAction.notificationPayload`, the server's own JSON shape, so
+  it comes back out of `tryParse`) rather than held in memory, and the cold-start
+  tap is read from `getNotificationAppLaunchDetails` exactly like
+  `FirebaseMessaging.getInitialMessage`.
+
+**The admin location pin takes a *precise* fix, and refuses a bad one**
+(`LocationService.precisePosition`, added 2026-08-19). Everything else here
+reads a position to answer "roughly how far away is this?", where
+`LocationAccuracy.medium` and a stale cached fallback are the right trade — but
+this coordinate is stored permanently and from then on *is* the 500 ft geofence
+every attendee is measured against, so a fix 100 m out (or one taken at the last
+place the phone happened to look) is worse than the geocoded street address it
+replaces. It asks for the best fix, waits 30 s, takes no cached fallback, and
+rejects anything worse than 50 m or older than 2 minutes. This is also the one
+place the coarse-location loophole bites: Android "Approximate" and iOS "Precise
+Location: off" both leave `hasPermission()` true while returning a
+city-block-grade fix, and the accuracy check is the only thing that notices.
 
 **Backend status: implemented** — all three views are live in
 `auctions/mobile/urls.py` (this section previously said otherwise; that was
@@ -623,6 +750,22 @@ stale). The app still self-disables pings on a 404, so an older deployment costs
 nothing. Note that check-in still only ever fires when location permission
 *already* exists — the two places that ask for it are the listings banner and
 entering lot scanning.
+
+**One backend defect outstanding: the candidate query doesn't filter on
+`promote_this_auction`** (`BACKEND_SPEC.md` Part CHECKIN-1). Every auction is
+created unpromoted, so an unlisted one currently pushes its full title and a
+working Join button to any signed-in app user within two miles during its
+window. One line in `evaluate_ping`. Deliberately not filterable app-side — the
+app sends a position and renders what comes back; which auction, which band and
+which nudge are all the server's call, which is why the copy lives there too.
+
+Two things that *are* right and are easy to doubt: the admin `set_location_offer`
+**is** geofenced (the candidate query excludes anything past `ADMIN_RADIUS_MI`,
+2 mi), and the whole thing **is** time-boxed — `Auction.in_welcome_window` runs
+from 3 h before `date_start` to `date_end` (or `date_start + 12 h` for a plain
+in-person event), so an auction weeks away or already finished never nudges
+anyone. Note that's tighter than `pretty_much_over`, which is a different
+question (24 h after wind-down) used for the palette and stray lots.
 
 ### Notification opt-in (when the app asks)
 
@@ -769,7 +912,21 @@ that shaped the app:
   Tap to Pay entry → `/tap-to-pay` (`screens/tap_to_pay_screen.dart`), shown
   only to merchants the backend calls eligible, since the guide's advice for a
   mixed consumer/merchant app is to limit the feature to the right user type.
-  Nearly every user here is a bidder.
+  Nearly every user here is a bidder. Making the entry visible to everyone with
+  a "nothing to set up here" screen was tried on 2026-08-19 and reverted the
+  same day: a drawer row every bidder sees, advertising a merchant capability
+  they can't have, is the thing 3.8/4.3 are steering away from.
+- **The awareness modal is gated on `canCharge`, not `eligible`, and on an
+  auction page** (changed 2026-08-19; it used to fire on whatever page a
+  merchant happened to land on, which is how it appeared unannounced). `eligible`
+  only means "administers some auction or club", which is true of every organizer
+  including the ones with no Square account — and an announcement about taking
+  card payments is noise to someone with nothing to take them into. `canCharge`
+  is the backend saying it issued live seller credentials, i.e. exactly "Square is
+  connected and ready and the only thing missing is this phone". The URL prefix
+  is a stand-in for the real question — *is the site showing its own Square card
+  here?* — which only the server can answer: `tapToPayOffer` is the bridge
+  handler for it and `BACKEND_SPEC.md` Part TTP-6 is the template half.
 - **A declined charge must still be able to send the customer a receipt**
   (5.10, "approved *or* declined"), via SMS/email/QR/Activity view — the share
   sheet is an Activity view, so that's what it uses. This is why the success
@@ -803,14 +960,15 @@ that shaped the app:
 - **iOS:** project config (bundle id, iOS 16 target, Info.plist keys) is done; the Mac-only work — first signed build, Google iOS OAuth client, the Square platform channel in AppDelegate, and the Tap to Pay entitlement — is checklisted in `IOS.md`.
 - ~~Printing backend endpoints~~ — landed (`printers/profiles/`, `labels/prefs/`, `labels/<pk>/?fmt=pdf`, `UserLabelPrefs.print_method`, the `/printing/` page's dropdown + BT card are live on staging). The app still degrades gracefully when offline: bundled printer profiles, print method defaults to PDF, prefs fetch returns null.
 - **Printer onboarding (`BACKEND_SPEC.md` Parts T/U/V/X/Y):** app side is done and verified on a VEVOR Y486BT, and now also ships the schema v2 interpreter and the guided characterization flow. Outstanding backend work, all small and all data: the **`tspl-raster` seed row** (Part T — the app bundles it, so the two are out of sync, and it means the one printer added since the profile mechanism landed was in fact added by app release), `probe_replies`/`probed_language` on `ObservedPrinter` plus a `probe` choice for `matched_by` (Part U — until then DRF drops both), a declared `command_language` on `ThermalPrinterProfile`, a user-facing rename for "Raw ESC/POS raster (GS v 0)", a `/printing/` card button that reaches the native sheet **while connected** (Part V) — without it the only route to "Print test label" is to unpair and re-pair — the v2 validator changes (Part X), and the characterization fields + "draft a profile" admin action (Part Y).
-- **Multi-lot printing + printed-marking (`BACKEND_SPEC.md` Part W):** app side landed 2026-07-26 — `fishauctions://print/?lots=…` is handled, so the template change is unblocked. Backend still owes: the bulk label buttons emitting that link when `user_print_method == 'bluetooth'` (plus letting `printredirect` carry the scheme, or gating in `LotLabelView.dispatch` instead), and `POST /api/mobile/labels/printed/`. Until the link lands, Bluetooth users still get a PDF sheet from the bulk buttons; until `labels/printed/` lands, natively printed labels stay "unprinted" on the website (the app's call self-disables on 404).
+- ~~Multi-lot printing + printed-marking (`BACKEND_SPEC.md` Part W)~~ — **both halves landed** (backend verified 2026-08-19: `LotLabelView.bluetooth_deep_link_response` + `label_bluetooth_redirect.html`, and `MobileLabelsPrintedView` at `labels/printed/`). This entry previously said the backend still owed them; that was stale.
+- **Printing from a computer to the phone's printer (`BACKEND_SPEC.md` Part R):** **app side is done** (`RemotePrintService`, 2026-08-19); the backend owes R1–R6. The load-bearing fact is in R0 — **the phone cannot be summoned**: Android blocks starting an Activity from the background, iOS silent push won't reach a force-quit app, and this app's BLE link lives in a UI-scoped provider that a headless isolate doesn't have. So the feature is "the app is open on the phone", measured by a heartbeat and *said out loud on the `/printing/` checkbox*, rather than a push fired into the void. The app now beats every 5 min (mount/resume/periodic) with `print_ready` — which means *paired **and** its profile resolves*, not "the account's print method is Bluetooth" — runs a `print_labels` data push through the ordinary `LabelPrintService.printLots` with its usual progress snackbar and Stop action, and posts throttled progress plus a result carrying the app's own failure text unedited. It reports nothing on the phone at the end: the person who asked is at the computer. The heartbeat's first 404 switches the whole feature off for the process, so until the backend lands, nothing changes anywhere.
 - **Push notifications:** app *and* backend *and* the config endpoint are all done and verified on hardware (2026-07-27) — `firebase_messaging` is wired, `PushService.currentToken()` is not a stub, and both deployments' `/api/mobile/config/` serve a complete `firebase` block. **`PUSH.md` and the code are the truth here.** Two remaining blockers, both server-side: `FIREBASE_CREDENTIALS_JSON` set per deployment (unset ⇒ `push_configured()` false ⇒ silent email fallback), and `UserData.push_notifications_instead_of_email` actually toggled on — which is what the new contextual opt-in above exists to do, once `notifications/prefs/` (`BACKEND_SPEC.md` Part N) lands. Testing trap: the **dev flavor can never receive push against staging** (staging's config targets `…app.staging`, so `PushService.init` goes inert by design) and a signed-out app never initializes push at all.
 - ~~Terms & privacy links / account deletion (App Store blockers)~~ — **both landed on the backend** (verified 2026-08-01; this entry previously said neither existed, which is stale). `PrivacyPolicyView` serves `/privacy/` (a `BlogPost` seeded by migration, rendered at a stable path rather than redirected — the app opens it inside the signed-out signup WebView against an allow-list, so a redirect would eject the user mid-signup), and `/api/mobile/config/` returns both `terms_url` and `privacy_policy_url`. Account deletion is a web page (`account_delete.html`), which needs no app change — the shell's `/logout/` interception turns the resulting web sign-out into a full native one. The app renders both legal links on the login and signup screens (`widgets/legal_links.dart`).
 - **Square Tap to Pay (runtime):** Backend endpoints are done; charging still needs a real NFC device on API 31+ and Square production approval (sandbox works for the full flow). Not exercisable in CI. Android is verified working in production builds; iOS has the **development** entitlement only (2026-07-31).
 - **Tap to Pay publishing entitlement / App Review (`TAPTOPAY.md`, `BACKEND_SPEC.md` Part TTP):** the app side of Apple's checklist is implemented — awareness moment, setup/education screen, Apple's education sheet, reader-progress indicators, receipt sharing, launch/resume warm-up, OS-version-aware messaging. Three backend items are review blockers: **TTP-1** un-hide the Square connect links in the app (today the site tells merchants to open a browser, which fails requirement 2.2 outright), **TTP-2** fix the checkout button's copy and icon (`Tap to Pay with card` + a Bootstrap credit-card glyph violate 5.4/5.5), and **TTP-3** the new `GET /api/mobile/payments/authorization/` that makes the warm-up and the admin-only terms gate possible. TTP-4 (`receipt_url` on confirm) and TTP-5 (launch email + push, from Apple's toolkit) are follow-ups.
 - ~~Offline sync backend~~ — landed (`offline/snapshot/` + `offline/sync/` in `auctions/mobile/`).
 - **AR lot mode backend v2:** v1 (models, solver, endpoints) landed on the backend, and so has every per-frame sensor channel `BACKEND_SPEC.md` Part 5 specced — gyro `yaw_deg` heading odometry, GPS + absolute-heading island anchoring, and pedometer-driven `odo_x_m`/`odo_y_m` planar dead-reckoning. What's left is island (connected-component) detection/labeling/merging (`component` on positions rows, which the app already consumes). Until it lands, lots that were never co-visible in one camera frame don't get reliable relative positions, and unconnected scanned islands overlap on the admin map.
-- **Proximity check-in backend:** app side (ping service + shell UI) is implemented; `BACKEND_SPEC.md` Part 6 (`exact_location_set`, the three `checkin/*` endpoints, nudge dedupe, history) is not. Feature self-disables on 404 until then.
+- ~~Proximity check-in backend~~ — **implemented and live** (verified 2026-08-19; this entry previously said otherwise, and there is no Part 6 in `BACKEND_SPEC.md` any more). All three `checkin/*` views are in `auctions/mobile/urls.py`, with `CheckinNudge`, `Auction.exact_location_set`, `in_welcome_window` and the history writes behind them, and `auctions/test_checkin.py` covers them. The app's 404 self-disable will never fire against this backend. **What is *not* covered is the app half:** `test/services/` has no `checkin_service_test.dart` at all — the ping loop, `minGap`, the `_surfaced` dedupe, join and set-location are untested.
 - **Recruit volunteers:** entirely web/backend — `BACKEND_SPEC.md` Part 7. No app work at all (notifications ride the Part 2 push pipeline; the accept flow is a web page).
 - ~~Voice set-winners~~ — **both halves are live.** The backend landed the vocabulary endpoint, the `voice` config block, the page (mic button, event receiver, confidence styling) and the tuning telemetry; the app's two launch bugs — a permission dialog on page load, and "not available on this phone" on any phone that hadn't already granted the microphone — were fixed 2026-08-08 (see the Voice section above; the cause was `SpeechToText.initialize()` being used as a capability check). **A third bug wore the same message and outlived both** — `voiceStart` threw `NoSuchMethodError` on `args.firstOrNull` before any of its own code ran, so the page's catch printed "Voice is not available on this phone" on every tap of Listen and the recognizer was never once reached (fixed 2026-08-09; the rule is under WebView Integration Notes). **Nothing past that throw has been exercised on hardware yet** — the first real session is still unproven.
 - ~~Command palette in the app~~ — **both halves are live** (2026-08-08). The app-bar title opens the *web* palette when the page has it (`#command-palette-modal`) and falls back to the native one when it doesn't, and `dictateGetState`/`dictateStart`/`dictateStop` expose the phone's recognizer so the palette's mic works — `window.SpeechRecognition` exists in neither of the app's engines. The web side landed the whole of Part PALETTE: the modal renders for app users, `command_palette.js` checks the bridge *before* feature-detecting Web Speech, it shows the dictation error instead of only un-pressing the button, and lot scanning / Tap to Pay are emitted as `fishauctions://` result rows (`auctions/command_palette.py`).
@@ -1164,6 +1322,49 @@ JWT auth is bridged into the WebView's Django cookie session:
   written against the browser working unchanged. Not on an explicit
   `dictateStop`, though: a user tapping the microphone off is cancelling, not
   submitting.
+- **`mailto:`/`tel:`/`sms:` go to the OS; every other non-http scheme is still
+  blocked** (`utils/external_links.dart`, fixed 2026-08-19). Both WebViews
+  cancelled every navigation that wasn't `http(s)` — right for `javascript:`,
+  `intent:` and `file:`, wrong for the three schemes that aren't navigations at
+  all but handoffs a browser has always honoured. Every "Email" button on the
+  site did nothing when tapped: the auction and club contacts, "Email all
+  users", the speaker panel, allauth's own confirm-address page. The allow-list
+  is closed and short on purpose — this shell renders user-authored HTML (lot
+  descriptions, reference links), and `intent:`/`market:` can launch arbitrary
+  apps with arbitrary extras.
+- **The app claims its own deployment's https links and nothing else.** An
+  Android App Link filter (`AndroidManifest.xml`, host from the flavor's
+  `appLinkHost` placeholder so dev/staging claim `staging.auction.fish` and
+  prod claims `auction.fish`) plus `FlutterDeepLinkingEnabled` on iOS.
+  Deliberately **no OS registration for the `fishauctions://` scheme**: those
+  links only ever appear inside our own pages and are intercepted by
+  `shouldOverrideUrlLoading`, so registering it would let any app — or any web
+  page in any browser — drive the shell's native flows.
+  - **The link arrives as a go_router *exception*, and is handled in `redirect`
+    rather than only `onException`.** Both platforms push the absolute URL into
+    the app's router, where nothing matches `/lots/123`. But the top-level
+    redirect runs on an error match list too, so a signed-out deep link was
+    being turned into `/login?from=<absolute url>` and never reaching the
+    exception handler — and `_safeFrom` (rightly) refuses a non-relative
+    `from`. `DeepLinkService.offer` therefore runs first in `redirect`, parks
+    the path, and returns `/`; the shell consumes it the same way it consumes a
+    quick action, so a link tapped while signed out survives the login trap.
+  - **Nothing works until the site serves the association files** —
+    `/.well-known/assetlinks.json` and `/.well-known/apple-app-site-association`
+    (`BACKEND_SPEC.md` Part LINKS). Until then verification fails and links keep
+    opening in the browser: the filter is inert, not wrong. The iOS
+    `associated-domains` entitlement is deliberately **not** added yet, because
+    adding it before the capability exists on the App ID breaks every signed
+    build — same trap as the Tap to Pay entitlement.
+  - **Left switched off on purpose** (2026-08-19). Claiming the domain means a
+    tapped `auction.fish` link stops opening in the browser for everyone with
+    the app installed, and that's a product decision — forcing people into the
+    app — not a technical gap. The app half stays in place and inert; **one
+    file on the server turns it on**, and none of it has to be revisited when
+    that day comes.
+  - go_router normalizes away a trailing slash, so `/lots/123/` loads as
+    `/lots/123` and Django's `APPEND_SLASH` 301s it back. One extra round trip;
+    the fix, if it ever matters, is server-side.
 - **Deployment config is re-fetched on resume if it never loaded**
   (`_rewarmConfigIfFailed`). Riverpod caches a `FutureProvider` failure for the
   process, so a cold start with no connectivity — routine at an auction hall —

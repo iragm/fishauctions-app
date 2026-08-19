@@ -75,11 +75,22 @@ final class BiasedSpeechBridge: NSObject {
     biasPhrases: [String],
     result: @escaping FlutterResult
   ) {
-    teardown()
-    guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: locale)),
-      recognizer.isAvailable
-    else {
+    teardown(deactivateSession: false)
+    guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: locale)) else {
       emit(["type": "error", "code": "error_language_unavailable"])
+      result(nil)
+      return
+    }
+    // `isAvailable` is deliberately *not* a gate. It is KVO-backed and starts false while the
+    // recognition service connects, so the first listen of a session — the one the user just
+    // tapped for — routinely arrives before it flips true. Reporting that as
+    // `error_language_unavailable` is a hard failure on the Dart side, which retires on-device
+    // recognition and then ends the session, on a phone whose recognizer works perfectly two
+    // seconds later. `error_busy` is in the base class's benign set: it re-arms, and by the next
+    // attempt the service is up. A recognizer that really never becomes available fails again
+    // with a real code the moment the task starts.
+    guard recognizer.isAvailable else {
+      emit(["type": "error", "code": "error_busy"])
       result(nil)
       return
     }
@@ -100,11 +111,18 @@ final class BiasedSpeechBridge: NSObject {
     do {
       let session = AVAudioSession.sharedInstance()
       // `.measurement` disables the system's own signal processing, which is what you want in
-      // front of a recognizer; `.duckOthers` because an auction hall may have music playing.
-      try session.setCategory(.record, mode: .measurement, options: .duckOthers)
+      // front of a recognizer.
+      //
+      // **No `.duckOthers`.** Apple permits that option only on `playAndRecord`, `playback` and
+      // `multiRoute`; on `.record` `setCategory` rejects the call, and every failure here lands in
+      // the `catch` below as `error_audio_error` — a hard error that ends the session before the
+      // audio engine has been started at all. It also bought nothing: `.record` already interrupts
+      // other audio. Kept as one call with a plain retry so an option list can never silently cost
+      // us the microphone again.
+      try session.setCategory(.record, mode: .measurement)
       try session.setActive(true, options: .notifyOthersOnDeactivation)
     } catch {
-      emit(["type": "error", "code": "error_audio_error"])
+      emit(["type": "error", "code": "error_audio_error", "detail": "\(error)"])
       result(nil)
       return
     }
@@ -148,7 +166,7 @@ final class BiasedSpeechBridge: NSObject {
         },
       ])
       if response.isFinal {
-        teardown()
+        teardown(deactivateSession: false)
         // The status is what drives Dart's end-of-utterance, and it has to follow the words: the
         // base class flushes anything still pending when a phrase ends, so a status arriving
         // first would promote the last partial and leave the real final for the next utterance.
@@ -200,7 +218,14 @@ final class BiasedSpeechBridge: NSObject {
     audioEngine.stop()
   }
 
-  private func teardown() {
+  /// Release the recognizer and the audio graph.
+  ///
+  /// [deactivateSession] is false when another utterance is about to start, which is most of them:
+  /// a continuous session re-arms every few seconds, and deactivating the audio session only to
+  /// reactivate it 350 ms later costs the first fraction of a second of every phrase — the part
+  /// carrying the anchor keyword the whole grammar hangs on. Handing the session back matters when
+  /// the operator has finished, not between two words.
+  private func teardown(deactivateSession: Bool = true) {
     audioEngine.inputNode.removeTap(onBus: 0)
     if audioEngine.isRunning {
       audioEngine.stop()
@@ -209,8 +234,10 @@ final class BiasedSpeechBridge: NSObject {
     task = nil
     request = nil
     recognizer = nil
-    try? AVAudioSession.sharedInstance().setActive(
-      false, options: .notifyOthersOnDeactivation)
+    if deactivateSession {
+      try? AVAudioSession.sharedInstance().setActive(
+        false, options: .notifyOthersOnDeactivation)
+    }
   }
 
   /// RMS of the buffer, normalized to 0..1 — Android reports a dB figure and iOS reports nothing

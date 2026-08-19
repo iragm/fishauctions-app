@@ -222,7 +222,7 @@ class VoiceParser {
   /// hands back a whole sentence — "lot forty two bidder seventeen twenty five
   /// dollars sold" is one result, not four.
   List<_Parsed> _parseText(String text) {
-    final tokens = tokenize(text);
+    final tokens = tokenize(_spellOutCurrency(text));
     if (tokens.isEmpty) {
       return const [];
     }
@@ -291,6 +291,50 @@ class VoiceParser {
     flushOpen();
     return out;
   }
+
+  /// Put the word back on a money amount the recognizer wrote as a symbol.
+  ///
+  /// **Both platforms format their transcripts, and formatting is what breaks
+  /// the price slot outright.** iOS `SFTranscription.formattedString` and
+  /// Android's `RESULTS_RECOGNITION` both turn "twenty five dollars" into
+  /// `$25` — the digits are an improvement, but the anchor keyword the whole
+  /// grammar hangs on is *gone*, so the price was never once filled from a
+  /// spoken amount. The symbol is then stripped by [normalizePhrase] (it keeps
+  /// letters, digits and decimal points), leaving a bare number that means
+  /// nothing without its anchor, exactly as the grammar intends for a bare
+  /// number.
+  ///
+  /// So the symbol is read as the anchor it stands for, before tokenizing, and
+  /// everything downstream — the seam with an open lot/bidder slot, the cents
+  /// handling, `only_whole_dollar_bids` — is unchanged. The canonical price
+  /// word comes from the grammar rather than being hard-coded, so a deployment
+  /// that renames it keeps this working.
+  ///
+  /// Deliberately not a general currency parser: it converts a symbol
+  /// *immediately in front of a number*, which is the one thing a recognizer
+  /// emits, and leaves everything else alone.
+  String _spellOutCurrency(String text) {
+    if (!_currencyPattern.hasMatch(text)) {
+      return text;
+    }
+    final words = grammar.anchors[VoiceSlot.price];
+    if (words == null || words.isEmpty || words.first.isEmpty) {
+      return text;
+    }
+    final word = words.first;
+    return text.replaceAllMapped(
+      _currencyPattern,
+      (match) => '${match[1]} $word',
+    );
+  }
+
+  /// A currency symbol glued to a number, in the shapes a recognizer produces.
+  /// The symbol set is fixed rather than read from the vocabulary's
+  /// `currency_symbol`: what matters is what the *recognizer* emitted, which
+  /// follows the phone's locale, not the auction's.
+  static final RegExp _currencyPattern = RegExp(
+    r'[$£€¥]\s?(\d+(?:\.\d{1,2})?)',
+  );
 
   /// The tokens making up a trailing cents phrase just after a "dollars"
   /// anchor, including the word "cents" itself; empty when there isn't one.

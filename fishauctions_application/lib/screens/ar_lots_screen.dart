@@ -543,7 +543,7 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
     unawaited(_session.flush());
     final base = meta.lotUrl ?? '/lots/${meta.pk}/';
     final sep = base.contains('?') ? '&' : '?';
-    context.pop('$base${sep}src=ar');
+    context.pop(ArLotPageRequest(path: '$base${sep}src=ar', lotPk: meta.pk));
   }
 
   /// Toggle the caller's watch state on [pk] from the card's star. Optimistic:
@@ -589,8 +589,35 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
         : auctionTitle;
   }
 
+  /// Back, while the big lot card is open, closes the card instead of leaving
+  /// the screen — the card is a layer over the camera, and the one thing every
+  /// user already knows about back is that it dismisses the thing on top. This
+  /// covers the app-bar arrow as well as the Android button and the iOS edge
+  /// swipe, because the arrow routes through `Navigator.maybePop`, which
+  /// consults [PopScope].
+  ///
+  /// Opening the lot's web page is unaffected: [_openLotPage] pops the route
+  /// directly, which is deliberately not a `maybePop`.
+  void _onPopInvoked(bool didPop, Object? result) {
+    if (didPop || _cardPk == null) {
+      return;
+    }
+    setState(() {
+      _cardPk = null;
+      _cardBrokenAt = null;
+    });
+  }
+
   @override
-  Widget build(BuildContext context) => Scaffold(
+  Widget build(BuildContext context) => PopScope(
+    // Only intercepted while there is a card to close, so a plain back on the
+    // scanning view leaves at once rather than costing the user a second tap.
+    canPop: _cardPk == null,
+    onPopInvokedWithResult: _onPopInvoked,
+    child: _buildScaffold(context),
+  );
+
+  Widget _buildScaffold(BuildContext context) => Scaffold(
     backgroundColor: Colors.black,
     appBar: AppBar(
       backgroundColor: Colors.black.withValues(alpha: 0.6),
@@ -1038,6 +1065,24 @@ class _LotMarker extends StatelessWidget {
             ),
           ],
         ),
+        if (meta.secondLine case final line?)
+          Padding(
+            // Indented to the name's text, not the marker dot: the two lines
+            // read as one label that way, which is what they are.
+            padding: const EdgeInsets.only(left: 22, top: 1),
+            child: Text(
+              line,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: meta.sold ? Colors.white38 : Colors.white70,
+                fontSize: 11,
+                fontStyle: meta.scientificNameIsSecondLine
+                    ? FontStyle.italic
+                    : FontStyle.normal,
+              ),
+            ),
+          ),
         if (showThumbnail)
           if (meta.thumbnailUrl case final url?) ...[
             const SizedBox(height: 6),
@@ -1282,6 +1327,22 @@ class _LotCard extends StatelessWidget {
                           fontWeight: FontWeight.w600,
                         ),
                       ),
+                      if (meta.secondLine case final line?)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 2),
+                          child: Text(
+                            line,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: Colors.white70,
+                              fontSize: 14,
+                              fontStyle: meta.scientificNameIsSecondLine
+                                  ? FontStyle.italic
+                                  : FontStyle.normal,
+                            ),
+                          ),
+                        ),
                       const SizedBox(height: 2),
                       Row(
                         children: [

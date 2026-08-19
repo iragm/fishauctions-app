@@ -49,6 +49,11 @@ class BiasedSpeechBackend extends RestartingSpeechBackend {
 
   StreamSubscription<dynamic>? _subscription;
   Timer? _pauseTimer;
+
+  /// Fires when the native side has said nothing at all since the session
+  /// started. See [_armSilenceWatchdog].
+  Timer? _silenceTimer;
+  bool _heardFromPlatform = false;
   Duration _pauseWindow = const Duration(seconds: 3);
   bool _open = false;
   bool? _biasSupported;
@@ -86,11 +91,28 @@ class BiasedSpeechBackend extends RestartingSpeechBackend {
     }
   }
 
+  /// **Subscribed exactly once, and never re-subscribed** — which is not a
+  /// micro-optimisation, it is the difference between a working microphone and
+  /// a lit one that never says anything.
+  ///
+  /// `prepare()` runs twice for every session (`VoiceCommandService.start`
+  /// calls it, then `RestartingSpeechBackend.start` calls it again), so this
+  /// method does too. Re-subscribing means `cancel` on the old broadcast
+  /// stream and `listen` on a new one, and **neither side of that pair is
+  /// ordered against the other**: `StreamSubscription.cancel()` on a broadcast
+  /// controller does not wait for `onCancel`'s platform round trip, and
+  /// `EventChannel`'s `onCancel` both sends `cancel` to the platform *and*
+  /// clears the binary messenger's handler for the channel name — the handler
+  /// the new subscription has already installed under the same name. Whichever
+  /// way that race lands, the losing outcome is a native side whose event sink
+  /// is nil and a Dart side with no message handler: the recognizer runs, iOS
+  /// shows the microphone indicator, and not one level, transcript or result
+  /// ever arrives. That is exactly what "listening on iPhone, I never hear
+  /// anything" was.
   @override
   Future<bool> ensureRecognizer() async {
     _biasSupported ??= await _askBiasSupport();
-    await _subscription?.cancel();
-    _subscription = _eventChannel.receiveBroadcastStream().listen(
+    _subscription ??= _eventChannel.receiveBroadcastStream().listen(
       _onPlatformEvent,
       onError: (Object error) {
         // The stream itself failing is not an utterance failing. Reported as a
@@ -120,6 +142,7 @@ class BiasedSpeechBackend extends RestartingSpeechBackend {
   }) async {
     _open = true;
     _armPause(pauseFor);
+    _armSilenceWatchdog();
     try {
       await _channel.invokeMethod<void>('start', {
         'localeId': options.localeId.replaceAll('_', '-'),
@@ -145,6 +168,7 @@ class BiasedSpeechBackend extends RestartingSpeechBackend {
   @override
   Future<void> closeUtterance() async {
     _pauseTimer?.cancel();
+    _silenceTimer?.cancel();
     if (!_open) {
       return;
     }
@@ -192,7 +216,50 @@ class BiasedSpeechBackend extends RestartingSpeechBackend {
     });
   }
 
+  /// **The one failure a recognizer cannot report is saying nothing at all.**
+  ///
+  /// Every other path here is driven by something the native side sent, so a
+  /// native half that starts its audio graph and then never reaches Dart —
+  /// a dropped event subscription, a stream handler cancelled out from under
+  /// it, an engine running with no recognition task attached — produces the
+  /// worst possible UI: the page shows "Listening", iOS shows its microphone
+  /// indicator, the level meter sits at zero, and nothing ever happens. That is
+  /// indistinguishable, to the operator, from a quiet room, so they keep
+  /// talking to a dead microphone.
+  ///
+  /// Both native halves emit a `status` the instant they start listening, and a
+  /// level stream continuously after that, so any silence longer than this is a
+  /// broken pipe rather than a quiet auction. Armed once per session (the flag
+  /// is never reset), because after the first event the ordinary machinery —
+  /// the pause clock, the stop watchdog, the error path — covers everything.
+  static const Duration platformSilenceTimeout = Duration(seconds: 6);
+
+  void _armSilenceWatchdog() {
+    if (_heardFromPlatform) {
+      return;
+    }
+    _silenceTimer?.cancel();
+    _silenceTimer = Timer(platformSilenceTimeout, () {
+      // `!_open` covers the operator tapping Stop inside the window: they
+      // already know the microphone is off and don't need to be told it broke.
+      if (_heardFromPlatform || !_open) {
+        return;
+      }
+      _log.w('Recognizer started but reported nothing; ending the session');
+      _open = false;
+      _pauseTimer?.cancel();
+      failSession(
+        SpeechErrorKind.unknown,
+        'The microphone started but this phone\'s speech recognizer never '
+        'responded. Close and reopen the app, then tap Listen again.',
+      );
+    });
+  }
+
   void _onPlatformEvent(dynamic raw) {
+    // Any shape at all counts: the point is only whether the pipe is alive.
+    _heardFromPlatform = true;
+    _silenceTimer?.cancel();
     if (raw is! Map) {
       return;
     }
@@ -249,6 +316,7 @@ class BiasedSpeechBackend extends RestartingSpeechBackend {
   @override
   Future<void> dispose() async {
     _pauseTimer?.cancel();
+    _silenceTimer?.cancel();
     await _subscription?.cancel();
     _subscription = null;
     await super.dispose();

@@ -56,6 +56,59 @@ void main() {
     });
   });
 
+  group('the recognizer formats money and drops the anchor', () {
+    // Both platforms format their transcripts: iOS `formattedString` and
+    // Android's RESULTS_RECOGNITION each turn "twenty five dollars" into "$25".
+    // The digits are an improvement; losing the word "dollars" is not, because
+    // it is the anchor the whole grammar hangs on — so a spoken price filled
+    // nothing at all, on either platform, however clearly it was said.
+    test('a currency symbol reads as the price anchor', () {
+      final commands = heard(parserFor(numericAuction()), r'$25');
+      expect(slot(commands, VoiceSlot.price)?.value, '25');
+    });
+
+    test('inside a whole command, with the other slots intact', () {
+      final commands = heard(
+        parserFor(numericAuction()),
+        r'Lot 42, bidder 17, $25. Sold.',
+      );
+      expect(slot(commands, VoiceSlot.lot)?.value, '42');
+      expect(slot(commands, VoiceSlot.bidder)?.value, '17');
+      expect(slot(commands, VoiceSlot.price)?.value, '25');
+      expect(slot(commands, VoiceSlot.sold), isNotNull);
+    });
+
+    test('cents survive, and the auction still gets to refuse them', () {
+      expect(
+        slot(
+          heard(
+            parserFor(numericAuction(wholeDollars: false)),
+            r'lot 12 $7.50',
+          ),
+          VoiceSlot.price,
+        )?.value,
+        '7.50',
+      );
+      expect(
+        slot(
+          heard(parserFor(numericAuction()), r'lot 12 $7.50'),
+          VoiceSlot.price,
+        ),
+        isNull,
+        reason: 'only_whole_dollar_bids refuses cents rather than rounding',
+      );
+    });
+
+    test('a bare number is still not a price', () {
+      // The symbol is the anchor, so removing it must leave the grammar's
+      // central rule exactly where it was.
+      expect(
+        slot(heard(parserFor(numericAuction()), '25'), VoiceSlot.price),
+        isNull,
+      );
+    });
+  });
+
   // The thing set-winners was reported as getting wrong. American English
   // flaps both consonants in "bidder" and "bitter" to the same sound, so no
   // recognizer can tell them apart — there is nothing in the audio to tell

@@ -11,6 +11,7 @@ import '../config/theme.dart';
 import '../constants/app_constants.dart';
 import '../models/app_config.dart';
 import '../providers/config_provider.dart';
+import '../utils/external_links.dart';
 import '../widgets/legal_links.dart';
 
 /// Hosts a single django-allauth account flow (signup or password reset) in a
@@ -124,6 +125,12 @@ class _AllauthWebScreenState extends ConsumerState<AllauthWebScreen> {
     final uri = action.request.url;
     if (uri == null) {
       return NavigationActionPolicy.ALLOW;
+    }
+    // mailto:/tel:/sms: go to the OS, not to the engine — allauth's
+    // confirm-address page links the address it is asking about.
+    if (isHandoffScheme(uri)) {
+      await _openExternally(uri);
+      return NavigationActionPolicy.CANCEL;
     }
     if (uri.scheme != 'http' && uri.scheme != 'https') {
       return NavigationActionPolicy.CANCEL;

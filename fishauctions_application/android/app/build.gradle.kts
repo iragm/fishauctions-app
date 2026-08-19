@@ -28,6 +28,11 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+        // Required by flutter_local_notifications, which compiles against
+        // java.time. minSdk 28 predates it on the platform, so the app module
+        // has to desugar too — the plugin enabling it in its own module only
+        // covers the plugin's own classes.
+        isCoreLibraryDesugaringEnabled = true
     }
 
     defaultConfig {
@@ -57,16 +62,27 @@ android {
     flavorDimensions.add("env")
 
     productFlavors {
+        // appLinkHost is the host this flavor claims Android App Links for
+        // (the <data> element in AndroidManifest.xml). It MUST match the
+        // backend EnvironmentConfig.apiBaseUrl resolves to for the same
+        // FLAVOR dart-define, or the app would offer to open links belonging
+        // to a deployment it can't sign in to. Each host's
+        // /.well-known/assetlinks.json has to list this flavor's
+        // applicationId and signing-cert SHA-256 or verification fails and
+        // the links keep opening in the browser (BACKEND_SPEC.md Part LINKS).
         create("dev") {
             dimension = "env"
             applicationIdSuffix = ".dev"
+            manifestPlaceholders["appLinkHost"] = "staging.auction.fish"
         }
         create("staging") {
             dimension = "env"
             applicationIdSuffix = ".staging"
+            manifestPlaceholders["appLinkHost"] = "staging.auction.fish"
         }
         create("prod") {
             dimension = "env"
+            manifestPlaceholders["appLinkHost"] = "auction.fish"
         }
     }
 
@@ -114,6 +130,9 @@ flutter {
 }
 
 dependencies {
+    // Keep in sync with the version flutter_local_notifications' own module
+    // pulls (android/build.gradle) — a lower one here loses the resolution.
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
     // MainActivity initializes the Square SDK just-in-time (from the app id the
     // backend returns per invoice), so the app module needs the SDK on its
     // compile classpath. The square_mobile_payments_sdk plugin pulls the same

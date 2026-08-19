@@ -233,6 +233,23 @@ class VoiceCommandService {
       vocabulary: VoiceVocabularyService.instance.current,
     );
     final commands = parser.parse(event.alternates);
+    // Logged on both branches, and deliberately at the same level. From the
+    // outside "the app misheard me" and "the app never got a final result at
+    // all" look identical — the page shows a transcript either way — and the
+    // only place the difference is visible is here. An empty parse with the
+    // alternates beside it is the difference between a grammar problem, a
+    // vocabulary that failed to load, and a recognizer that isn't reporting.
+    final vocabulary = VoiceVocabularyService.instance.current;
+    final heard = [
+      for (final alternate in event.alternates) '"${alternate.text}"',
+    ].join(', ');
+    _log.i(
+      commands.isEmpty
+          ? 'Voice heard $heard → nothing matched '
+                '(${vocabulary.lotNumbers.length} lots, '
+                '${vocabulary.bidderNumbers.length} bidders in the vocabulary)'
+          : 'Voice heard $heard → ${commands.join(', ')}',
+    );
     if (commands.isEmpty) {
       return;
     }

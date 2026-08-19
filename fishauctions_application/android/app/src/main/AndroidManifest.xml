@@ -98,6 +98,47 @@
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
+
+            <!-- Android App Links: open this deployment's own https links in
+                 the app instead of the browser. ${appLinkHost} is set per
+                 product flavor in build.gradle.kts and must match the backend
+                 the same FLAVOR dart-define points Dart at (prod →
+                 auction.fish, dev/staging → staging.auction.fish).
+
+                 This is the ONLY link type the app claims. There is
+                 deliberately no filter for the `fishauctions://` scheme: those
+                 links only ever appear inside our own pages and are
+                 intercepted by the WebView's shouldOverrideUrlLoading, so
+                 registering the scheme with the OS would let any app — or any
+                 web page in any browser — drive the shell's native flows.
+
+                 autoVerify makes this a *verified* App Link: Android fetches
+                 https://${appLinkHost}/.well-known/assetlinks.json at install
+                 time and only hands links over if it names this flavor's
+                 applicationId and signing-cert SHA-256. Until the backend
+                 serves that file (BACKEND_SPEC.md Part LINKS) verification
+                 simply fails and links keep opening in the browser — this
+                 filter is inert, not wrong. Note that a debug-signed dev build
+                 has a different fingerprint from a Play-signed release, so
+                 assetlinks.json needs an entry per (applicationId,
+                 fingerprint) pair you actually want to work. -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="https" android:host="${appLinkHost}"/>
+            </intent-filter>
+
+            <!-- Opt in to Flutter's own deep-link handling, which is what
+                 turns the intent above into a route the Dart side sees. Off by
+                 default on Android; without it the intent launches the app and
+                 the URL is dropped on the floor, which is worse than not
+                 claiming the link at all. The route lands in go_router, whose
+                 onException hands any site-shaped path to the WebView shell
+                 (config/router.dart). -->
+            <meta-data
+                android:name="flutter_deeplinking_enabled"
+                android:value="true" />
         </activity>
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->

@@ -246,6 +246,34 @@ void main() {
       expect(error.message, isNotEmpty);
     });
 
+    test('a second prepare does not cost the event subscription', () async {
+      // `prepare()` runs twice for every session — VoiceCommandService calls
+      // it, then RestartingSpeechBackend.start calls it again — and it used to
+      // cancel and re-listen the event stream each time. Neither half of that
+      // is ordered against the other: cancelling a broadcast subscription does
+      // not wait for EventChannel's `onCancel`, which both messages the
+      // platform *and* clears the binary messenger's handler for the channel
+      // name — the handler the new subscription just installed. The losing
+      // outcome was a running recognizer whose events reached nobody: the
+      // microphone indicator lit, and not one level, transcript or result.
+      await backend.prepare();
+      await backend.start(listening);
+      await settle();
+      await platform.emit({
+        'type': 'result',
+        'final': true,
+        'alternates': [
+          {'text': 'lot forty two'},
+        ],
+      });
+      await settle();
+
+      expect(
+        events.where((e) => e.type == SpeechEventType.result),
+        hasLength(1),
+      );
+    });
+
     test('a malformed event is ignored rather than fatal', () async {
       await backend.start(listening);
       await settle();

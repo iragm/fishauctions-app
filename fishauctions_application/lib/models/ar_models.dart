@@ -35,6 +35,8 @@ class ArLotMeta {
     required this.inAuction,
     this.lotNumber,
     this.name,
+    this.scientificName,
+    this.commonName,
     this.thumbnailUrl,
     this.imageUrl,
     this.watched = false,
@@ -52,6 +54,8 @@ class ArLotMeta {
     inAuction: json['in_auction'] == true,
     lotNumber: json['lot_number'] as String?,
     name: json['name'] as String?,
+    scientificName: json['scientific_name'] as String?,
+    commonName: json['common_name'] as String?,
     thumbnailUrl: json['thumbnail_url'] as String?,
     imageUrl: json['image_url'] as String?,
     watched: json['watched'] == true,
@@ -81,6 +85,24 @@ class ArLotMeta {
   final bool inAuction;
   final String? lotNumber; // Lot.lot_number_display — NOT the pk
   final String? name;
+
+  /// The lot's *other* name, and at most one of these two is ever filled —
+  /// `Lot.scientific_name_line` / `Lot.common_name_line` are one display rule
+  /// with two halves, and the backend decides which half applies.
+  ///
+  /// A lot the seller called "Yellow lab" carries *Labidochromis caeruleus*
+  /// here; one they called "Labidochromis caeruleus" carries "Yellow lab"
+  /// instead, because repeating the words already in the big slot is not new
+  /// information. Blank for hardware, mixed lots, and any auction whose
+  /// `use_scientific_name` is off — the app never has to know which of those it
+  /// is, it just draws what it is given.
+  ///
+  /// Worth the space on a chip in a way almost nothing else is: in a hall you
+  /// can read a lot's name from across the room but not its label, and the
+  /// species is the thing a buyer is actually scanning for.
+  final String? scientificName;
+  final String? commonName;
+
   final String? thumbnailUrl;
 
   /// Full-size primary image (not the 250×150 thumbnail), for the single-lot
@@ -106,6 +128,21 @@ class ArLotMeta {
     return number != null && number.isNotEmpty ? 'Lot $number' : 'Lot $pk';
   }
 
+  /// The second line to draw under [displayName], or null when there isn't
+  /// one. [scientificNameIsSecondLine] says whether to italicise it — a
+  /// binomial is set in italics, a common name is not.
+  String? get secondLine {
+    for (final candidate in [scientificName, commonName]) {
+      if (candidate != null && candidate.isNotEmpty) {
+        return candidate;
+      }
+    }
+    return null;
+  }
+
+  bool get scientificNameIsSecondLine =>
+      scientificName != null && scientificName!.isNotEmpty;
+
   /// Copy with an overridden [watched] flag — for the card's watch star's
   /// optimistic toggle before/around the server round trip.
   ArLotMeta copyWith({bool? watched}) => ArLotMeta(
@@ -113,6 +150,8 @@ class ArLotMeta {
     inAuction: inAuction,
     lotNumber: lotNumber,
     name: name,
+    scientificName: scientificName,
+    commonName: commonName,
     thumbnailUrl: thumbnailUrl,
     imageUrl: imageUrl,
     watched: watched ?? this.watched,
@@ -340,4 +379,23 @@ class ArPositions {
   final Map<int, ArLotPosition> byLot;
   final int unsoldTotal;
   final int unsoldWithPosition;
+}
+
+/// What the lot-scanning screen pops when the user taps "open lot page".
+///
+/// Carries the lot's **pk** alongside the path deliberately. The pk can't be
+/// read back out of the path: an in-auction lot's URL is
+/// `/auctions/<slug>/lots/<lot_number>/<lot-slug>/`, where the number after
+/// `lots/` is the auction's `lot_number_display` — often not a pk at all
+/// (`BOB-1` in a seller-dash auction), and a *different* integer from the pk
+/// when it is numeric. The shell needs the real pk to re-enter lot scanning
+/// aimed at this lot, so the screen that already knows it says so.
+class ArLotPageRequest {
+  const ArLotPageRequest({required this.path, required this.lotPk});
+
+  /// Site-relative path to load in the shell, including `?src=ar`.
+  final String path;
+
+  /// The lot's primary key, for `fishauctions://ar/<slug>?locate=<pk>`.
+  final int lotPk;
 }

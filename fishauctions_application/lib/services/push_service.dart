@@ -97,6 +97,22 @@ class PushService {
   final ValueNotifier<PushMessage?> foregroundMessage =
       ValueNotifier<PushMessage?>(null);
 
+  /// The most recent **data-only** message — one the backend sent to make the
+  /// app *do* something rather than to say something (today: a remote print
+  /// job, `BACKEND_SPEC.md` Part R). Kept apart from [foregroundMessage]
+  /// because these must draw nothing at all: the notification block is absent
+  /// precisely so no notification appears, and rendering an empty banner for
+  /// one would be a bug the user can see.
+  final ValueNotifier<Map<String, dynamic>?> dataMessage =
+      ValueNotifier<Map<String, dynamic>?>(null);
+
+  /// Returns and clears [dataMessage].
+  Map<String, dynamic>? consumeDataMessage() {
+    final data = dataMessage.value;
+    dataMessage.value = null;
+    return data;
+  }
+
   /// The device's current FCM token, or null while push is inert.
   Future<String?> currentToken() async => _token;
 
@@ -231,6 +247,14 @@ class PushService {
   }
 
   void _onForegroundMessage(RemoteMessage message) {
+    // A message with no `notification` block and a `type` is an instruction,
+    // not news. The OS shows nothing for these in any state, which is the
+    // point — the app is already open and about to show its own progress.
+    if (message.notification == null &&
+        (message.data['type']?.toString().isNotEmpty ?? false)) {
+      dataMessage.value = Map<String, dynamic>.from(message.data);
+      return;
+    }
     foregroundMessage.value = _messageOf(message);
   }
 

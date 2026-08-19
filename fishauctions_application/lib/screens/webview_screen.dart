@@ -17,6 +17,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../config/environment.dart';
 import '../config/theme.dart';
 import '../constants/app_constants.dart';
+import '../models/ar_models.dart';
 import '../models/checkin_models.dart';
 import '../models/club_menu_item.dart';
 import '../models/label_prefs.dart';
@@ -29,11 +30,13 @@ import '../services/api_service.dart';
 import '../services/auth_service.dart';
 import '../services/bluetooth_service.dart';
 import '../services/checkin_service.dart';
+import '../services/deep_link_service.dart';
 import '../services/dictation_service.dart';
 import '../services/download_service.dart';
 import '../services/label_prefs_service.dart';
 import '../services/label_print_service.dart';
 import '../services/last_page_service.dart';
+import '../services/local_notification_service.dart';
 import '../services/location_service.dart';
 import '../services/notification_prefs_service.dart';
 import '../services/offline_store.dart';
@@ -41,9 +44,11 @@ import '../services/offline_sync_service.dart';
 import '../services/printer_setup_prompt.dart';
 import '../services/push_prompt_service.dart';
 import '../services/push_service.dart';
+import '../services/remote_print_service.dart';
 import '../services/shortcut_service.dart';
 import '../services/tap_to_pay_service.dart';
 import '../services/voice_command_service.dart';
+import '../utils/external_links.dart';
 import '../utils/platform_bridge.dart';
 import '../widgets/payment_sheet.dart';
 import '../widgets/printer_connect_sheet.dart';
@@ -131,6 +136,12 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   // handoff can't spin.
   int _handoffAttempts = 0;
 
+  // Check-in nudges that could not be delivered as a tray notification (the
+  // OS won't show one for this app yet) and so still owe the user in-app UI.
+  // They wait here until the shell is the visible route — see
+  // _drainDeferredCheckin.
+  final List<CheckinAction> _deferredCheckin = [];
+
   // Invoice pk of the payment sheet currently being launched/shown, or null.
   // Guards against a double tap of the "Tap to Pay" button (or a repeated deep
   // link) opening overlapping sheets.
@@ -141,7 +152,7 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   // re-beacons the lot — the same intent as the page's "Back to AR" bar. It's
   // consumed on that first back (so a second back does normal web history and
   // there's no AR⇄lot loop) and dropped once the user navigates elsewhere.
-  ({String slug, int lotPk})? _arReturn;
+  ({String slug, int lotPk, String path})? _arReturn;
 
   @override
   void initState() {
@@ -151,6 +162,7 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     // in place. (Cold starts are handled by _initialUrl consuming the pending
     // path instead — see _onShortcutTapped.)
     ShortcutService.instance.pending.addListener(_onShortcutTapped);
+    DeepLinkService.instance.pending.addListener(_onDeepLink);
     // Notification tap → navigate the WebView there; foreground message →
     // in-app banner. (A cold start from a tap is picked up in
     // _onWebViewCreated once the controller exists.)
@@ -177,6 +189,19 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     // nudges the server decides apply.
     CheckinService.instance.newActions.addListener(_onCheckinActions);
     CheckinService.instance.start();
+    // Check-in nudges are delivered as tray notifications rather than drawn
+    // over whatever is on screen (see _handleCheckinActions); this is the
+    // return path for a tap, including one that launched the app from cold.
+    LocalNotificationService.instance.pendingPayload.addListener(
+      _onNotificationTapped,
+    );
+    unawaited(LocalNotificationService.instance.init());
+    // Printing from a computer to this phone's printer (BACKEND_SPEC.md Part
+    // R). The heartbeat is what lets the website say "your phone was last seen
+    // 2 minutes ago" instead of offering a feature that silently won't work;
+    // the data-message channel is how a job actually arrives.
+    PushService.instance.dataMessage.addListener(_onPushData);
+    RemotePrintService.instance.start(ref);
   }
 
   /// Loads `/api/mobile/config/` and initializes the Square SDK with the
@@ -220,13 +245,30 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   /// Runs behind the same settle-and-claim discipline as the location and
   /// notification offers, so it can't flash over a page that's about to
   /// redirect.
-  Future<void> _maybeOfferTapToPay(int generation) async {
+  Future<void> _maybeOfferTapToPay(
+    String path,
+    int generation, {
+    required bool fromPage,
+  }) async {
     final service = TapToPayService.instance;
     if (!service.isApplePlatform) {
       return;
     }
+    // A page that asked for it has said more than any URL test could, so the
+    // path rule doesn't apply to it (`tapToPayOffer`, BACKEND_SPEC Part TTP-6).
+    if (!fromPage && !_isAuctionPath(path)) {
+      return;
+    }
     final eligibility = service.eligibility.value;
-    if (eligibility == null || !eligibility.eligible) {
+    // **`canCharge`, not `eligible`.** `eligible` is only "administers some
+    // auction or club", which is true of every organizer on the site including
+    // the ones with no Square account at all — and an announcement about taking
+    // card payments is noise to someone who has nothing to take them into.
+    // `canCharge` is the backend saying it has issued live seller credentials:
+    // Square connected, in-person scope, token good. That is precisely "the
+    // account is connected and ready, and the only thing missing is this
+    // phone", which is the one state this modal has anything to say about.
+    if (eligibility == null || !eligibility.canCharge) {
       return;
     }
     if (await TapToPayAwarenessSheet.alreadyShown()) {
@@ -255,6 +297,19 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       await context.push('/tap-to-pay');
     }
   }
+
+  /// Whether this page is an auction the operator is running, which is where
+  /// the website already puts its own Square banner (`auction_ribbon.html`).
+  ///
+  /// A URL test is a stand-in, not the answer. The app cannot tell an auction
+  /// the user *administers* from one they are bidding in, and it has no way to
+  /// know whether the site is showing its Square card on this page — the server
+  /// does, which is why `tapToPayOffer` exists and is the route that should end
+  /// up carrying this. Until the template calls it, this at least confines an
+  /// unprompted modal to the part of the site an organizer is organizing in:
+  /// combined with `canCharge`, the person seeing it is an admin of an auction
+  /// with a live Square account, standing on an auction page.
+  static bool _isAuctionPath(String path) => path.startsWith('/auctions/');
 
   /// Bring up push (FCM) from the deployment config, then — if a token resulted
   /// — re-register the device so the backend gets the token (the login-time
@@ -389,6 +444,20 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
           return {'offered': _bannerGeneration != before};
         },
       )
+      // Tap to Pay's awareness moment, offered from the page that knows it is
+      // worth offering — the auction ribbon's Square card, which is the only
+      // place that can tell "this user runs this auction and its Square account
+      // is connected" (BACKEND_SPEC.md Part TTP-6). The app's own rule is a
+      // URL prefix and can only ever be an approximation of that.
+      //   tapToPayOffer() → {offered}
+      ..addJavaScriptHandler(
+        handlerName: 'tapToPayOffer',
+        callback: (List<dynamic> args) async {
+          final before = _bannerGeneration;
+          await _maybeOfferTapToPay('', _navGeneration, fromPage: true);
+          return {'offered': _bannerGeneration != before};
+        },
+      )
       ..addJavaScriptHandler(
         handlerName: 'pushEnable',
         callback: (List<dynamic> args) async {
@@ -484,8 +553,12 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   /// app is routinely killed while backgrounded, and returning to the site
   /// root every time loses the user's place mid-auction.
   Future<String> _initialUrl() async {
+    // A deep link outranks a quick action, which outranks the remembered
+    // page: each is a more specific statement of where the user meant to go.
     final shortcutPath =
-        ShortcutService.instance.consume() ?? await _lastPagePath();
+        DeepLinkService.instance.consume() ??
+        ShortcutService.instance.consume() ??
+        await _lastPagePath();
     try {
       final cookies = await CookieManager.instance().getCookies(
         url: WebUri(EnvironmentConfig.webBaseUrl),
@@ -530,6 +603,7 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   @override
   void dispose() {
     ShortcutService.instance.pending.removeListener(_onShortcutTapped);
+    DeepLinkService.instance.pending.removeListener(_onDeepLink);
     PushService.instance.pendingRoute.removeListener(_onPushRoute);
     PushService.instance.foregroundMessage.removeListener(_onForegroundPush);
     OfflineSyncService.instance.newConflicts.removeListener(
@@ -537,6 +611,11 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     );
     CheckinService.instance.newActions.removeListener(_onCheckinActions);
     CheckinService.instance.stop();
+    LocalNotificationService.instance.pendingPayload.removeListener(
+      _onNotificationTapped,
+    );
+    PushService.instance.dataMessage.removeListener(_onPushData);
+    RemotePrintService.instance.stop();
     // The shell going away is the last chance to close the microphone: the
     // page that owns the stop button is gone with it.
     _stopVoiceOnNavigation();
@@ -580,21 +659,112 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     unawaited(_handleCheckinActions(actions));
   }
 
+  /// A nudge arrives on the ping loop's schedule, not the user's, so the first
+  /// choice is always a tray notification: it waits for them, it survives the
+  /// app being backgrounded, and — for a check-in — it keeps the bidder number
+  /// readable instead of expiring with a snackbar.
+  ///
+  /// Only when the OS won't display one (permission never asked for, which is
+  /// the common case here — nothing in this app prompts for notifications at
+  /// launch) does it fall back to in-app UI, and even then not immediately:
+  /// [_deferredCheckin] holds it until the shell is the visible route, so a
+  /// join prompt can never land on top of the lot-scanning camera.
   Future<void> _handleCheckinActions(List<CheckinAction> actions) async {
     for (final action in actions) {
       if (!mounted) {
         return;
       }
-      switch (action.type) {
-        case CheckinActionType.checkedIn:
-          // The server already checked the user in — just confirm it.
-          _showSnack(action.message);
-        case CheckinActionType.joinOffer:
-          await _showJoinOffer(action);
-        case CheckinActionType.setLocationOffer:
-          await _showSetLocationOffer(action);
+      final shown = await LocalNotificationService.instance.show(
+        id: action.notificationId,
+        title: _checkinNotificationTitle(action),
+        body: _checkinNotificationBody(action),
+        payload: action.notificationPayload,
+      );
+      if (!shown) {
+        _deferredCheckin.add(action);
       }
     }
+    _drainDeferredCheckin();
+  }
+
+  String _checkinNotificationTitle(CheckinAction action) =>
+      switch (action.type) {
+        CheckinActionType.setLocationOffer =>
+          'Set the location for ${action.title}?',
+        _ => action.title.isEmpty ? 'auction.fish' : action.title,
+      };
+
+  /// The server owns the copy (it composes the welcome line and the bidder
+  /// number); the app only adds the affordance that a notification needs and a
+  /// snackbar didn't — what tapping it will do.
+  String _checkinNotificationBody(CheckinAction action) {
+    final message = action.message.trim();
+    final hint = switch (action.type) {
+      CheckinActionType.joinOffer => 'Tap to join.',
+      CheckinActionType.setLocationOffer =>
+        'Tap to use this phone\'s '
+            'position.',
+      // Nothing to do — this one is the news itself.
+      CheckinActionType.checkedIn => '',
+    };
+    if (message.isEmpty) {
+      return hint;
+    }
+    return hint.isEmpty ? message : '$message $hint';
+  }
+
+  /// The user tapped one of the notifications above (possibly long after it
+  /// was posted, possibly into a cold start). Acting on it is what they asked
+  /// for, so it runs immediately rather than going through
+  /// [_drainDeferredCheckin].
+  void _onNotificationTapped() {
+    final payload = LocalNotificationService.instance.consumePayload();
+    if (payload == null || !mounted) {
+      return;
+    }
+    final action = CheckinAction.fromNotificationPayload(payload);
+    if (action != null) {
+      unawaited(_runCheckinAction(action));
+    }
+  }
+
+  /// Shows the in-app UI for [action] — the join sheet, the admin dialog, or
+  /// (for a check-in that had nowhere else to go) a long snackbar.
+  Future<void> _runCheckinAction(CheckinAction action) async {
+    switch (action.type) {
+      case CheckinActionType.checkedIn:
+        // The server's message carries the bidder number, so this gets the
+        // long duration: on this path there is nowhere to look it up again.
+        _showSnack(action.message, duration: _bidderNumberSnackDuration);
+      case CheckinActionType.joinOffer:
+        await _showJoinOffer(action);
+      case CheckinActionType.setLocationOffer:
+        await _showSetLocationOffer(action);
+    }
+  }
+
+  /// Runs the nudges that couldn't be delivered as notifications, but only
+  /// while the shell is the route on screen. AR lot scanning and the payment
+  /// sheet both push over this screen, and a modal drawn from underneath them
+  /// is exactly the interruption this whole path exists to avoid — so they
+  /// wait, and the next resume or return from AR drains them.
+  void _drainDeferredCheckin() {
+    if (!mounted || _deferredCheckin.isEmpty) {
+      return;
+    }
+    if (!(ModalRoute.of(context)?.isCurrent ?? false)) {
+      return;
+    }
+    final pending = List<CheckinAction>.of(_deferredCheckin);
+    _deferredCheckin.clear();
+    unawaited(() async {
+      for (final action in pending) {
+        if (!mounted) {
+          return;
+        }
+        await _runCheckinAction(action);
+      }
+    }());
   }
 
   /// `Welcome to the <auction>` bottom sheet: Join (joins server-side — no
@@ -649,11 +819,24 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
           _loadPath(rulesPath);
           return;
         }
-        _showSnack(
-          result.checkedIn
-              ? 'You\'ve joined ${action.title} and you\'re checked in!'
-              : 'You\'ve joined ${action.title}!',
-        );
+        // The bidder number is the one thing the user actually needs from
+        // this, and there is nowhere else in the app or on the site for a
+        // just-arrived bidder to look it up — the rules page they're about to
+        // land on doesn't render it. So it goes in the message, and the
+        // message gets long enough to write down.
+        final bidder = result.bidderNumber;
+        _showSnack(switch ((result.checkedIn, bidder)) {
+          (true, final String number) =>
+            'You\'ve joined ${action.title} and you\'re checked in. '
+                'Your bidder number is $number.',
+          (true, _) =>
+            'You\'ve joined ${action.title} and you\'re '
+                'checked in!',
+          (false, final String number) =>
+            'You\'ve joined ${action.title}. Your bidder number is '
+                '$number.',
+          (false, _) => 'You\'ve joined ${action.title}!',
+        }, duration: bidder == null ? null : _bidderNumberSnackDuration);
         _loadPath(result.rulesUrl ?? rulesPath);
       case 'rules':
         _loadPath(rulesPath);
@@ -697,8 +880,8 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       _showSnack(
         ok
             ? 'Location set for ${action.title}.'
-            : 'Couldn\'t set the location — check that location is still '
-                  'available and try again.',
+            : 'Couldn\'t get an accurate position. Step outside or turn on '
+                  'precise location, then try again from the auction page.',
       );
     }
   }
@@ -712,6 +895,20 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       return;
     }
     final path = ShortcutService.instance.consume();
+    if (path != null) {
+      _loadPath(path);
+    }
+  }
+
+  /// An `https://auction.fish/…` link opened from another app while the shell
+  /// already exists. Same discipline as [_onShortcutTapped]: before the
+  /// WebView is created the path stays pending so _initialUrl can use it as
+  /// the landing page.
+  void _onDeepLink() {
+    if (_controller == null || DeepLinkService.instance.pending.value == null) {
+      return;
+    }
+    final path = DeepLinkService.instance.consume();
     if (path != null) {
       _loadPath(path);
     }
@@ -778,6 +975,12 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       OfflineSyncService.instance.onAppResumed();
       // The user may have just walked into the auction hall.
       CheckinService.instance.onAppResumed();
+      // A nudge that had to fall back to in-app UI may have been waiting for
+      // this screen to be visible again.
+      _drainDeferredCheckin();
+      // Tell the backend this phone is awake again, so the website's "print
+      // from my computer" state is right the moment the user looks at it.
+      RemotePrintService.instance.onAppResumed(ref);
       unawaited(_rewarmConfigIfFailed());
       // Apple's requirement 1.5 asks for Tap to Pay to be prepared "at the
       // launch of your app **or when it comes to the foreground**". Both, here:
@@ -1347,10 +1550,10 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     final generation = _navGeneration;
     unawaited(_maybeOfferLocation(url.path, generation));
     unawaited(_maybeOfferPushForPath(url.path, generation));
-    // Tap to Pay's awareness moment isn't tied to a path — it's an
-    // announcement, not a permission — so it's offered on whatever page the
-    // merchant lands on, once per device.
-    unawaited(_maybeOfferTapToPay(generation));
+    // Tap to Pay's awareness moment, on the auction pages an organizer manages
+    // — never "whatever page the merchant happens to land on", which is how it
+    // turned up unannounced over a lot listing.
+    unawaited(_maybeOfferTapToPay(url.path, generation, fromPage: false));
     if (url.host == Uri.parse(EnvironmentConfig.webBaseUrl).host) {
       _rememberPage(url);
     }
@@ -1382,12 +1585,15 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     final arReturn = _arReturn;
     if (arReturn != null) {
       final current = await controller?.getUrl();
-      if (current != null && current.queryParameters['src'] == 'ar') {
-        _arReturn = null; // consume: a second back is normal web history
+      if (current != null && current.path == arReturn.path) {
+        // Consume first: a second back from the same page is normal web
+        // history, and _launchAr sets this again if the user opens another lot.
+        setState(() => _arReturn = null);
         await _launchAr(arReturn.slug, '${arReturn.lotPk}');
         return;
       }
-      _arReturn = null; // navigated away from the AR lot page — drop it
+      // Navigated away from the lot page lot scanning opened — drop it.
+      setState(() => _arReturn = null);
     }
     if (controller != null && await controller.canGoBack()) {
       await controller.goBack();
@@ -1471,7 +1677,21 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     if (!mounted) {
       return;
     }
-    if (resolved?.printMethod == PrintMethod.bluetooth) {
+    final method = resolved?.printMethod;
+    if (method == PrintMethod.bluetooth) {
+      await _printNatively(lotPks, prefs: resolved);
+      return;
+    }
+    // A *batch* link exists only because the server rendered
+    // `label_bluetooth_redirect.html`, which it does only for a user whose
+    // `print_method` is bluetooth (`LotLabelView`'s
+    // `bluetooth_deep_link_response`).
+    // So when we couldn't read prefs at all — an offline or failed
+    // `labels/prefs/` fetch — the server's answer is the better one. Reloading
+    // on a null would be a loop, not a recovery: the page re-renders the same
+    // handoff, its script clicks the same link, and the prefs fetch fails
+    // again.
+    if (method == null && lotPks.length > 1) {
       await _printNatively(lotPks, prefs: resolved);
       return;
     }
@@ -1479,12 +1699,50 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       unawaited(context.push('/print/${lotPks.first}', extra: resolved));
       return;
     }
-    // A batch link is only emitted for the Bluetooth method, so getting one
-    // on any other method means the page was rendered before the method
-    // changed. Reload it and the page renders its own PDF button, which is
-    // the right answer for those methods.
+    // Prefs we *did* read say some other method, so the page was rendered
+    // before the method changed. Reload it and the page renders its own PDF
+    // button, which is the right answer for those methods — and this time the
+    // server agrees, so there is no loop.
     _showSnack('Your label print method changed — reloading this page.');
     unawaited(_controller?.reload());
+  }
+
+  /// A data-only push arrived. Today that is only a remote print job; anything
+  /// else is ignored rather than drawn, since a data message deliberately
+  /// carries no notification block and has nothing to show.
+  void _onPushData() {
+    final data = PushService.instance.consumeDataMessage();
+    if (data == null || !mounted) {
+      return;
+    }
+    unawaited(
+      RemotePrintService.instance.handlePushData(
+        data,
+        print: _printForRemoteJob,
+      ),
+    );
+  }
+
+  /// The phone half of a job started from a computer. Deliberately the same
+  /// progress snackbar as a local print: someone standing next to the printer
+  /// should be able to see why it started moving, and be able to stop it.
+  ///
+  /// Unlike `_printNatively` this reports *nothing* on completion — the person
+  /// who asked for these labels is at the computer, watching the page, and
+  /// `RemotePrintService` is already sending them the outcome. A second copy
+  /// on the phone would be talking to the wrong room.
+  Future<LabelPrintResult> _printForRemoteJob(List<int> lotPks) async {
+    if (LabelPrintService.instance.isBusy) {
+      return const LabelPrintResult(LabelPrintStatus.busy);
+    }
+    final messenger = ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(_printingSnack(lotPks.length));
+    try {
+      return await LabelPrintService.instance.printLots(lotPks, ref: ref);
+    } finally {
+      messenger.hideCurrentSnackBar();
+    }
   }
 
   /// Runs a Bluetooth print job and reports only what's worth reporting.
@@ -1602,6 +1860,7 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     String message, {
     String? actionLabel,
     VoidCallback? onAction,
+    Duration? duration,
   }) {
     if (!mounted) {
       return;
@@ -1609,12 +1868,18 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(message),
+        duration: duration ?? const Duration(seconds: 4),
         action: actionLabel == null || onAction == null
             ? null
             : SnackBarAction(label: actionLabel, onPressed: onAction),
       ),
     );
   }
+
+  /// How long a message carrying a bidder number stays up. The default four
+  /// seconds is a notification; this one is a thing to read off the screen and
+  /// remember, in a noisy room, and it cannot be recalled once it goes.
+  static const _bidderNumberSnackDuration = Duration(seconds: 12);
 
   /// The state object the printer JS handlers resolve with — what the
   /// `/printing/` page's Bluetooth card renders. `labelSize` is the size the
@@ -1948,6 +2213,16 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       return NavigationActionPolicy.CANCEL;
     }
 
+    // mailto:/tel:/sms: aren't navigations — they're handoffs to the mail,
+    // phone or messaging app, and a browser honours them. Cancelling them
+    // along with everything non-http is what made every "Email" button on the
+    // site (auction contact, club contact, "Email all users", the speaker
+    // panel) do nothing at all when tapped.
+    if (isHandoffScheme(uri)) {
+      await _openExternally(uri);
+      return NavigationActionPolicy.CANCEL;
+    }
+
     // Only http(s) navigates. Block javascript:, intent:, file:, and other
     // schemes injected or remote content could abuse.
     if (uri.scheme != 'http' && uri.scheme != 'https') {
@@ -2244,20 +2519,29 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     final result = await context.push(
       '/ar/${Uri.encodeComponent(auctionSlug)}$query',
     );
-    if (result is String && mounted) {
-      // Remember the AR origin so a hardware/web back from this lot page
-      // returns to AR (the deep link's `?src=ar` already tells the backend to
-      // render its own "Back to AR" bar too).
-      final lotPk = _lotPkFromPath(result);
-      _arReturn = lotPk == null ? null : (slug: auctionSlug, lotPk: lotPk);
-      _loadPath(result);
+    if (result is ArLotPageRequest && mounted) {
+      // Remember the AR origin so a back from this lot page returns to lot
+      // scanning, aimed at this lot (the page's own "Back to scanning" bar
+      // does the same thing by deep link).
+      //
+      // Keyed on the *path* we are about to load, not on the `?src=ar` marker
+      // that put it there: `base_page_view.html` runs a `history.replaceState`
+      // on every page load that strips `src` (and `uid`) from the URL, so by
+      // the time the user can press anything the marker is gone. Matching on
+      // it meant this whole path was dead in practice and back went wherever
+      // the user had been before lot scanning.
+      setState(
+        () => _arReturn = (
+          slug: auctionSlug,
+          lotPk: result.lotPk,
+          path: Uri.parse(result.path).path,
+        ),
+      );
+      _loadPath(result.path);
     }
-  }
-
-  /// The lot pk in a `/lots/<pk>/…` path, or null if it isn't a lot page.
-  static int? _lotPkFromPath(String path) {
-    final match = RegExp(r'/lots/(\d+)/').firstMatch(path);
-    return match == null ? null : int.tryParse(match.group(1)!);
+    // Back on the shell: anything a nudge couldn't put in the notification
+    // tray has been waiting for exactly this.
+    _drainDeferredCheckin();
   }
 
   // The router only mounts this screen for a signed-in session, so the drawer
@@ -2498,7 +2782,7 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
           // pop. Covers iOS (no hardware back) and discoverability; the brand
           // stays as the title. Falls back to null so the brand sits at the
           // leading edge on the home page, as before.
-          leading: _canGoBack
+          leading: (_canGoBack || _arReturn != null)
               ? IconButton(
                   icon: const Icon(Icons.arrow_back),
                   tooltip: 'Back',

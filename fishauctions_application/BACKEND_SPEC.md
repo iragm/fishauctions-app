@@ -8,5 +8,3 @@ Design principle for both features: **changes to the website ship in minutes,
 changes to the app take dev time.** Anything that could plausibly vary per
 printer, per deployment, or per product decision is a Django model instance or a
 template — never an app constant.
-
----

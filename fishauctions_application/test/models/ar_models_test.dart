@@ -246,4 +246,44 @@ void main() {
       expect(json.containsKey('odo_y_m'), isFalse);
     });
   });
+
+  group('the species second line', () {
+    // `Lot.scientific_name_line` / `Lot.common_name_line` are one display rule
+    // with two halves, and which half is filled depends on what the seller
+    // typed. The app draws whichever arrives and never has to know the rule.
+    ArLotMeta parse(Map<String, dynamic> json) => ArLotMeta.fromJson(json);
+
+    test('a common-named lot carries the scientific name', () {
+      final lot = parse(const {
+        'pk': 1,
+        'in_auction': true,
+        'name': 'Yellow lab',
+        'scientific_name': 'Labidochromis caeruleus',
+        'common_name': '',
+      });
+      expect(lot.secondLine, 'Labidochromis caeruleus');
+      expect(lot.scientificNameIsSecondLine, isTrue);
+    });
+
+    test('a species-named lot carries the common name instead', () {
+      final lot = parse(const {
+        'pk': 1,
+        'in_auction': true,
+        'name': 'Labidochromis caeruleus',
+        'scientific_name': '',
+        'common_name': 'Yellow lab',
+      });
+      expect(lot.secondLine, 'Yellow lab');
+      expect(
+        lot.scientificNameIsSecondLine,
+        isFalse,
+        reason: 'a common name is not set in italics',
+      );
+    });
+
+    test('neither, for hardware or an auction with the field switched off', () {
+      final lot = parse(const {'pk': 1, 'in_auction': true, 'name': 'Filter'});
+      expect(lot.secondLine, isNull);
+    });
+  });
 }

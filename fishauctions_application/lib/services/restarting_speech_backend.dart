@@ -428,6 +428,18 @@ abstract class RestartingSpeechBackend implements SpeechBackend {
     }
   }
 
+  /// End the session with a message of the backend's own.
+  ///
+  /// For the one failure a platform cannot report: **nothing at all.** Every
+  /// other path here is driven by something the recognizer said, and a
+  /// recognizer that says nothing — no level, no partial, no status, no error
+  /// — leaves the page showing "Listening" over a microphone that is not
+  /// working, with no way for the operator to tell that from a quiet room.
+  /// Guessing at the cause would be worse than saying what we know.
+  @protected
+  void failSession(SpeechErrorKind kind, String message) =>
+      _fail(kind, message);
+
   /// End the session and tell the caller why. The only exit that carries a
   /// message — everything else is an utterance ending, which is not a failure.
   void _fail(SpeechErrorKind kind, String message) {
