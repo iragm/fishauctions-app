@@ -89,6 +89,12 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   // guard anyway.
   InAppWebViewController? _controller;
   bool _loading = true;
+
+  /// Whether the last main-frame load failed, so the resume handler knows to
+  /// try again. Set in [_onLoadError] and cleared in `_onLoadStart` rather than
+  /// on load *stop*: the engine can report a stop after an error, and clearing
+  /// it there would leave a failed page looking successful.
+  bool _loadFailed = false;
   // Whether the WebView has back-history. Drives the leading back arrow's
   // visibility and is kept in sync after each page settles (see
   // _refreshCanGoBack). The system back button consults canGoBack() live, so it
@@ -259,8 +265,17 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   /// notification offers, so it can't flash over a page that's about to
   /// redirect.
   Future<void> _maybeOfferTapToPay(int generation) async {
+    // Every gate below is silent by design and several are invisible from
+    // outside the app — "already shown on this device" lives in the keychain
+    // and survives reinstalls, and losing the single banner slot to the
+    // location or notification offer looks identical to being ineligible. From
+    // a phone that is all one symptom: nothing happens. Read these over USB
+    // with `idevicesyslog`.
+    void skip(String why) =>
+        debugPrint('Tap to Pay awareness not offered: $why');
     final service = TapToPayService.instance;
     if (!service.isApplePlatform) {
+      skip('not an Apple platform');
       return;
     }
     final eligibility = service.eligibility.value;
@@ -281,31 +296,53 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     // one impression, not the feature: nothing is claimed, the ribbon fires on
     // every admin auction page, and the next one offers.
     if (eligibility == null || !eligibility.canCharge) {
+      skip(
+        eligibility == null
+            ? 'eligibility not fetched yet (warm-up race on a cold start)'
+            : 'backend says canCharge=false (no live seller credentials)',
+      );
       return;
     }
     if (await TapToPayAwarenessSheet.alreadyShown()) {
+      skip('already shown on this device (keychain flag, survives reinstall)');
       return;
     }
     // Nothing to announce to someone who already set it up, or whose iPhone
     // can't do it at all.
-    if (!(await service.unsupportedReason()).isSupported ||
-        await service.isEnabled()) {
+    if (!(await service.unsupportedReason()).isSupported) {
+      skip('this iPhone cannot do Tap to Pay');
+      return;
+    }
+    if (await service.isEnabled()) {
+      skip('already set up on this device');
       return;
     }
     if (!await _claimBanner(generation)) {
+      // Not fatal and deliberately not marked shown: the banner slot is one per
+      // page load, so the location or notification offer having taken it means
+      // this simply tries again on the next auction page — by which time those
+      // two are spent for the session.
+      skip('lost the banner slot for this page load');
       return;
     }
     if (!mounted) {
       return;
     }
-    // Marked shown before presenting, not after: a merchant who force-quits
-    // mid-modal has still seen it, and re-showing an announcement they
-    // dismissed is worse than missing one impression.
+    if (!mounted) {
+      return;
+    }
+    final wantsSetup = await TapToPayAwarenessSheet.show(context);
+    // Marked on *acknowledgement*, not on delivery — the way a notification
+    // clears when you act on it rather than when it arrives. This used to mark
+    // before presenting, on the theory that a merchant who force-quits
+    // mid-modal has still seen it; but Apple's requirement 3.3 is that the
+    // announcement is *seen*, and a modal that existed for 200 ms before the
+    // process died was not. Worse, it made every way of failing to present
+    // permanent. Dismissal is the user saying so, and the failure mode is
+    // bounded and self-correcting: it comes back next time, they dismiss it,
+    // done.
     await TapToPayAwarenessSheet.markShown();
-    if (!mounted) {
-      return;
-    }
-    if (await TapToPayAwarenessSheet.show(context) && mounted) {
+    if (wantsSetup && mounted) {
       await context.push('/tap-to-pay');
     }
   }
@@ -981,6 +1018,16 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       // from my computer" state is right the moment the user looks at it.
       RemotePrintService.instance.onAppResumed(ref);
       unawaited(_rewarmConfigIfFailed());
+      // A page that failed while the user was away is almost always a page
+      // that failed because the network was down — and fixing the network
+      // means leaving the app for Settings or Control Center, so coming back
+      // is exactly the moment to try again. Without this the user returns to
+      // the same dead banner and has to notice the Retry button; with it the
+      // app is simply working when they look at it.
+      if (_loadFailed) {
+        ScaffoldMessenger.of(context).hideCurrentMaterialBanner();
+        unawaited(_controller?.reload() ?? Future<void>.value());
+      }
       // Apple's requirement 1.5 asks for Tap to Pay to be prepared "at the
       // launch of your app **or when it comes to the foreground**". Both, here:
       // iOS tears the reader down while backgrounded, so a cashier who
@@ -1469,6 +1516,7 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     // on, so it doesn't float over an unrelated screen — and invalidates any
     // offer still settling for the page we're leaving (see _claimBanner).
     _navGeneration++;
+    _loadFailed = false;
     _stopVoiceOnNavigation();
     if (mounted) {
       ScaffoldMessenger.of(context).hideCurrentMaterialBanner();
@@ -1489,6 +1537,7 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       return;
     }
     setState(() => _loading = false);
+    _loadFailed = true;
     // `hasData` is a synchronous read of an asynchronously-loaded cache, so ask
     // for the load first. It matters in exactly the case this banner exists
     // for: launching in airplane mode fails the first page instantly — faster
@@ -1508,7 +1557,15 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
           hasOffline
               ? 'Can\'t reach the server. You can keep running your auction '
                     'offline — changes sync back automatically.'
-              : 'Can\'t reach the server.',
+              // Without offline data there is nothing to offer *instead*, so
+              // the copy has to at least say where to look. "Can't reach the
+              // server" on its own reads as "the site is down" and sends nobody
+              // to their own Wi-Fi, which is the actual cause almost every
+              // time. This is the state an ordinary bidder lands in — offline
+              // snapshots only exist for an operator's own auction — so it is
+              // the common case, not the edge one.
+              : 'Can\'t reach the server. Check this phone\'s Wi-Fi or mobile '
+                    'data, then try again.',
         ),
         actions: [
           TextButton(
@@ -2670,7 +2727,13 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
           return const SizedBox.shrink();
         }
         return ListTile(
-          leading: const Icon(Icons.contactless_outlined),
+          // Deliberately not a contactless glyph: requirement 5.5 allows only
+          // SF Symbols' wave.3.right.circle on a Tap to Pay control, and the
+          // marketing rules forbid any icon depicting the capability, so a
+          // Material lookalike beside this label is exactly what they bar. A
+          // storefront reads as "merchant tools" and depicts nothing. See
+          // tap_to_pay_branding.dart.
+          leading: const Icon(Icons.storefront_outlined),
           title: const Text(tapToPayName),
           onTap: () {
             Navigator.of(ctx).pop();

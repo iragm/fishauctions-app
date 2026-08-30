@@ -43,6 +43,16 @@ TTP.
    and never with "Apple" in it. One constant, `tapToPayName`, so no screen
    invents its own wording.
 
+Rule 1 is easy to break by reflex, and was broken in three places until
+2026-08-30 — caught while reviewing the shot list for the entitlement video,
+which is to say one review pass short of shipping it to Apple. Material's
+`Icons.contactless` / `Icons.contactless_outlined` sat on the drawer entry, the
+setup status card, and — worst — the **"Set up Tap to Pay on iPhone" button
+itself**, which is precisely the control requirement 5.5 governs. Meanwhile
+`tap_to_pay_branding.dart` had spelled out that this exact glyph is forbidden.
+Documenting a rule is not enforcing it: `grep -rn "Icons.contactless" lib/`
+before any Tap to Pay screenshot or recording.
+
 ---
 
 ## 1. General requirements
@@ -72,7 +82,7 @@ TTP.
 | # | Req | Status |
 |---|---|---|
 | 3.1 | Highly visible, discoverable communication | **Done** — awareness modal + drawer entry |
-| 3.2 | Full-screen modal splash (*recommended*; also marketing 6.2) | **Done** — `TapToPayAwarenessSheet`, once per device, eligible users only |
+| 3.2 | Full-screen modal splash (*recommended*; also marketing 6.2) | **Done** — `TapToPayAwarenessSheet`, eligible users only, once per **install** and marked when the merchant *dismisses* it. Both halves of that were wrong until 2026-08-30: it marked on delivery rather than acknowledgement, into the Keychain, which survives app deletion — so any way of failing to present it was permanent, unresettable, and looked identical to being ineligible |
 | 3.3 | Shown to all eligible users at least once | **Done** (modal). Push half is TTP-5 |
 | 3.4 | Show how to enable at the end of merchant onboarding | **Done** — the awareness modal routes to `/tap-to-pay` |
 | 3.5 | Clear action to accept the Terms and Conditions | **Done** — "Set up Tap to Pay on iPhone" → `linkAppleAccount()` |
@@ -88,7 +98,7 @@ TTP.
 
 | # | Req | Status |
 |---|---|---|
-| 4.1 | Use `ProximityReaderDiscovery` on iOS 18+ | **Written; fails on device (2026-08-30).** `TapToPayEducation.swift` compiles and both sides of the channel are wired, but on a TestFlight build on **iOS 26** the app shows its own text fallback instead — so 4.4, 4.6, 4.7 and 4.8 fall with it. See "The education sheet does not present" below |
+| 4.1 | Use `ProximityReaderDiscovery` on iOS 18+ | **Done — verified on device 2026-08-30** (iPhone, iOS 26, development-signed build): Apple's sheet presents, no error. Carries 4.4, 4.6, 4.7 and 4.8 with it. Note it does **not** work in a TestFlight build — the entitlement gates education too |
 | 4.2 | Education after terms acceptance | **Done** — presented immediately after `enable()` succeeds |
 | 4.3 | Education in Settings or Help | **Done** — "How to take a payment", always present on `/tap-to-pay` |
 | 4.4 | Toolkit assets for education outside the app (*conditional*) | **N/A in-app** (4.1 covers it). If web education is added, see TTP-6 |
@@ -157,13 +167,19 @@ carries it once the publishing entitlement is granted; adding the key to
 cloud signing can't build a profile that satisfies it. Add it there on the day
 the publishing grant arrives.
 
-**Most of the new code needs no entitlement at all.**
-`ProximityReaderDiscovery` presents education, not a card reader, so the
-awareness modal, the setup screen, Apple's education sheet and the progress
-indicators are all exercisable in any build — which is what makes the
-entitlement-review videos recordable now, before the publishing grant.
+**Every part of this needs the entitlement, education included** (established on
+hardware 2026-08-30 — this paragraph used to claim the opposite, and see
+"The education sheet does not present" below for how that was worked out).
+`ProximityReaderDiscovery` presents education rather than a card reader and
+Apple's documentation for it never mentions an entitlement, which is where the
+wrong conclusion came from — but in a TestFlight build `content(for:)` fails
+with `ContentError.unknown`, and the identical build signed with a *development*
+profile presents Apple's sheet normally. So none of the entitlement-review
+videos is recordable from a distribution build, and the way to record them
+before the publishing grant is `ios-release.yml` with
+`export_method: development` (see `IOS.md`).
 
-### The education sheet does not present (open, found 2026-08-30)
+### The education sheet does not present in a distribution build (resolved 2026-08-30)
 
 On a prod TestFlight build on **iOS 26**, "How to take a payment" shows the
 Flutter `_EducationFallbackSheet` rather than Apple's sheet. That is a review
@@ -248,12 +264,26 @@ So **the entitlement is the leading explanation**, and the claim in
 all" below is probably **wrong**: education is as gated as the reader, and *no*
 part of Apple's three videos is recordable from a distribution build.
 
-**One cheap thing rides in the next build to close the last gap.** Apple
-documents `contentList` as *"specific to the country of the current device. The
-array can be empty if no content is available for the current country."* The
-presenter now appends `contentList=<n>` to a `content`-step failure: non-empty
-means content exists for this device and something refused it (entitlement);
-empty or throwing points back at availability after all.
+**Verdict: it was the entitlement.** The same commit, signed with a
+*development* profile carrying `RunnerDebug.entitlements` and installed on the
+same iPhone, presents Apple's sheet with no error at all. Nothing about the code
+changed between the two runs. `ContentError.unknown` is what a distribution
+build gets, which is worth remembering because it names none of the six things
+that are actually wrong.
+
+Two pieces of instrumentation from the hunt are worth keeping rather than
+reverting. The presenter still names the failing step
+(`education_failed_content` vs `education_failed_present`) and reports
+`String(describing:)` plus the bridged `NSError` domain and code, since
+`localizedDescription` alone flattens to "The operation couldn't be completed".
+And it still appends `contentList=<n>` to a content-step failure — Apple
+documents that list as *"specific to the country of the current device"*, so it
+separates an entitlement refusal from a region with no published content, which
+is exactly the distinction that cost two build cycles here.
+
+The view-controller fix in the same commit was a genuine defect and is
+independently confirmed by Stripe's integration guide (*"Pass the topmost
+presented view controller… otherwise the call fails"*), but it was not this bug.
 
 **If it is the entitlement, the fix is one build, not a Mac.** A development or
 ad-hoc profile can carry `com.apple.developer.proximity-reader.payment.acceptance`

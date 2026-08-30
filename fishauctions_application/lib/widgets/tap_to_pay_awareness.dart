@@ -1,4 +1,7 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
 
 import '../utils/secure_storage.dart';
 import 'tap_to_pay_branding.dart';
@@ -23,7 +26,7 @@ import 'tap_to_pay_branding.dart';
 /// Dropping in the toolkit's "Hero in-app banner" is the remaining step before
 /// launch marketing — see `TAPTOPAY.md`.
 ///
-/// Shown at most once per device, and only to users the backend says are
+/// Shown at most once per install, and only to users the backend says are
 /// eligible. "Once" is the floor Apple asks for; it is deliberately not
 /// repeated, because a merchant who dismissed it can always reach the same
 /// setup from the drawer (requirement 3.6).
@@ -32,16 +35,47 @@ class TapToPayAwarenessSheet extends StatelessWidget {
 
   static const _seenKey = 'tap_to_pay_awareness_shown';
 
-  /// Whether this device has already been shown the awareness moment.
+  /// A marker file in the app documents directory, **not** secure storage.
   ///
   /// Device-local rather than server-side because the thing being announced is
   /// device-local too: Tap to Pay is set up per iPhone, so the same merchant
   /// picking up a second phone genuinely does need telling again.
-  static Future<bool> alreadyShown() async =>
-      await secureStorage.read(key: _seenKey) == '1';
+  ///
+  /// But this used to live in `flutter_secure_storage`, i.e. the iOS Keychain —
+  /// **which survives app deletion.** Combined with `markShown()` being called
+  /// *before* the modal is presented (deliberately: a merchant who force-quits
+  /// mid-modal has still seen it), that made a once-ever flag that no
+  /// reinstall, no sign-out and no UI could reset, on a modal with no other
+  /// trigger. A failed impression was therefore permanent and, from outside,
+  /// indistinguishable from being ineligible. The documents directory *is*
+  /// cleared on uninstall, so "once per device" becomes "once per install" —
+  /// still comfortably Apple's 3.3 floor of "at least once", and testable.
+  static Future<File> _marker() async =>
+      File('${(await getApplicationDocumentsDirectory()).path}/$_seenKey');
 
-  static Future<void> markShown() =>
-      secureStorage.write(key: _seenKey, value: '1');
+  /// Whether this install has already shown the awareness moment.
+  ///
+  /// Fails **open** — an unreadable marker reports "not shown". Showing an
+  /// announcement twice is a far smaller harm than never showing the one Apple
+  /// requires.
+  static Future<bool> alreadyShown() async {
+    try {
+      return (await _marker()).existsSync();
+    } on Object {
+      return false;
+    }
+  }
+
+  static Future<void> markShown() async {
+    try {
+      await (await _marker()).writeAsString('1', flush: true);
+      // Retire the Keychain entry this used to live in, so a device that
+      // already carries one isn't left with a stale secret forever.
+      await secureStorage.delete(key: _seenKey);
+    } on Object {
+      // Never worth failing the modal over.
+    }
+  }
 
   /// Presents the modal. Resolves true when the merchant chose to set it up, so
   /// the caller can route them to the settings screen.

@@ -16,13 +16,16 @@ import UIKit
 /// hand-write our own version: the same guide forbids creating custom
 /// illustrations or copy depicting iPhone or Tap to Pay on iPhone.
 ///
-/// No entitlement is *documented* for this — `ProximityReaderDiscovery` only
-/// presents educational material, unlike `PaymentCardReader`, which is what the
-/// `com.apple.developer.proximity-reader.payment.acceptance` entitlement gates
-/// (and which we never touch directly; Square's SDK owns the actual card read).
-/// That claim is load-bearing — it is what makes the entitlement-review videos
-/// recordable before the grant — and as of 2026-08-30 it is unverified on
-/// hardware, which is why the failure paths below name themselves precisely.
+/// **This needs the Tap to Pay entitlement, despite presenting education rather
+/// than operating a card reader.** Apple's documentation for
+/// `ProximityReaderDiscovery` never mentions an entitlement, and this file used
+/// to say so — but measured on 2026-08-30, `content(for:)` fails with
+/// `ContentError.unknown` in a TestFlight build and succeeds in the identical
+/// build signed with a development profile carrying
+/// `com.apple.developer.proximity-reader.payment.acceptance`. `unknown` is the
+/// framework's catch-all and names none of the six real causes, so the failure
+/// paths below stay verbose: they are the only way this is diagnosable from a
+/// build with no debugger attached.
 enum TapToPayEducationPresenter {
   /// Whether Apple's education sheet can be shown on this OS. False below
   /// iOS 18, where the caller falls back to its own (text-only) explanation.

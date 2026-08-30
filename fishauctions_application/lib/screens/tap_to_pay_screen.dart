@@ -272,9 +272,17 @@ class _TapToPayScreenState extends ConsumerState<TapToPayScreen> {
   ];
 
   /// Not set up yet — 3.5's clear acceptance action.
+  ///
+  /// **No contactless glyph anywhere in here.** Requirement 5.5 allows only SF
+  /// Symbols' `wave.3.right.circle[.fill]` on a Tap to Pay control, and the
+  /// marketing rules separately forbid any icon that depicts the capability —
+  /// so a Material lookalike is worse than no icon, and this button and card
+  /// used to carry `Icons.contactless` / `Icons.contactless_outlined`. The
+  /// reasoning, and how to add Apple's real symbol, is in
+  /// `tap_to_pay_branding.dart`; `tapToPaySymbolAsset` is the slot for it.
   List<Widget> _setupState() => [
     const _StatusCard(
-      icon: Icons.contactless_outlined,
+      icon: Icons.info_outline,
       tone: _Tone.info,
       title: 'Set up $tapToPayName',
       body:
@@ -282,16 +290,22 @@ class _TapToPayScreenState extends ConsumerState<TapToPayScreen> {
           'payments on this iPhone. You only do this once per device.',
     ),
     const SizedBox(height: 16),
-    FilledButton.icon(
+    FilledButton(
       onPressed: _enabling ? null : _enable,
-      icon: _enabling
-          ? const SizedBox(
-              width: 18,
-              height: 18,
-              child: CircularProgressIndicator(strokeWidth: 2),
+      child: _enabling
+          ? const Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+                SizedBox(width: 8),
+                Text('Setting up…'),
+              ],
             )
-          : const Icon(Icons.contactless),
-      label: Text(_enabling ? 'Setting up…' : 'Set up $tapToPayName'),
+          : const Text('Set up $tapToPayName'),
     ),
   ];
 }
