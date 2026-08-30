@@ -9,8 +9,16 @@ name: iOS Release
 #     AppDelegate, plugins, SPM/CocoaPods) on real Apple toolchain and uploads
 #     the .app as an artifact. This is the macOS equivalent of the Android
 #     compile gate and is how we verify the iOS build before any signing exists.
-#   • true — the signed TestFlight path. Fail-fast on missing signing secrets
-#     (same pattern as the Android keystore step).
+#   • true — a signed build. `export_method` then picks what kind:
+#       – app-store (default) — uploaded to TestFlight.
+#       – development — a sideloadable IPA, signed with a development profile
+#         and carrying RunnerDebug.entitlements, which is the ONLY way to get
+#         Apple's Tap to Pay *development* entitlement onto a phone without a
+#         Mac. Needs at least one device registered to the team (Apple issues no
+#         development profile otherwise). Install it with `ideviceinstaller -i`.
+#         Nothing is uploaded to App Store Connect; the artifact is the output.
+#     Fail-fast on missing signing secrets (same pattern as the Android keystore
+#     step).
 #
 # The `flavor` input picks the backend (staging vs prod). iOS has no on-device
 # `flutter run` without a Mac, so this workflow is the ONLY way to get a build
@@ -30,6 +38,11 @@ on:
         type: choice
         default: staging
         options: [staging, prod]
+      export_method:
+        description: "app-store = TestFlight. development = sideloadable build carrying the Tap to Pay DEV entitlement (needs distribute:true and a registered device)"
+        type: choice
+        default: app-store
+        options: [app-store, development]
 
 concurrency:
   group: ios-release-${{ github.ref }}
@@ -60,6 +73,19 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
+
+      # A development export is still a *signed* build — it just gets a
+      # development profile instead of an App Store one, so it needs the same
+      # API key. Checked before anything is built: the unsigned path below takes
+      # the better part of an hour, and failing after it would be the most
+      # expensive possible way to report a wrong pair of inputs. (It sits after
+      # checkout rather than first because `defaults.run.working-directory` is
+      # the repo subdirectory, which doesn't exist until then.)
+      - name: Reject development export without signing
+        if: ${{ inputs.export_method == 'development' && !inputs.distribute }}
+        run: |
+          echo "::error::export_method=development requires distribute:true — a development export is a signed build."
+          exit 1
 
       - uses: subosito/flutter-action@v2
         with:
@@ -181,19 +207,49 @@ jobs:
           mkdir -p ~/private_keys
           printf '%s' "$APPSTORE_API_PRIVATE_KEY" > ~/private_keys/AuthKey_${APPSTORE_API_KEY_ID}.p8
 
+      # Tap to Pay's entitlement lives ONLY in RunnerDebug.entitlements, because
+      # Apple's *development* grant attaches to development provisioning
+      # profiles and putting it in Runner.entitlements breaks every App Store
+      # export until the publishing grant lands (see TAPTOPAY.md). A development
+      # export is exactly the case that can carry it — so swap the file rather
+      # than passing CODE_SIGN_ENTITLEMENTS on the xcodebuild command line,
+      # which xcodebuild cannot scope to one target and would leak to every SPM
+      # and Pod target in the workspace (the same trap documented for
+      # CODE_SIGN_IDENTITY below). The project setting already points the Runner
+      # target at this path, so the swap is precisely scoped.
+      #
+      # It also switches aps-environment to `development`, which is correct
+      # here: a development-signed build registers sandbox APNs tokens. That is
+      # another reason this build is for testing only and must never be the one
+      # that reaches users.
+      - name: Use the Tap to Pay development entitlements
+        if: ${{ inputs.export_method == 'development' }}
+        run: |
+          cp ios/Runner/RunnerDebug.entitlements ios/Runner/Runner.entitlements
+          echo "Runner.entitlements now carries:"
+          grep -o 'com\.apple\.developer\.[a-z.-]*' ios/Runner/Runner.entitlements
+
       # Generated (not committed) so the team id stays a secret. Automatic
       # signing means Xcode resolves the profile itself; the API key auth block
       # lets the export talk to App Store Connect non-interactively.
+      #
+      # `development` is the legacy spelling of what Xcode 15.3+ calls
+      # `debugging`; both are still accepted, and the old name is what every
+      # existing recipe uses. Unlike an app-store export it needs a development
+      # provisioning profile, which Apple will only issue to a team with at
+      # least one registered device — that registration is the whole
+      # prerequisite for this path.
       - name: Write ExportOptions.plist
         if: ${{ inputs.distribute }}
         env:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          EXPORT_METHOD: ${{ inputs.export_method }}
         run: |
           cat > ios/ExportOptions.plist <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0"><dict>
-            <key>method</key><string>app-store</string>
+            <key>method</key><string>${EXPORT_METHOD}</string>
             <key>signingStyle</key><string>automatic</string>
             <key>teamID</key><string>${APPLE_TEAM_ID}</string>
             <key>uploadSymbols</key><true/>
@@ -366,7 +422,7 @@ jobs:
       # build looks like, since the state it's waiting for never arrives. Check
       # the ITMS email and App Store Connect before touching any secret.
       - name: Upload to TestFlight
-        if: ${{ inputs.distribute }}
+        if: ${{ inputs.distribute && inputs.export_method != 'development' }}
         uses: apple-actions/upload-testflight-build@v5
         with:
           app-path: ${{ env.IPA_PATH }}
@@ -374,14 +430,22 @@ jobs:
           api-key-id: ${{ secrets.APPSTORE_API_KEY_ID }}
           api-private-key: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
 
-      # Kept for post-mortems: an app-store-method IPA can't be sideloaded, but
-      # having the exact uploaded artifact beats re-running the build to inspect
-      # what shipped.
+      # For an app-store export this is kept for post-mortems: that IPA can't be
+      # sideloaded, but having the exact uploaded artifact beats re-running the
+      # build to inspect what shipped. For a **development** export this
+      # artifact IS the deliverable — nothing uploads it anywhere, so download
+      # it and install it over USB:
+      #
+      #   sudo apt install ideviceinstaller     # same toolchain as idevice_id
+      #   ideviceinstaller -i auction.fish.ipa
+      #
+      # It will only install on a device registered to the team, which is the
+      # point. Retention is one day, so download it the same day.
       - name: Upload IPA artifact
         if: ${{ inputs.distribute }}
         uses: actions/upload-artifact@v7
         with:
-          name: ios-ipa-${{ github.sha }}
+          name: ios-ipa-${{ inputs.export_method }}-${{ github.sha }}
           path: ${{ env.IPA_PATH }}
           if-no-files-found: error
           # One day — see android-release.yml. TestFlight is the durable copy of

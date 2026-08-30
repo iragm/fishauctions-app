@@ -160,6 +160,43 @@ Builds run on the `macos-latest` runner in `.github/workflows/ios-release.yml`:
   profile to maintain. Four secrets: `APPSTORE_API_KEY_ID`,
   `APPSTORE_API_ISSUER_ID`, `APPSTORE_API_PRIVATE_KEY`, `APPLE_TEAM_ID`.
 
+### Getting a Tap to Pay-entitled build onto a phone, with no Mac
+
+Apple's **development** Tap to Pay entitlement (granted 2026-07-31) attaches to
+*development* provisioning profiles, so it can never reach a TestFlight build —
+those are distribution-signed, and `Runner.entitlements` deliberately omits the
+key until the publishing grant. `ios-release.yml` therefore has a third mode:
+`distribute: true` + **`export_method: development`**. It swaps
+`RunnerDebug.entitlements` into place, exports with `method=development`, skips
+App Store Connect entirely, and leaves a sideloadable IPA as the run's artifact.
+
+Prerequisite, and the only one: **at least one registered device.** Apple issues
+no development profile to a team with zero of them — which is the whole reason
+the archive here is ad-hoc signed. Registration is in the **Apple Developer
+portal**, not App Store Connect:
+
+1. Get the UDID. No app can read it (Apple removed that in iOS 7 — the
+   `device_uuid` this app sends to `devices/register/` is a random v4 UUID it
+   generates itself, and is unrelated). Off a Linux box:
+   `sudo apt install libimobiledevice-utils && idevice_id -l`. Windows: the
+   Apple Devices app, click the Serial Number field to cycle to UDID.
+2. developer.apple.com/account → **Certificates, Identifiers & Profiles** →
+   **Devices** → **+** → platform *iOS, tvOS, watchOS*, any name, paste the
+   UDID → Continue → Register. Capped at 100 devices per membership year, and
+   removals don't free a slot until renewal.
+3. **No new CI secrets.** The four that already exist are what cloud signing
+   uses, and a development export uses the same App Store Connect API key —
+   which must be **Admin**, as it already must be to create the distribution
+   certificate. `-allowProvisioningUpdates` builds a fresh development profile
+   including every registered device at export time.
+4. Install over USB with the same toolchain that produced the UDID:
+   `sudo apt install ideviceinstaller && ideviceinstaller -i <the>.ipa`. The IPA
+   only installs on a registered device, which is the point. Artifact retention
+   is one day.
+
+That build gets `aps-environment: development`, so its push tokens are sandbox
+ones — right for a development build, wrong for anything a user touches.
+
 **The signed path does not use `flutter build ipa`,** and must not be
 "simplified" back to it. That command passes `-allowProvisioningUpdates` but
 never the `-authenticationKey*` flags, and `man xcodebuild` is explicit that
