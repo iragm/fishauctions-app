@@ -206,8 +206,71 @@ couldn't be completed" for any error that isn't `LocalizedError`.
 `debugPrint`s it, and `/tap-to-pay` prints it in red under the education button
 whenever the fallback is used.
 
-So one build now either fixes this outright or comes back naming which of the
-remaining two it is.
+**Result of that build (2026-08-30): `education_failed_content` — "unknown",
+`ProximityReaderDiscovery` content error 5.** So presentation is never reached
+and the view-controller defect above was not the cause (it was still a real one;
+keep the fix). The failure is Apple's regionalized content *fetch*, and the case
+is literally `unknown`, meaning the framework itself couldn't classify it — no
+further detail is coming from that channel.
+
+**The error enum does most of the elimination for us.** Apple documents
+`ProximityReaderDiscovery.ContentError` with six cases, and — read in
+declaration order, which matches the bridged code 5 — `unknown` is the last of
+them:
+
+| # | Case | Apple's text |
+|---|---|---|
+| 0 | `contentNotFound` | "the requested content isn't available" |
+| 1 | `contentDisplayFailed` | "an issue occurred when trying to display" |
+| 2 | `notSupported` | "the current device doesn't support the requested content" |
+| 3 | `networkUnavailable` | "the system can't reach the network" |
+| 4 | `systemBusy` | "the system is busy" |
+| 5 | `unknown` | "the framework encountered a problem that the system can't interpret" |
+
+That matters more than it looks. Three of the innocent explanations have their
+**own dedicated cases** — an unsupported device is `notSupported`, no network is
+`networkUnavailable`, no content published for this country is
+`contentNotFound` — and we got none of them. Reproduced on a retry, so
+`systemBusy` is out too. `unknown` is Apple's catch-all for a failure the
+framework itself cannot classify, which is what a refusal from underneath it
+looks like.
+
+Two independent confirmations from outside: Apple's own `ProximityReaderDiscovery`
+overview never mentions an entitlement, but Stripe's Tap to Pay integration
+documents merchant education *after* "request and configure the Tap to Pay on
+iPhone development entitlement", i.e. it is only ever described working inside an
+entitled app; and Apple's provisioning answer on the forums is that an approved
+team's managed entitlement is "configured only for the Development distribution
+type", with any other type failing.
+
+So **the entitlement is the leading explanation**, and the claim in
+`TapToPayEducation.swift` and in "Most of the new code needs no entitlement at
+all" below is probably **wrong**: education is as gated as the reader, and *no*
+part of Apple's three videos is recordable from a distribution build.
+
+**One cheap thing rides in the next build to close the last gap.** Apple
+documents `contentList` as *"specific to the country of the current device. The
+array can be empty if no content is available for the current country."* The
+presenter now appends `contentList=<n>` to a `content`-step failure: non-empty
+means content exists for this device and something refused it (entitlement);
+empty or throwing points back at availability after all.
+
+**If it is the entitlement, the fix is one build, not a Mac.** A development or
+ad-hoc profile can carry `com.apple.developer.proximity-reader.payment.acceptance`
+today (the grant landed 2026-07-31) — what Apple withholds is a *distribution*
+profile. Apple will not issue a development profile to a team with zero
+registered devices, which is the only reason this pipeline ad-hoc signs its
+archive, so the sequence is: get the iPhone's UDID (Apple Devices app on
+Windows, or Apple Configurator on an iPad — iOS Settings shows the serial, not
+the UDID), register it under Devices in the developer portal, have
+`ios-release.yml` export `method: development` with
+`CODE_SIGN_ENTITLEMENTS = Runner/RunnerDebug.entitlements`, and install the
+result over the air via an `itms-services` manifest. Note that build gets
+`aps-environment: development`, so its push tokens are sandbox ones — fine for a
+test build, wrong for anything else.
+
+That build is worth having regardless of what it proves here: it is also the
+only way to record video 3, since a real tap needs the same entitlement.
 
 **This also puts a load-bearing claim in doubt.** The paragraph below says the
 education flow is exercisable in any build because no entitlement is involved —

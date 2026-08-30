@@ -75,6 +75,24 @@ enum TapToPayEducationPresenter {
     return "\(String(describing: error)) [\(bridged.domain) \(bridged.code)]: \(bridged.localizedDescription)"
   }
 
+  /// How many education topics Apple has for this device, as a string for the
+  /// error message.
+  ///
+  /// Worth the extra round trip on a failure because it separates two causes
+  /// that `ContentError.unknown` cannot: Apple documents `contentList` as
+  /// *"specific to the country of the current device. The array can be empty if
+  /// no content is available for the current country."* A non-empty list means
+  /// content exists here and something else refused it.
+  @available(iOS 18.0, *)
+  private static func inventory(_ discovery: ProximityReaderDiscovery) async -> String {
+    do {
+      let list = try await discovery.contentList
+      return "contentList=\(list.count)"
+    } catch {
+      return "contentList threw \(describe(error))"
+    }
+  }
+
   /// Presents the "how to tap" topic and resolves once the sheet is dismissed.
   ///
   /// Resolves `"presented"` on a completed showing, `"unsupported"` on iOS 17
@@ -100,11 +118,11 @@ enum TapToPayEducationPresenter {
             details: nil))
         return
       }
+      let discovery = ProximityReaderDiscovery()
       // Which of the two awaits threw. Set before each so the catch can name
       // it without repeating the block.
       var step = "content"
       do {
-        let discovery = ProximityReaderDiscovery()
         // `.payment(.howToTap)` is the only payment topic Apple publishes today.
         // Fetching the content and presenting it are separate calls because the
         // fetch is what localizes/regionalizes it against the device.
@@ -113,10 +131,14 @@ enum TapToPayEducationPresenter {
         try await discovery.presentContent(content, from: viewController)
         result("presented")
       } catch {
+        var message = describe(error)
+        if step == "content" {
+          message += " — \(await inventory(discovery))"
+        }
         result(
           FlutterError(
             code: "education_failed_\(step)",
-            message: describe(error),
+            message: message,
             details: nil))
       }
     }
