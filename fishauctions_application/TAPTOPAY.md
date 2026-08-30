@@ -88,7 +88,7 @@ TTP.
 
 | # | Req | Status |
 |---|---|---|
-| 4.1 | Use `ProximityReaderDiscovery` on iOS 18+ | **Done** — `TapToPayEducation.swift`. This one call also satisfies 4.4, 4.6, 4.7 and 4.8 |
+| 4.1 | Use `ProximityReaderDiscovery` on iOS 18+ | **Written; fails on device (2026-08-30).** `TapToPayEducation.swift` compiles and both sides of the channel are wired, but on a TestFlight build on **iOS 26** the app shows its own text fallback instead — so 4.4, 4.6, 4.7 and 4.8 fall with it. See "The education sheet does not present" below |
 | 4.2 | Education after terms acceptance | **Done** — presented immediately after `enable()` succeeds |
 | 4.3 | Education in Settings or Help | **Done** — "How to take a payment", always present on `/tap-to-pay` |
 | 4.4 | Toolkit assets for education outside the app (*conditional*) | **N/A in-app** (4.1 covers it). If web education is added, see TTP-6 |
@@ -163,6 +163,58 @@ awareness modal, the setup screen, Apple's education sheet and the progress
 indicators are all exercisable in any build — which is what makes the
 entitlement-review videos recordable now, before the publishing grant.
 
+### The education sheet does not present (open, found 2026-08-30)
+
+On a prod TestFlight build on **iOS 26**, "How to take a payment" shows the
+Flutter `_EducationFallbackSheet` rather than Apple's sheet. That is a review
+blocker, not a cosmetic one: from iOS 18 requirement 4.1 makes Apple's sheet
+mandatory, and the fallback is exactly the hand-written Tap to Pay copy the
+guide forbids as a substitute.
+
+What is already ruled out: the method channel is wired on both sides and its
+name matches (`com.fishauctions.app/platform`), the Swift compiles (CI archives
+it every release, so the `ProximityReaderDiscovery` API surface as written is
+real), and `#available(iOS 18.0, *)` passes on 26. So it is a runtime failure
+inside `TapToPayEducationPresenter.present`, leaving three candidates: the
+presenting view controller resolved to nil, `content(for:)` threw, or
+`presentContent(…)` threw.
+
+**One of those was a real defect and is fixed.** The controller was resolved as
+`connectedScenes.compactMap { ($0 as? UIWindowScene)?.keyWindow }.first?.rootViewController`,
+which is wrong three ways: `connectedScenes` is a **`Set`**, so `.first` picks an
+arbitrary scene rather than the one on screen; a backgrounded or unattached
+scene has no key window, so the whole chain can yield nil while the app is
+plainly visible; and presenting from a controller that is *already* presenting
+throws rather than stacking. `presentingViewController()` now prefers a
+`.foregroundActive` scene, falls back through `.foregroundInactive`, takes the
+key window or the scene's first window, and walks `presentedViewController` to
+the top. Suspicion was already pointing here: Flutter 3.44's `SceneDelegate`
+lifecycle has broken one thing in this app the same way (the Google OAuth
+callback; see `IOS.md`).
+
+**And we were discarding the answer to the other two.**
+`PlatformBridge.presentTapToPayEducation` collapsed every `PlatformException`
+into `'failed'` and the screen showed the fallback silently, so nothing about
+the cause survived — and with no debugger on a TestFlight build there is no
+console to recover it from. Now: the Swift names the step that failed
+(`education_failed_content` vs `education_failed_present`, two failures with
+nothing in common — a regionalized fetch from Apple versus UIKit presentation)
+and reports `String(describing:)` plus the bridged `NSError` domain and code
+alongside `localizedDescription`, which on its own flattens to "The operation
+couldn't be completed" for any error that isn't `LocalizedError`.
+`PlatformBridge.lastTapToPayEducationError` keeps it, `TapToPayService`
+`debugPrint`s it, and `/tap-to-pay` prints it in red under the education button
+whenever the fallback is used.
+
+So one build now either fixes this outright or comes back naming which of the
+remaining two it is.
+
+**This also puts a load-bearing claim in doubt.** The paragraph below says the
+education flow is exercisable in any build because no entitlement is involved —
+which is what makes the entitlement-review videos recordable before the grant.
+If the reason turns out to be the entitlement, that is false, and every one of
+Apple's three videos needs a development build, i.e. a Mac.
+
 **What you need:** a Mac with **Xcode 16 or later** (the education API is in the
 iOS 18 SDK; it's `@available`-guarded, so the deployment target stays 16.0), and
 a **physical iPhone XS+ on iOS 16.4+** — Tap to Pay does not work in the
@@ -173,17 +225,33 @@ so no Xcode file-adding step. No new pods.
 flutter run -t lib/main.dart --dart-define=FLAVOR=staging
 ```
 
-**How to reach the new UI before the backend lands.** The drawer tile and the
-awareness modal both wait on `GET /api/mobile/payments/authorization/`
-(**TTP-3**), which doesn't exist yet — until it does, eligibility stays unknown
-and neither appears. Open the **command palette** (tap the title bar) and search
-*"tap to pay"* — that entry matches by name regardless of eligibility, precisely
-so this is testable now. From there: the setup screen, terms acceptance, Apple's
-education sheet, and the reader progress indicator.
+**How to reach the Tap to Pay UI — and the back door that isn't one.** There are
+three entry points and **all three are gated on the backend calling this user a
+merchant**; nothing reaches `/tap-to-pay` otherwise.
 
-**What can't be tested until TTP-1/TTP-2/TTP-3 ship:** the in-app Square OAuth
-onboarding (the site still hides the connect links from the app), the corrected
-checkout button copy/icon, and the launch/resume warm-up.
+- drawer → "Tap to Pay"
+- command palette → "tap to pay" (also "card", "payment")
+- the awareness modal, when `auction_ribbon.html` calls `tapToPayOffer`
+
+This section used to say the palette row "matches by name regardless of
+eligibility, precisely so this is testable now". **That was never true of the
+shipped backend** and it cost a debugging session on 2026-08-29.
+`_app_deep_link_items` in `auctions/command_palette.py` emits the row only when
+`request.is_mobile_app` **and** `PaymentService._user_can_take_payments(user)`,
+and the code comment says why in as many words: *"Deliberately the same check the
+app's Tap to Pay warm-up endpoint makes, so the palette can't offer a row that
+the screen behind it turns around and refuses."*
+
+So an empty palette search for "tap to pay" is a real signal, and it means one of
+three things — worth checking in this order:
+
+1. **The deployment is running a backend older than the palette row.** Check
+   prod separately from staging; they are not the same code.
+2. **The `is_mobile_app` User-Agent marker isn't reaching the middleware**
+   (`auctions/middleware.py:35`). This would also silently kill the awareness
+   modal and every other `is_mobile_app` branch on the site.
+3. **The account isn't a merchant.** Least likely on a site owner's login —
+   `_user_can_take_payments` short-circuits to True for any superuser.
 
 ## Before submitting
 
@@ -279,6 +347,90 @@ signed build fails provisioning because `Runner.entitlements` now declares
 Part SOCIAL. Apple also requires that deleting an account **revokes the Apple
 grant** (SOCIAL-6), which ties into the account-deletion page that already
 exists.
+
+### Draft App Review Information → Notes
+
+Paste this into App Store Connect and fill the four placeholders. It is written
+to answer, without the reviewer having to ask: what the app is, why sign-in is
+required, that the Tap to Pay entitlement is in use and for what, the exact taps
+that reach every gated screen, where account deletion lives, and how UGC is
+moderated. It deliberately does not mention MDM — the guide warns that flags the
+app for unnecessary review.
+
+```text
+WHAT THIS APP IS
+auction.fish is the companion app for auction.fish, a free web platform that
+aquarium and pond hobby clubs use to run their auctions. Members bid on and sell
+fish, plants and coral; club organizers run the auction itself. The app is a
+shell around the same signed-in website, plus the hardware the web cannot reach:
+Bluetooth thermal label printing, camera lot-label scanning, and Tap to Pay on
+iPhone.
+
+SIGN-IN IS REQUIRED
+There is no signed-out mode. The demo account below administers a club and an
+auction, so it can reach every part of the app.
+
+  Username: <DEMO USERNAME>
+  Password: <DEMO PASSWORD>
+
+TAP TO PAY ON iPHONE
+This app uses the Tap to Pay on iPhone entitlement
+(com.apple.developer.proximity-reader.payment.acceptance).
+
+Use case: point of sale for auction organizers collecting payment from buyers in
+person at the end of a club auction. Buyers settle their invoice at a check-out
+table, which today means cash or a separate card terminal. Payments are processed
+by Square, which each club connects to its own Square account; the app never sees
+card data.
+
+Availability: the feature is limited to users who administer an auction or club
+with a connected, in-person-capable Square account. That is a small minority of
+our users -- the great majority are bidders -- so these entry points do not
+appear for an ordinary account. The demo account above is an organizer and sees
+all of them.
+
+HOW TO REACH IT
+Tap to Pay on iPhone requires iPhone XS or later on iOS 16.4 or later and does
+not run in the Simulator.
+
+1. Sign in with the demo account above.
+2. Side menu (top left) -> "Tap to Pay". This is the setup and education screen:
+   terms acceptance, Apple's education sheet, "How to take a payment", and the
+   reader configuration progress indicator.
+3. To take a payment: side menu -> <DEMO AUCTION NAME> -> Invoices -> open any
+   unpaid invoice -> "Tap to Pay on iPhone", at the top of the payment options.
+   Several $1.00 invoices are waiting (Square's minimum charge) so the flow can
+   be repeated; an invoice is marked paid once it is charged. Charges are real
+   and we refund them, so please charge as often as you need to.
+4. The full-screen awareness modal appears once per device, on an auction page,
+   for an organizer whose club has Square connected.
+
+A video walkthrough from sign-in through checkout is attached. The Tap to Pay
+screens themselves cannot be screen-recorded, so it was filmed with a second
+device.
+
+ACCOUNT DELETION
+Side menu -> Preferences -> "Delete my account", or auction.fish/account/delete/.
+Deleting an account also revokes the Sign in with Apple grant.
+
+USER-GENERATED CONTENT
+Lot names, descriptions, photos and chat messages are written by members. Club
+and auction administrators can hide chat messages, remove lots and ban users from
+their auctions; any member can ban another member from bidding on their lots.
+Site administrators can remove any content or account.
+
+PERMISSIONS
+Nothing is requested at launch; each is asked for in context.
+- Location: distance to nearby auctions, automatic check-in on arrival at an
+  in-person auction, and the location of an in-person card charge, which Square
+  requires.
+- Camera: reading lot-label QR codes to find a lot in the room, and photographing
+  lots for sale.
+- Bluetooth: connecting to the seller's own thermal label printer.
+- Microphone and Speech Recognition: an organizer calls out lot numbers, bidder
+  numbers and prices to record sales hands-free while running an auction. Speech
+  is processed on device where the phone supports it.
+```
 
 ## Testing notes from the guide
 

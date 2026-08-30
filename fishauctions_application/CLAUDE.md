@@ -924,9 +924,20 @@ that shaped the app:
   card payments is noise to someone with nothing to take them into. `canCharge`
   is the backend saying it issued live seller credentials, i.e. exactly "Square is
   connected and ready and the only thing missing is this phone". The URL prefix
-  is a stand-in for the real question — *is the site showing its own Square card
-  here?* — which only the server can answer: `tapToPayOffer` is the bridge
-  handler for it and `BACKEND_SPEC.md` Part TTP-6 is the template half.
+  was a stand-in for the real question — *is the site showing its own Square
+  card here?* — which only the server can answer. **It now does, and the
+  stand-in is gone** (2026-08-29): `auction_ribbon.html` calls the
+  `tapToPayOffer` bridge handler when `Auction.offers_tap_to_pay` is true
+  (the auction's effective Square seller is connected *and* in-person capable),
+  and that handler is the modal's **only** caller — `_isAuctionPath` and the
+  `onLoadStop` path are deleted. No app-side fallback on purpose: guessing is
+  what the guess got wrong, so an older deployment whose ribbon never calls the
+  handler simply shows no unprompted modal. `canCharge` is still checked on top,
+  because it answers the other half — the ribbon knows the *auction* can take a
+  card, `canCharge` knows *this device's* operator was issued live credentials.
+  A null there is usually the warm-up fetch racing a cold start onto an auction
+  page; it costs one impression, not the feature, since nothing is claimed and
+  the ribbon fires on every admin auction page.
 - **A declined charge must still be able to send the customer a receipt**
   (5.10, "approved *or* declined"), via SMS/email/QR/Activity view — the share
   sheet is an Activity view, so that's what it uses. This is why the success
@@ -942,8 +953,15 @@ that shaped the app:
   browser: that's the surface Apple counts as in-app, and it shares Safari's
   cookies so a merchant whose Square login is Google SSO still works — which it
   would *not* in the shell's own WebView, since Google blocks embedded
-  WebViews. Still gated on the website un-hiding its connect links in the app
-  (`BACKEND_SPEC.md` TTP-1) — as it stands, that is the likeliest rejection.
+  WebViews. **The website now renders those connect links in the app** (TTP-1,
+  landed; this used to be called the likeliest rejection). The callback also
+  ends on a page offering a `fishauctions://square-connected` link back into
+  the app, which nothing receives — the app registers no OS handler for that
+  scheme on purpose, and this is the one page emitting such a link that renders
+  in the *in-app browser view* rather than the shell's WebView, so there is no
+  `shouldOverrideUrlLoading` to catch it (`BACKEND_SPEC.md` Part TTP-7 replaces
+  the button with "close this window"). The merchant returns by tapping Done,
+  and the on-resume warm-up picks up the new credentials.
 
 ## Django Backend Notes (from CLAUDE.md in iragm/fishauctions)
 
@@ -965,7 +983,7 @@ that shaped the app:
 - **Push notifications:** app *and* backend *and* the config endpoint are all done and verified on hardware (2026-07-27) — `firebase_messaging` is wired, `PushService.currentToken()` is not a stub, and both deployments' `/api/mobile/config/` serve a complete `firebase` block. **`PUSH.md` and the code are the truth here.** Two remaining blockers, both server-side: `FIREBASE_CREDENTIALS_JSON` set per deployment (unset ⇒ `push_configured()` false ⇒ silent email fallback), and `UserData.push_notifications_instead_of_email` actually toggled on — which is what the new contextual opt-in above exists to do, once `notifications/prefs/` (`BACKEND_SPEC.md` Part N) lands. Testing trap: the **dev flavor can never receive push against staging** (staging's config targets `…app.staging`, so `PushService.init` goes inert by design) and a signed-out app never initializes push at all.
 - ~~Terms & privacy links / account deletion (App Store blockers)~~ — **both landed on the backend** (verified 2026-08-01; this entry previously said neither existed, which is stale). `PrivacyPolicyView` serves `/privacy/` (a `BlogPost` seeded by migration, rendered at a stable path rather than redirected — the app opens it inside the signed-out signup WebView against an allow-list, so a redirect would eject the user mid-signup), and `/api/mobile/config/` returns both `terms_url` and `privacy_policy_url`. Account deletion is a web page (`account_delete.html`), which needs no app change — the shell's `/logout/` interception turns the resulting web sign-out into a full native one. The app renders both legal links on the login and signup screens (`widgets/legal_links.dart`).
 - **Square Tap to Pay (runtime):** Backend endpoints are done; charging still needs a real NFC device on API 31+ and Square production approval (sandbox works for the full flow). Not exercisable in CI. Android is verified working in production builds; iOS has the **development** entitlement only (2026-07-31).
-- **Tap to Pay publishing entitlement / App Review (`TAPTOPAY.md`, `BACKEND_SPEC.md` Part TTP):** the app side of Apple's checklist is implemented — awareness moment, setup/education screen, Apple's education sheet, reader-progress indicators, receipt sharing, launch/resume warm-up, OS-version-aware messaging. Three backend items are review blockers: **TTP-1** un-hide the Square connect links in the app (today the site tells merchants to open a browser, which fails requirement 2.2 outright), **TTP-2** fix the checkout button's copy and icon (`Tap to Pay with card` + a Bootstrap credit-card glyph violate 5.4/5.5), and **TTP-3** the new `GET /api/mobile/payments/authorization/` that makes the warm-up and the admin-only terms gate possible. TTP-4 (`receipt_url` on confirm) and TTP-5 (launch email + push, from Apple's toolkit) are follow-ups.
+- **Tap to Pay publishing entitlement / App Review (`TAPTOPAY.md`):** the app side of Apple's checklist is implemented — awareness moment, setup/education screen, Apple's education sheet, reader-progress indicators, receipt sharing, launch/resume warm-up, OS-version-aware messaging. **The backend half is done too** (verified 2026-08-29; this entry used to list TTP-1/2/3 as review blockers, which is stale): the Square connect links render in the app (`SquareOnboardingInAppTests`), the checkout button says `Tap to Pay on iPhone` / `Tap to Pay` with no icon and sits above the QR block (`TapToPayButtonCopyTests`), `GET /api/mobile/payments/authorization/` is live (`PaymentAuthorizationEndpointTests`), `confirm` returns `receipt_url` (TTP-4, and `payment_sheet.dart` already shares it), and the launch email/push command exists (TTP-5). What remains is Apple's: the **publishing** entitlement, granted only after review. **One loose end, specced as `BACKEND_SPEC.md` Part TTP-7**: the OAuth callback ends on a page offering `fishauctions://square-connected` to bounce the merchant out of the in-app browser view, and that link is inert — the app deliberately registers no OS handler for the scheme, and that page is the one `fishauctions://` link on the whole site that doesn't render inside the shell's WebView. Harmless (the merchant taps Done and the resume warm-up picks up the new credentials), but it is a dead button. The fix is the template telling them to close the window instead; **no app change**.
 - ~~Offline sync backend~~ — landed (`offline/snapshot/` + `offline/sync/` in `auctions/mobile/`).
 - **AR lot mode backend v2:** v1 (models, solver, endpoints) landed on the backend, and so has every per-frame sensor channel `BACKEND_SPEC.md` Part 5 specced — gyro `yaw_deg` heading odometry, GPS + absolute-heading island anchoring, and pedometer-driven `odo_x_m`/`odo_y_m` planar dead-reckoning. What's left is island (connected-component) detection/labeling/merging (`component` on positions rows, which the app already consumes). Until it lands, lots that were never co-visible in one camera frame don't get reliable relative positions, and unconnected scanned islands overlap on the admin map.
 - ~~Proximity check-in backend~~ — **implemented and live** (verified 2026-08-19; this entry previously said otherwise, and there is no Part 6 in `BACKEND_SPEC.md` any more). All three `checkin/*` views are in `auctions/mobile/urls.py`, with `CheckinNudge`, `Auction.exact_location_set`, `in_welcome_window` and the history writes behind them, and `auctions/test_checkin.py` covers them. The app's 404 self-disable will never fire against this backend. **What is *not* covered is the app half:** `test/services/` has no `checkin_service_test.dart` at all — the ping loop, `minGap`, the `_surfaced` dedupe, join and set-location are untested.
@@ -1332,14 +1350,17 @@ JWT auth is bridged into the WebView's Django cookie session:
   is closed and short on purpose — this shell renders user-authored HTML (lot
   descriptions, reference links), and `intent:`/`market:` can launch arbitrary
   apps with arbitrary extras.
-- **The app claims its own deployment's https links and nothing else.** An
-  Android App Link filter (`AndroidManifest.xml`, host from the flavor's
-  `appLinkHost` placeholder so dev/staging claim `staging.auction.fish` and
-  prod claims `auction.fish`) plus `FlutterDeepLinkingEnabled` on iOS.
-  Deliberately **no OS registration for the `fishauctions://` scheme**: those
-  links only ever appear inside our own pages and are intercepted by
-  `shouldOverrideUrlLoading`, so registering it would let any app — or any web
-  page in any browser — drive the shell's native flows.
+- **App Links / Universal Links are switched off, and as of 2026-08-29 that is
+  expressed in the manifest rather than left to fail.** The intent filter in
+  `AndroidManifest.xml` (host from the flavor's `appLinkHost` placeholder, so
+  dev/staging would claim `staging.auction.fish` and prod `auction.fish`) is
+  **commented out**, and iOS never got the `associated-domains` entitlement.
+  `FlutterDeepLinkingEnabled` stays on on both platforms: with no filter and no
+  entitlement, no URL is ever delivered, so it is inert and one less thing to
+  remember later. Deliberately **no OS registration for the `fishauctions://`
+  scheme** either: those links only ever appear inside our own pages and are
+  intercepted by `shouldOverrideUrlLoading`, so registering it would let any
+  app — or any web page in any browser — drive the shell's native flows.
   - **The link arrives as a go_router *exception*, and is handled in `redirect`
     rather than only `onException`.** Both platforms push the absolute URL into
     the app's router, where nothing matches `/lots/123`. But the top-level
@@ -1349,19 +1370,39 @@ JWT auth is bridged into the WebView's Django cookie session:
     `from`. `DeepLinkService.offer` therefore runs first in `redirect`, parks
     the path, and returns `/`; the shell consumes it the same way it consumes a
     quick action, so a link tapped while signed out survives the login trap.
-  - **Nothing works until the site serves the association files** —
-    `/.well-known/assetlinks.json` and `/.well-known/apple-app-site-association`
-    (`BACKEND_SPEC.md` Part LINKS). Until then verification fails and links keep
-    opening in the browser: the filter is inert, not wrong. The iOS
-    `associated-domains` entitlement is deliberately **not** added yet, because
-    adding it before the capability exists on the App ID breaks every signed
-    build — same trap as the Tap to Pay entitlement.
-  - **Left switched off on purpose** (2026-08-19). Claiming the domain means a
-    tapped `auction.fish` link stops opening in the browser for everyone with
-    the app installed, and that's a product decision — forcing people into the
-    app — not a technical gap. The app half stays in place and inert; **one
-    file on the server turns it on**, and none of it has to be revisited when
-    that day comes.
+  - **Left switched off on purpose.** Claiming the domain means a tapped
+    `auction.fish` link stops opening in the browser for everyone with the app
+    installed, and that's a product decision — forcing people into the app —
+    not a technical gap.
+  - **"Inert" was not free, which is why the filter is now commented out rather
+    than merely unverified** (2026-08-29). The theory was that an
+    `autoVerify="true"` filter pointing at a host serving no association file
+    just fails verification and costs nothing. Two things say otherwise. **Play
+    Console runs its own domain check** on every autoVerify'd web link and
+    reports it on the Deep links page — `auction.fish / 1 domain / https /
+    com.fishauctions.app.MainActivity / 1 issue found — Failed domain checks` —
+    permanently, for a feature nobody is shipping, i.e. a standing red mark that
+    trains you to ignore that page. And an **unverified** https `VIEW` filter is
+    worse than none in the OS: Android stops handing the link straight to the
+    browser and offers a chooser instead. Both go away with the filter.
+  - **Turning it on is an ordered procedure, and the iOS order is not
+    reversible from the app.** Android: set `ANDROID_APP_LINKS` on the
+    deployment (`package=SHA256_FINGERPRINT`, comma separated) — the
+    fingerprint is the certificate **Google Play re-signs with** (Play Console →
+    Release → Setup → App signing), *not* the upload key, which is the classic
+    silent failure — then uncomment the filter, then check with `adb shell pm
+    get-app-links com.fishauctions.app`. iOS: enable **Associated Domains on the
+    App ID first**, then set `IOS_APP_LINKS` (`TEAMID.bundle.id`) so the
+    association file serves, and only then add the entitlement key — adding it
+    before the capability exists on the App ID means cloud signing can't build a
+    matching profile and every Release/TestFlight export fails, the same trap as
+    the Tap to Pay entitlement. Both files are already implemented and live on
+    the backend (`auctions/app_links.py`); unconfigured is a deliberate 404,
+    because an empty-but-valid file verifies as "this site claims no apps" and
+    looks identical to a working one.
+  - **The Dart half stays whole and tested** (`DeepLinkService`, the router's
+    `redirect` hook, `test/services/deep_link_service_test.dart`), so switching
+    this on is a manifest edit and an entitlement, not a feature.
   - go_router normalizes away a trailing slash, so `/lots/123/` loads as
     `/lots/123` and Django's `APPEND_SLASH` 301s it back. One extra round trip;
     the fix, if it ever matters, is server-side.

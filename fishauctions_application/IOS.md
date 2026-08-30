@@ -12,6 +12,18 @@ signed build, and the Apple/Square approvals below.
   SDK pod (`s.platform = :ios, '16.0'`). Cuts iOS 15 devices (iPhone 6s/7/SE1);
   everything iPhone 8+ is fine.
 - `CFBundleDisplayName` = `auction.fish`.
+- **`TARGETED_DEVICE_FAMILY = "1"` — iPhone only, decided 2026-08-29 and a
+  one-way door.** Every hardware feature here is a phone feature (Tap to Pay is
+  iPhone-only; BLE label printing, lot scanning and voice set-winners are all
+  "standing in a room holding a phone"), and nobody has ever looked at the shell
+  stretched to 13". Universal support would also have required a 13" iPad
+  screenshot set and handed App Review a surface to reject under 2.4.1/4.0. The
+  reason it had to be settled *before* the first submission: once a version
+  ships supporting iPad, App Store Connect will not accept an update that drops
+  it — adding iPad later is trivial, removing it is not. iPad users can still
+  install and run it in iPhone compatibility mode.
+  `UISupportedInterfaceOrientations~ipad` is left in Info.plist as dead config;
+  it costs nothing and is what an iPad re-add would need.
 - Info.plist usage descriptions: Bluetooth, camera, photo library, calendar
   (legacy + iOS 17 write-only/full-access keys), location (distances + Square
   charge requirement).

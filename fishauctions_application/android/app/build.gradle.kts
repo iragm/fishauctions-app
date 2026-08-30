@@ -62,14 +62,20 @@ android {
     flavorDimensions.add("env")
 
     productFlavors {
-        // appLinkHost is the host this flavor claims Android App Links for
-        // (the <data> element in AndroidManifest.xml). It MUST match the
-        // backend EnvironmentConfig.apiBaseUrl resolves to for the same
-        // FLAVOR dart-define, or the app would offer to open links belonging
-        // to a deployment it can't sign in to. Each host's
-        // /.well-known/assetlinks.json has to list this flavor's
-        // applicationId and signing-cert SHA-256 or verification fails and
-        // the links keep opening in the browser (BACKEND_SPEC.md Part LINKS).
+        // appLinkHost is the host this flavor would claim Android App Links
+        // for (the <data> element in AndroidManifest.xml). Currently unused:
+        // the intent filter that reads it is commented out, because claiming
+        // the domain is a product decision that has been answered "not yet" —
+        // see the long note in AndroidManifest.xml for why it is off and the
+        // order to turn it on. Kept here so that day is one uncomment.
+        //
+        // It MUST match the backend EnvironmentConfig.apiBaseUrl resolves to
+        // for the same FLAVOR dart-define, or the app would offer to open
+        // links belonging to a deployment it can't sign in to. Each host's
+        // /.well-known/assetlinks.json (served by the backend from
+        // ANDROID_APP_LINKS) has to list this flavor's applicationId and
+        // signing-cert SHA-256 or verification fails and the links keep
+        // opening in the browser.
         create("dev") {
             dimension = "env"
             applicationIdSuffix = ".dev"

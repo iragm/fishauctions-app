@@ -211,8 +211,24 @@ class TapToPayService {
   /// Shows Apple's merchant-education sheet (requirement 4.1), returning
   /// whether it actually appeared. False on iOS 17 and earlier, on Android,
   /// and if the sheet errors — the caller then shows its own text fallback.
-  Future<bool> presentEducation() async =>
-      await PlatformBridge.presentTapToPayEducation() == 'presented';
+  Future<bool> presentEducation() async {
+    final outcome = await PlatformBridge.presentTapToPayEducation();
+    if (outcome != 'presented') {
+      debugPrint(
+        'Tap to Pay education not shown ($outcome): '
+        '${lastEducationError ?? 'no reason reported'}',
+      );
+    }
+    return outcome == 'presented';
+  }
+
+  /// Why Apple's sheet last fell back to the app's own text, or null.
+  ///
+  /// Requirement 4.1 makes Apple's sheet mandatory from iOS 18, so a fallback
+  /// on a modern iPhone is a defect rather than a graceful degradation — and it
+  /// is invisible, because the fallback is a perfectly ordinary-looking sheet.
+  /// The screen surfaces this so the difference is legible without a debugger.
+  String? get lastEducationError => PlatformBridge.lastTapToPayEducationError;
 
   /// Whether Apple's education sheet exists on this OS (iOS 18+).
   Future<bool> educationAvailable() =>

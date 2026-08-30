@@ -99,43 +99,69 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
 
-            <!-- Android App Links: open this deployment's own https links in
-                 the app instead of the browser. ${appLinkHost} is set per
-                 product flavor in build.gradle.kts and must match the backend
-                 the same FLAVOR dart-define points Dart at (prod →
-                 auction.fish, dev/staging → staging.auction.fish).
+            <!-- Android App Links are DELIBERATELY OFF. The filter below is
+                 commented out, not deleted: claiming the domain means a tapped
+                 auction.fish link stops opening in the browser for everyone
+                 with the app installed, and that is a product decision — do we
+                 pull people into the app? — that has been answered "not yet".
 
-                 This is the ONLY link type the app claims. There is
-                 deliberately no filter for the `fishauctions://` scheme: those
-                 links only ever appear inside our own pages and are
-                 intercepted by the WebView's shouldOverrideUrlLoading, so
-                 registering the scheme with the OS would let any app — or any
-                 web page in any browser — drive the shell's native flows.
+                 It was left in place and inert for a while on the theory that
+                 an unverified filter costs nothing. It does cost something:
+                 Play Console runs its own domain check on every autoVerify'd
+                 web link and reports the deployment's empty assetlinks.json as
+                 "1 issue found — failed domain checks" on the Deep links page,
+                 forever, for a feature nobody is shipping. An unverified https
+                 VIEW filter is also worse than none in the OS: instead of
+                 opening the link, Android offers a chooser between the app and
+                 the browser.
 
-                 autoVerify makes this a *verified* App Link: Android fetches
-                 https://${appLinkHost}/.well-known/assetlinks.json at install
-                 time and only hands links over if it names this flavor's
-                 applicationId and signing-cert SHA-256. Until the backend
-                 serves that file (BACKEND_SPEC.md Part LINKS) verification
-                 simply fails and links keep opening in the browser — this
-                 filter is inert, not wrong. Note that a debug-signed dev build
-                 has a different fingerprint from a Play-signed release, so
-                 assetlinks.json needs an entry per (applicationId,
-                 fingerprint) pair you actually want to work. -->
+                 To turn it on, in this order:
+                   1. Set ANDROID_APP_LINKS on the deployment
+                      ("package=SHA256_FINGERPRINT", comma separated; repeat a
+                      package for more fingerprints) so
+                      https://<host>/.well-known/assetlinks.json serves real
+                      statements — unconfigured is a 404 by design. The
+                      fingerprint must be the certificate Google Play
+                      *re-signs* with (Play Console → Release → Setup → App
+                      signing → "App signing key certificate"), NOT the upload
+                      key; using the upload key is the classic failure and it
+                      fails silently. A debug-signed dev build has a different
+                      fingerprint again, so add an entry per (applicationId,
+                      fingerprint) pair you actually want to work.
+                   2. Uncomment the filter. ${appLinkHost} is set per product
+                      flavor in build.gradle.kts and must match the backend the
+                      same FLAVOR dart-define points Dart at (prod →
+                      auction.fish, dev/staging → staging.auction.fish).
+                   3. Verify: adb shell pm get-app-links com.fishauctions.app
+                 The Dart half (DeepLinkService, the router's redirect) is
+                 already in place and needs no change.
+
+                 Whenever it comes back, this stays the ONLY link type the app
+                 claims. There is deliberately no filter for the
+                 `fishauctions://` scheme: those links only ever appear inside
+                 our own pages and are intercepted by the WebView's
+                 shouldOverrideUrlLoading, so registering the scheme with the
+                 OS would let any app — or any web page in any browser — drive
+                 the shell's native flows.
+
             <intent-filter android:autoVerify="true">
                 <action android:name="android.intent.action.VIEW"/>
                 <category android:name="android.intent.category.DEFAULT"/>
                 <category android:name="android.intent.category.BROWSABLE"/>
                 <data android:scheme="https" android:host="${appLinkHost}"/>
             </intent-filter>
+            -->
 
             <!-- Opt in to Flutter's own deep-link handling, which is what
-                 turns the intent above into a route the Dart side sees. Off by
-                 default on Android; without it the intent launches the app and
-                 the URL is dropped on the floor, which is worse than not
-                 claiming the link at all. The route lands in go_router, whose
-                 onException hands any site-shaped path to the WebView shell
-                 (config/router.dart). -->
+                 would turn the intent filter above into a route the Dart side
+                 sees. Off by default on Android; without it the intent
+                 launches the app and the URL is dropped on the floor, which is
+                 worse than not claiming the link at all. Left enabled while
+                 the filter is commented out — with no VIEW filter no URL ever
+                 arrives, so it is inert, and it is one less thing to remember
+                 on the day the filter comes back. The route lands in
+                 go_router, whose redirect hands any site-shaped path to the
+                 WebView shell (config/router.dart). -->
             <meta-data
                 android:name="flutter_deeplinking_enabled"
                 android:value="true" />

@@ -216,16 +216,34 @@ class PlatformBridge {
   /// errored — the caller falls back to its own explanation for anything but
   /// `presented`. Never throws: education failing must not break the flow it's
   /// attached to (enabling Tap to Pay).
+  /// Why the last [presentTapToPayEducation] call fell back, or null if it has
+  /// never failed.
+  ///
+  /// The native side reports `ProximityReaderDiscovery`'s own
+  /// `localizedDescription`, and on a build nobody can attach a debugger to
+  /// this is the only account of what went wrong: Apple's sheet failing looks,
+  /// on screen, exactly like an iPhone too old to have it.
+  static String? lastTapToPayEducationError;
+
   static Future<String> presentTapToPayEducation() async {
     if (!Platform.isIOS) {
       return 'unsupported';
     }
     try {
-      return await _channel.invokeMethod<String>('presentTapToPayEducation') ??
+      final outcome =
+          await _channel.invokeMethod<String>('presentTapToPayEducation') ??
           'failed';
-    } on PlatformException {
+      if (outcome == 'presented') {
+        lastTapToPayEducationError = null;
+      }
+      return outcome;
+    } on PlatformException catch (e) {
+      lastTapToPayEducationError = e.message == null
+          ? e.code
+          : '${e.code}: ${e.message}';
       return 'failed';
     } on MissingPluginException {
+      lastTapToPayEducationError = 'This build has no education handler.';
       return 'unsupported';
     }
   }

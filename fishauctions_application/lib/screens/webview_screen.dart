@@ -242,21 +242,25 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   /// app with a mixed consumer/merchant base — which this very much is, since
   /// nearly everyone here is a bidder, not an auctioneer.
   ///
+  /// **Only a page asks for this.** The single caller is the `tapToPayOffer`
+  /// bridge handler, which `auction_ribbon.html` calls when
+  /// `Auction.offers_tap_to_pay` is true — this admin's auction has a Square
+  /// account that is connected *and* in-person capable, i.e. exactly the page
+  /// where the website is about to show its own Square card. The app used to
+  /// ask the question itself on every page load, from a URL prefix
+  /// (`/auctions/…`) plus a live credential; that is an approximation of "is
+  /// the site offering card payments here?" and it put the modal in front of
+  /// organizers on unrelated pages. There is no app-side fallback on purpose:
+  /// guessing is what the guess got wrong, and an older deployment whose ribbon
+  /// never calls the handler shows no unprompted modal at all, which is the
+  /// right failure.
+  ///
   /// Runs behind the same settle-and-claim discipline as the location and
   /// notification offers, so it can't flash over a page that's about to
   /// redirect.
-  Future<void> _maybeOfferTapToPay(
-    String path,
-    int generation, {
-    required bool fromPage,
-  }) async {
+  Future<void> _maybeOfferTapToPay(int generation) async {
     final service = TapToPayService.instance;
     if (!service.isApplePlatform) {
-      return;
-    }
-    // A page that asked for it has said more than any URL test could, so the
-    // path rule doesn't apply to it (`tapToPayOffer`, BACKEND_SPEC Part TTP-6).
-    if (!fromPage && !_isAuctionPath(path)) {
       return;
     }
     final eligibility = service.eligibility.value;
@@ -268,6 +272,14 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     // Square connected, in-person scope, token good. That is precisely "the
     // account is connected and ready, and the only thing missing is this
     // phone", which is the one state this modal has anything to say about.
+    //
+    // Kept even though the page has now answered the same question better,
+    // because it answers a different half of it: the ribbon knows the auction
+    // can take a card, this knows *this device's* operator was issued live
+    // credentials. A null here is usually a race — the warm-up fetch hasn't
+    // landed yet on a cold start straight onto an auction page — and it costs
+    // one impression, not the feature: nothing is claimed, the ribbon fires on
+    // every admin auction page, and the next one offers.
     if (eligibility == null || !eligibility.canCharge) {
       return;
     }
@@ -297,19 +309,6 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       await context.push('/tap-to-pay');
     }
   }
-
-  /// Whether this page is an auction the operator is running, which is where
-  /// the website already puts its own Square banner (`auction_ribbon.html`).
-  ///
-  /// A URL test is a stand-in, not the answer. The app cannot tell an auction
-  /// the user *administers* from one they are bidding in, and it has no way to
-  /// know whether the site is showing its Square card on this page — the server
-  /// does, which is why `tapToPayOffer` exists and is the route that should end
-  /// up carrying this. Until the template calls it, this at least confines an
-  /// unprompted modal to the part of the site an organizer is organizing in:
-  /// combined with `canCharge`, the person seeing it is an admin of an auction
-  /// with a live Square account, standing on an auction page.
-  static bool _isAuctionPath(String path) => path.startsWith('/auctions/');
 
   /// Bring up push (FCM) from the deployment config, then — if a token resulted
   /// — re-register the device so the backend gets the token (the login-time
@@ -447,14 +446,14 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       // Tap to Pay's awareness moment, offered from the page that knows it is
       // worth offering — the auction ribbon's Square card, which is the only
       // place that can tell "this user runs this auction and its Square account
-      // is connected" (BACKEND_SPEC.md Part TTP-6). The app's own rule is a
-      // URL prefix and can only ever be an approximation of that.
+      // is connected" (`Auction.offers_tap_to_pay`). This is the only caller;
+      // the app no longer guesses from the URL.
       //   tapToPayOffer() → {offered}
       ..addJavaScriptHandler(
         handlerName: 'tapToPayOffer',
         callback: (List<dynamic> args) async {
           final before = _bannerGeneration;
-          await _maybeOfferTapToPay('', _navGeneration, fromPage: true);
+          await _maybeOfferTapToPay(_navGeneration);
           return {'offered': _bannerGeneration != before};
         },
       )
@@ -1550,10 +1549,6 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     final generation = _navGeneration;
     unawaited(_maybeOfferLocation(url.path, generation));
     unawaited(_maybeOfferPushForPath(url.path, generation));
-    // Tap to Pay's awareness moment, on the auction pages an organizer manages
-    // — never "whatever page the merchant happens to land on", which is how it
-    // turned up unannounced over a lot listing.
-    unawaited(_maybeOfferTapToPay(url.path, generation, fromPage: false));
     if (url.host == Uri.parse(EnvironmentConfig.webBaseUrl).host) {
       _rememberPage(url);
     }

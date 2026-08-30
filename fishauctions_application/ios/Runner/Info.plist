@@ -178,14 +178,27 @@
 	     own: without the associated-domains entitlement no universal link is
 	     ever delivered, and the value only changes what happens to one that is.
 
-	     The missing half is `com.apple.developer.associated-domains` with
-	     `applinks:auction.fish` in Runner.entitlements. It is NOT added here
-	     yet, and the order matters: like Sign in with Apple it is self-serve,
-	     but the capability has to be enabled on the App ID *first* or cloud
-	     signing can't build a profile that carries it and every Release /
-	     TestFlight export fails. Enable Associated Domains on the App ID, get
-	     the site serving /.well-known/apple-app-site-association
-	     (BACKEND_SPEC.md Part LINKS), then add the entitlement key. -->
+	     Universal Links are OFF on purpose, the same product decision as the
+	     commented-out App Links filter in AndroidManifest.xml: claiming the
+	     domain takes auction.fish links away from the browser for everyone
+	     with the app installed. The missing half is
+	     `com.apple.developer.associated-domains` with `applinks:auction.fish`
+	     in Runner.entitlements (and `applinks:staging.auction.fish` for the
+	     staging build).
+
+	     THE ORDER IS NOT REVERSIBLE FROM HERE, so when it is switched on:
+	       1. Enable Associated Domains on the App ID in Certificates,
+	          Identifiers and Profiles. Like Sign in with Apple this is
+	          self-serve, but it must exist on the App ID *first* or cloud
+	          signing cannot build a profile that carries the entitlement and
+	          every Release / TestFlight export fails, exactly the way adding
+	          the Tap to Pay entitlement early did.
+	       2. Set IOS_APP_LINKS on the deployment ("TEAMID.bundle.id", comma
+	          separated) so /.well-known/apple-app-site-association actually
+	          serves. Unconfigured is a 404 by design, and Apple caches what it
+	          fetches, so serving the file before the entitlement exists is the
+	          cheap order.
+	       3. Only then add the entitlement key to Runner.entitlements. -->
 	<key>FlutterDeepLinkingEnabled</key>
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>

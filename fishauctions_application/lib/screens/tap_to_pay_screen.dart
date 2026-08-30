@@ -51,6 +51,14 @@ class _TapToPayScreenState extends ConsumerState<TapToPayScreen> {
   /// and the user gets a spinner instead of a dead press.
   bool _enabling = false;
 
+  /// Why Apple's education sheet last failed to appear, or null.
+  ///
+  /// From iOS 18 requirement 4.1 makes that sheet mandatory, so falling back to
+  /// the text below is a defect there rather than the graceful path it is on
+  /// iOS 17 — and the two are indistinguishable to anyone looking at the
+  /// screen. Shown so they aren't.
+  String? _educationError;
+
   @override
   void initState() {
     super.initState();
@@ -118,11 +126,15 @@ class _TapToPayScreenState extends ConsumerState<TapToPayScreen> {
   /// Apple's education sheet, with a text fallback for iOS 17 and earlier.
   Future<void> _showEducation() async {
     if (await _service.presentEducation()) {
+      if (mounted && _educationError != null) {
+        setState(() => _educationError = null);
+      }
       return;
     }
     if (!mounted) {
       return;
     }
+    setState(() => _educationError = _service.lastEducationError);
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
@@ -158,6 +170,17 @@ class _TapToPayScreenState extends ConsumerState<TapToPayScreen> {
                   'for a PIN.',
                   style: Theme.of(context).textTheme.bodySmall,
                 ),
+                if (_educationError != null) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    "Apple's own guide couldn't be shown on this iPhone, "
+                    'so the summary above was used instead. '
+                    'Reason: $_educationError',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: Theme.of(context).colorScheme.error,
+                    ),
+                  ),
+                ],
               ],
             ),
           ),

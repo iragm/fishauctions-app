@@ -5,12 +5,21 @@ import '../config/environment.dart';
 /// An `https://auction.fish/...` link the OS handed us — an Android App Link
 /// or an iOS Universal Link — on its way to the WebView shell.
 ///
-/// The app claims its own deployment's https links and nothing else (see the
-/// intent filter in `AndroidManifest.xml`), so every link that reaches here is
-/// a page on the site: the shell's job is to load it. There is no native route
-/// to map onto — the app is a WebView shell, and inventing an app-route table
-/// that shadowed the website's URLs would need updating every time the site
-/// grew a page.
+/// The app would claim its own deployment's https links and nothing else, so
+/// every link that reaches here is a page on the site: the shell's job is to
+/// load it. There is no native route to map onto — the app is a WebView shell,
+/// and inventing an app-route table that shadowed the website's URLs would need
+/// updating every time the site grew a page.
+///
+/// **Currently unreachable from the OS, on purpose.** The Android App Links
+/// intent filter is commented out and the iOS `associated-domains` entitlement
+/// was never added, because claiming the domain takes every `auction.fish` link
+/// away from the browser for anyone with the app installed — a product decision
+/// that is answered "not yet" (the notes in `AndroidManifest.xml` and
+/// `ios/Runner/Info.plist` carry the reasons and the order to switch it on).
+/// This side is kept whole and tested rather than deleted: it is what makes
+/// that a manifest edit instead of a feature. [webPathFor] is also the guard
+/// for any absolute URL that reaches the router by another road.
 ///
 /// Same shape as `ShortcutService`: the link is parked in [pending] and stays
 /// there until a consumer [consume]s it, so exactly one navigation happens and
