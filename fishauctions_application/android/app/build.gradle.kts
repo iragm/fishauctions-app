@@ -138,7 +138,7 @@ flutter {
 dependencies {
     // Keep in sync with the version flutter_local_notifications' own module
     // pulls (android/build.gradle) — a lower one here loses the resolution.
-    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
     // MainActivity initializes the Square SDK just-in-time (from the app id the
     // backend returns per invoice), so the app module needs the SDK on its
     // compile classpath. The square_mobile_payments_sdk plugin pulls the same
