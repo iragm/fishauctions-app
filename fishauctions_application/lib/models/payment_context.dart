@@ -19,6 +19,7 @@ class PaymentContext {
     required this.locationId,
     required this.idempotencyKey,
     required this.referenceId,
+    this.attemptId,
     this.applicationId,
   });
 
@@ -50,6 +51,10 @@ class PaymentContext {
       throw const FormatException('missing reference_id');
     }
     final currency = json['currency'] as String? ?? 'USD';
+    // Optional: a deployment that records payment attempts server-side issues
+    // one id per create call and expects it back on close/confirm. Absent on
+    // older backends, where the app derives its own — see `attemptId`.
+    final rawAttemptId = json['attempt_id'] as String?;
     return PaymentContext(
       amountCents: _toMinorUnits(amount, currency),
       amountDisplay: amount,
@@ -59,6 +64,9 @@ class PaymentContext {
       idempotencyKey: key,
       referenceId: referenceId,
       applicationId: applicationId,
+      attemptId: (rawAttemptId == null || rawAttemptId.isEmpty)
+          ? null
+          : rawAttemptId,
     );
   }
 
@@ -70,6 +78,18 @@ class PaymentContext {
   final String idempotencyKey;
   final String referenceId;
   final String? applicationId;
+
+  /// The server-recorded id for *this* charge attempt, or null on a backend
+  /// that doesn't track them.
+  ///
+  /// Square's `paymentAttemptId` must be unique per attempt — reusing one is
+  /// rejected outright, which is a different contract from the Payments API's
+  /// `idempotency_key` that [idempotencyKey] is named after. When the server
+  /// issues this, it is also the handle for closing the attempt afterwards, so
+  /// a declined card doesn't leave a record open and block the retry. When it
+  /// doesn't, the sheet derives a per-attempt id locally and the server learns
+  /// nothing. `BACKEND_SPEC.md` Part TTP-10.
+  final String? attemptId;
 
   /// Human label for the charge (e.g. `$15.00`), shown in the tap sheet so the
   /// cashier can confirm the amount before the card touches the device. Uses a

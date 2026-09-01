@@ -142,11 +142,27 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
     // Starting over is only safe when no charge is in flight.
     //
     // The in-memory `_captureOutstanding` guard below protects retries within
-    // this sheet instance. The cross-instance backstop (sheet recreated, or the
-    // process is killed mid-tap) is the backend's idempotency key: it is
-    // derived from the invoice pk, so a brand-new create returns the *same*
-    // key, which we pass to Square as the paymentAttemptId — Square then
-    // de-dupes and the card is never charged twice for one invoice.
+    // this sheet instance.
+    //
+    // It used to claim a cross-instance backstop as well: the backend's
+    // idempotency key is derived from the invoice pk, so every create returns
+    // the same string, and passing that to Square as the paymentAttemptId was
+    // supposed to make Square de-dupe. **Square does not de-dupe an attempt
+    // id — it refuses it**, with `payment_attempt_id_reused`, and that is a
+    // different Square concept from the Payments API's server-side
+    // `idempotency_key`, which does collapse duplicates. The visible cost was
+    // total: a declined card is routine, the retry reused the id, and the
+    // second tap died inside Square's own UI with "contact the developer of
+    // this app". So the feature failed exactly when it was needed.
+    //
+    // Attempt ids are now per attempt (see `_freshAttemptId`). What that gives
+    // up is real and worth naming: a charge captured on-device whose confirm
+    // never ran (crash, network) leaves the invoice unpaid, and a later tap can
+    // now charge a second time where before it would have been refused. That
+    // refusal was indiscriminate rather than principled — it could not tell
+    // "you already charged this" from "the last card was declined" — but it
+    // did sometimes stop a double charge. The durable fix is a server-side
+    // attempt record; specced as `BACKEND_SPEC.md` Part TTP-10.
     _capturedPaymentId = null;
     _captureOutstanding = false;
     _stranded = false;
@@ -318,7 +334,8 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
         result = await square.charge(
           amountCents: ctx.amountCents,
           currencyCode: ctx.currency,
-          paymentAttemptId: ctx.idempotencyKey,
+          paymentAttemptId:
+              ctx.attemptId ?? _freshAttemptId(ctx.idempotencyKey),
           note: 'Invoice #${widget.invoicePk}',
           // Must be the backend-issued reference_id verbatim — confirm rejects
           // the charge if Square's reference_id doesn't match.
@@ -350,6 +367,14 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
 
       await _confirmCaptured();
     } on PaymentError catch (e) {
+      // Reaching this catch means nothing was captured — a capture assigns
+      // `_capturedPaymentId` before anything can throw — so the attempt record
+      // can be closed unconditionally here.
+      unawaited(
+        _closeAttempt(
+          e.code == PaymentErrorCode.canceled ? 'canceled' : 'failed',
+        ),
+      );
       if (e.code == PaymentErrorCode.canceled) {
         // User backed out of the Square prompt — dismiss the sheet so the
         // page's own "Tap to Pay" button can relaunch. Nothing was charged.
@@ -382,16 +407,51 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
         );
         return;
       }
-      // Everything left is the card/issuer refusing, or the read timing out.
-      // Requirement 5.9 wants that outcome stated as an outcome — the customer
-      // was not charged — rather than as an app error, and 5.10 wants a receipt
-      // offered for it too, which `_declined` switches on.
+      if (e.code == PaymentErrorCode.paymentAttemptIdReused) {
+        // Square refuses a repeated attempt id. Attempt ids are per attempt
+        // now, so seeing this means a genuine duplicate rather than the old
+        // stable-key bug — and the safe reading is that an earlier tap may
+        // have gone through. Never word this as a decline: telling a cashier
+        // to ask for another card when the first one may already have been
+        // charged is the worst available answer.
+        _fail(
+          'Square has already seen this payment attempt. Nothing was charged '
+          'just now, but an earlier tap on this invoice may have gone '
+          'through — check this payment in Square before trying again.',
+        );
+        return;
+      }
+      if (e.code == PaymentErrorCode.noNetwork) {
+        _fail(
+          'No connection to Square, so the payment could not be taken. The '
+          'card was not charged. Check the connection and try again.',
+        );
+        return;
+      }
+      if (e.code == PaymentErrorCode.timeout) {
+        // 5.9 names "timed out" as its own outcome, separate from declined.
+        _declined = true;
+        _fail(
+          'The card read timed out. The card was not charged — hold the card '
+          'against the top of the phone until it confirms, and try again.',
+        );
+        return;
+      }
+      // What's left is the card or issuer refusing — or an SDK failure we
+      // can't tell apart from one, since the SDK has no "declined" code.
+      // Requirement 5.9 wants the outcome stated as an outcome rather than as
+      // an app error, and 5.10 wants a receipt offered for it, which
+      // `_declined` switches on. Worded so it is true either way: this used to
+      // assert "Payment declined" for every unrecognised code, which is how
+      // `payment_attempt_id_reused` reached a cashier as a card problem.
       _declined = true;
       _fail(
-        'Payment declined. ${e.message}\n\nThe card was not charged. Ask the '
-        'customer for another card or payment method, then try again.',
+        'The payment didn\'t go through. ${e.message}\n\nThe card was not '
+        'charged. Ask the customer for another card or payment method, then '
+        'try again.',
       );
     } on AuthorizeError catch (e) {
+      unawaited(_closeAttempt('failed'));
       if (e.code ==
           AuthorizationErrorCode.locationNotActivatedForCardProcessing) {
         // Same underlying cause as the pre-flight cardProcessingActivated
@@ -406,6 +466,7 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
       }
       _fail('Could not start the card reader: ${e.message}');
     } on Exception catch (e) {
+      unawaited(_closeAttempt('failed'));
       // Any other SDK/platform failure — never leave the spinner hanging.
       _fail('Payment could not be completed: $e');
     }
@@ -548,6 +609,59 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
       );
     }
   }
+
+  /// Tell the backend an attempt ended without charging anything.
+  ///
+  /// **Load-bearing for retries.** Once the server refuses a `create` while an
+  /// attempt is still open — which is the whole point of tracking them, since
+  /// an attempt left open is how a crashed capture is detected — a declined
+  /// card would otherwise block the very next tap. Declines are routine, so
+  /// without this the durable fix would recreate the bug it replaces.
+  ///
+  /// Best effort, and deliberately never surfaced: a bookkeeping call failing
+  /// must not fail the cashier's payment, and the server ages out stale
+  /// attempts anyway. No-ops on a backend that issues no
+  /// [PaymentContext.attemptId].
+  Future<void> _closeAttempt(String outcome) async {
+    final id = _ctx?.attemptId;
+    if (id == null || _attemptClosed) {
+      return;
+    }
+    _attemptClosed = true;
+    try {
+      await ApiService.instance.dio.post<Map<String, dynamic>>(
+        'payments/attempt/close/',
+        data: {'attempt_id': id, 'outcome': outcome},
+        options: Options(validateStatus: (s) => s != null && s < 500),
+      );
+    } on DioException catch (_) {
+      // Offline, or an older backend with no such endpoint. Either way the
+      // server's own expiry is the backstop.
+    }
+  }
+
+  /// A per-attempt id for Square's SDK, derived from the backend's key.
+  ///
+  /// `paymentAttemptId` must be unique per attempt — a repeat is rejected with
+  /// `payment_attempt_id_reused`, which surfaces inside Square's own UI as
+  /// "something went wrong, please contact the developer of this app". It is
+  /// **not** the Payments API's `idempotency_key`, despite the backend deriving
+  /// this value as one; the two names describe opposite behaviours.
+  ///
+  /// Derived rather than random so a charge is still traceable to its invoice
+  /// in Square's dashboard, and clamped to Square's 45-character limit by
+  /// trimming the invoice part rather than the nonce, since the nonce is the
+  /// half that has to stay intact.
+  static String _freshAttemptId(String base) {
+    final nonce = DateTime.now().microsecondsSinceEpoch.toRadixString(36);
+    const limit = 45;
+    final room = limit - nonce.length - 1;
+    final head = base.length > room ? base.substring(0, room) : base;
+    return '$head-$nonce';
+  }
+
+  /// Whether [_closeAttempt] has already run for this attempt.
+  bool _attemptClosed = false;
 
   void _fail(String message) {
     if (!mounted) {

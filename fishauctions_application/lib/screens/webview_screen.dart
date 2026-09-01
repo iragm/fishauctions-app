@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_web_auth_2/flutter_web_auth_2.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:go_router/go_router.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -2357,17 +2358,105 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     // with Google" still works. Google blocks its sign-in inside embedded
     // WebViews, so loading this in the shell would have traded one failure for
     // another.
-    final mode = _isSellerOnboarding(uri)
+    final onboarding = _isSellerOnboarding(uri);
+    var target = uri;
+    // **The browser view has Safari's cookies, not ours** — which is the whole
+    // reason it was chosen (a merchant whose Square login is Google SSO needs
+    // Safari's jar), and is also why our *own* half of the flow can't run in it
+    // unaided. `/square/connect/` is `LoginRequiredMixin` and the Square
+    // callback lands back here too, so a browser view with no `sessionid`
+    // bounces the merchant to the web login form — mid-OAuth, with the full
+    // site chrome, inside what looks to them like a broken handoff. Found by
+    // recording the onboarding video, not by reading the code.
+    //
+    // So bridge the session in the same way the shell bootstraps its own
+    // WebView: mint a single-use handoff token and let the consume view set the
+    // cookie server-side, with the connect URL as `next`. Only for our host —
+    // Square's own domains neither need nor should see it. A null handoff (the
+    // endpoint unavailable) falls through to the bare URL, which is exactly
+    // today's behaviour rather than a new failure.
+    if (onboarding &&
+        uri.host == Uri.parse(EnvironmentConfig.webBaseUrl).host) {
+      final next = uri.hasQuery ? '${uri.path}?${uri.query}' : uri.path;
+      final handoff = await AuthService.instance.createWebSessionHandoffUrl(
+        next: next,
+      );
+      if (handoff != null && handoff.isNotEmpty) {
+        target = Uri.parse(handoff);
+      }
+    }
+    if (onboarding && await _runSellerOnboarding(target)) {
+      return;
+    }
+    final mode = onboarding
         ? LaunchMode.inAppBrowserView
         : LaunchMode.externalApplication;
     try {
-      final launched = await launchUrl(uri, mode: mode);
+      final launched = await launchUrl(target, mode: mode);
       if (!launched) {
         _showSnack('Couldn\'t open the link.');
       }
     } on Object {
       _showSnack('Couldn\'t open the link.');
     }
+  }
+
+  /// The callback scheme that ends a seller-onboarding session.
+  ///
+  /// Deliberately **not** `fishauctions://`. That scheme is intentionally
+  /// unregistered with the OS — its links only ever appear inside our own pages
+  /// and are caught by `shouldOverrideUrlLoading`, so registering it would let
+  /// any app, or any web page in any browser, drive the shell's native flows.
+  /// A separate scheme keeps that property while giving the auth session
+  /// something to match on. Nothing but a pending session can act on it, and on
+  /// Android the plugin uses Chrome's Auth Tab, which returns the result to the
+  /// launching activity rather than through an intent filter — so this is not
+  /// registered anywhere either.
+  static const _oauthCallbackScheme = 'fishauctions-oauth';
+
+  /// Runs seller onboarding in an authentication session, returning whether it
+  /// handled the flow.
+  ///
+  /// `ASWebAuthenticationSession` is what an OAuth round trip is supposed to
+  /// use: it presents the same Safari-backed view as before — same cookie jar,
+  /// so a merchant whose Square login is Google SSO still works — but it
+  /// *dismisses itself* when the redirect matches [_oauthCallbackScheme] and
+  /// hands control back. A plain browser view can do neither, which is why the
+  /// flow used to end with the merchant parked on auction.fish wondering what
+  /// to press.
+  ///
+  /// **Safe to ship before the backend redirects.** Until `BACKEND_SPEC.md`
+  /// Part TTP-7 lands, the callback page has no `fishauctions-oauth://` redirect
+  /// to emit, so the session ends the only other way it can: the merchant taps
+  /// Done and the platform reports a cancellation. That is treated as a normal
+  /// finish rather than an error, because from here the two are
+  /// indistinguishable and both mean "they came back" — the credentials may
+  /// have changed either way, so reload and re-warm regardless.
+  ///
+  /// Returns false only when the session could not start at all (an older
+  /// platform, a build without the plugin), leaving the caller to fall through
+  /// to the browser view it used before.
+  Future<bool> _runSellerOnboarding(Uri url) async {
+    try {
+      await FlutterWebAuth2.authenticate(
+        url: url.toString(),
+        callbackUrlScheme: _oauthCallbackScheme,
+      );
+    } on PlatformException catch (e) {
+      if (e.code != 'CANCELED') {
+        return false;
+      }
+    } on Object {
+      return false;
+    }
+    if (!mounted) {
+      return true;
+    }
+    // The merchant may have just connected Square, so the page behind this is
+    // stale and the reader's credentials may be new.
+    unawaited(_warmSquare());
+    unawaited(_controller?.reload() ?? Future<void>.value());
+    return true;
   }
 
   /// Whether [uri] is a payment-seller connect/OAuth destination — Square's or

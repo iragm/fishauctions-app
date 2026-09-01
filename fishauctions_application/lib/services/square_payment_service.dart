@@ -189,8 +189,11 @@ class SquarePaymentService {
   /// Runs a Tap to Pay charge for [amountCents] (minor units), in
   /// [currencyCode].
   ///
-  /// [paymentAttemptId] must be stable across retries of the same logical
-  /// payment so Square de-duplicates — pass the backend's idempotency key.
+  /// [paymentAttemptId] must be **unique per attempt**. Square rejects a reused
+  /// one outright with `payment_attempt_id_reused` — it does not de-duplicate,
+  /// which is what the Payments API's server-side `idempotency_key` does, and
+  /// conflating the two is what made every retry after a declined card fail
+  /// inside Square's own UI. See `PaymentSheet._freshAttemptId`.
   ///
   /// Returns on a captured payment. Throws [PaymentError] on cancel/failure
   /// (check `code == PaymentErrorCode.canceled` to detect a user cancel).

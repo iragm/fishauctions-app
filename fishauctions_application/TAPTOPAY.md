@@ -74,8 +74,8 @@ before any Tap to Pay screenshot or recording.
 | # | Req | Status |
 |---|---|---|
 | 2.1 | New user can discover account creation + Tap to Pay | **Done** — native signup, then the awareness modal and drawer entry |
-| 2.2 | Fully digital onboarding, completed in-app on iPhone | **App done; blocked on TTP-1.** The app now routes Square OAuth into an in-app browser view, but the website still hides the connect links from the app and tells the merchant to open a browser. **This is the most likely rejection reason as it stands** |
-| 2.3 | Onboarding under 15 minutes | **Done** — Square OAuth; seconds |
+| 2.2 | Fully digital onboarding, completed in-app on iPhone | **Three faults, all found by filming it; one fixed.** *Fixed 2026-09-01:* the browser view carries Safari's cookies, not ours, so `/square/connect/` bounced the merchant to the web login form mid-flow — the app now opens it through an `auth/web-session/` handoff so the browser view has a real session. *Open:* the flow still ends by stranding the merchant on auction.fish with only the system Done button (`BACKEND_SPEC.md` Part TTP-7, revised — it was recorded as cosmetic and is not). *Open:* a new organizer cannot start it at all until a site admin trusts them, see "Declared: the trust gate" below |
+| 2.3 | Onboarding under 15 minutes | **Seconds once started**, but end to end it includes waiting for a human to press "Trust this user". Declared below rather than claimed as a clean pass |
 
 ## 3. Enabling Tap to Pay on iPhone
 
@@ -130,6 +130,45 @@ before any Tap to Pay screenshot or recording.
 | 6.1 | Launch email from the toolkit template | **TTP-5** — backend/comms |
 | 6.2 | In-app splash screen from the "Hero in-app banner" | **App done**, but the artwork/copy must be swapped for the toolkit's before launch marketing |
 | 6.3 | Push notification using the toolkit's value-proposition copy | **TTP-5** — backend/comms |
+
+---
+
+## Declared: the trust gate on accepting payments
+
+`UserData.is_trusted` gates promoting an auction, **accepting payments**, and
+sending invoice emails, and a superuser turns it on with a "Trust this user"
+button on the auction ribbon. Separately `UserData.square_enabled` (defaulted
+from `SQUARE_ENABLED_FOR_USERS`, itself `False`) gates the Square connect entry
+points. Neither is set for a brand-new account.
+
+**Keep it.** A marketplace that lets anyone who signs up start an OAuth flow to
+collect money from strangers has a fraud problem, not a compliance win, and
+Apple's own 3.8/3.8.1 contemplate exactly this shape of control — an
+authorization model where an unauthorized user is told to contact an admin.
+Platform-side risk review before enabling payment acceptance is ordinary; the
+2.x requirements are aimed at legacy merchant acquiring (fax a form, wait three
+days, receive a terminal), not at KYC.
+
+**Two things about it are worth being straight about, and neither is its
+existence.**
+
+1. **2.3's "under 15 minutes" is not a clean pass** while a human has to press a
+   button, so the row above says so rather than claiming seconds. Say it in the
+   submission: onboarding is seconds of merchant effort, gated by a review step
+   the platform performs. Declaring it is cheaper than having a reviewer find it.
+2. **The gate is currently invisible, which is the part Apple would actually
+   object to.** With `square_enabled` false there is no "pending approval"
+   anywhere: the Preferences menu has no Square item, the auction banner doesn't
+   render, and `SquareConnectView` only errors if you reach the URL by hand. The
+   merchant meets a dead end and concludes the feature doesn't exist. The site
+   already solves this for *promotion* — an untrusted creator gets
+   `untrusted_message` plus a "Contact us and request access" button — and Square
+   should do the same. Specced as `BACKEND_SPEC.md` Part TTP-9.
+
+**Do not disable it to film the videos.** Pre-approve the test account instead,
+and give video 1 one line of narration acknowledging the review step. Filming the
+approval itself would make a human in the loop the centrepiece of the onboarding
+video, which invites the scrutiny the written declaration handles better.
 
 ---
 
@@ -490,11 +529,14 @@ not run in the Simulator.
 2. Side menu (top left) -> "Tap to Pay". This is the setup and education screen:
    terms acceptance, Apple's education sheet, "How to take a payment", and the
    reader configuration progress indicator.
-3. To take a payment: side menu -> <DEMO AUCTION NAME> -> Invoices -> open any
-   unpaid invoice -> "Tap to Pay on iPhone", at the top of the payment options.
-   Several $1.00 invoices are waiting (Square's minimum charge) so the flow can
-   be repeated; an invoice is marked paid once it is charged. Charges are real
-   and we refund them, so please charge as often as you need to.
+3. To take a payment: open <DEMO AUCTION NAME> -> "Quick checkout" -> choose
+   <DEMO BIDDER NAME>. Their invoice loads with "Tap to Pay on iPhone" at the
+   top of the payment options. Several $1.00 invoices are waiting (Square's
+   minimum charge) so the flow can be repeated; an invoice is marked paid once
+   it is charged. Charges are real and we refund them, so please charge as often
+   as you need to.
+   Note the ordinary Invoices list is not the route -- the card reader is on the
+   quick checkout screen, which is the in-person checkout desk.
 4. The full-screen awareness modal appears once per device, on an auction page,
    for an organizer whose club has Square connected.
 

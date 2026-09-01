@@ -44,6 +44,7 @@ dependencies:
   # Secure token storage
   flutter_secure_storage: ^11.0.0
   # Serialization
+  flutter_web_auth_2: ^5.1.0
   freezed_annotation: ^3.1.0
   # Device location → latitude/longitude cookies for the WebView (auction/lot
   # distances). Replaces the browser geolocation prompt the web UI uses.
