@@ -236,6 +236,15 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
         accessToken: ctx.accessToken,
         locationId: ctx.locationId,
       );
+      // Authorization is what makes a Tap to Pay reader exist, so this is the
+      // first moment there is anything to listen to. The launch/resume warm-up
+      // normally got here first, but it bails before subscribing whenever the
+      // backend withheld credentials (endpoint 404, `canCharge` false, a failed
+      // fetch) — and the charge path authorizes anyway. Without this the reader
+      // status stays `unknown` forever and `_awaitReaderReady` below burns its
+      // full timeout on "Checking Tap to Pay…" before every single charge.
+      // Idempotent.
+      TapToPayService.instance.listenToReader();
 
       // A location that hasn't finished Square's card-processing activation
       // is a separate prerequisite from having a production application id —

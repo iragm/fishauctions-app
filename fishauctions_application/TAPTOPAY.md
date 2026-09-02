@@ -463,6 +463,63 @@ charge path produces far better diagnostics" — true only while the charge path
 still had catchable failures. Once Square refuses to arm the reader there is no
 `PaymentError` at all, and that string is the only account of why.
 
+### Solved: iOS passed Square a prompt with no payment methods (2026-09-02)
+
+**The cause was never the entitlements, App Attest, or the merchant account.**
+Every one of those was correct the whole time. On an iPhone 12 / iOS 26.6.1 the
+on-device diagnostics reported:
+
+```
+authorized: true      environment: production
+device capable: true  apple account linked: true
+readers (1):  tapToPay · ready · name=Tap to Pay on iPhone · id=0
+```
+
+The reader was **ready**, and `startPayment` still showed *"Connect hardware to
+take card payments"*. That string is
+`MobilePaymentsSDKUIPaymentPromptScreenConnectHardwarePromptTitle` — the
+**payment prompt's empty state**, not a reader error. The prompt was being
+built with no payment methods at all.
+
+On iOS, Tap to Pay is a member of `AdditionalPaymentMethods`, alongside
+`.keyed` and `.cash` — verified against the shipped SquareMobilePaymentsSDK
+2.6.0 binary, which exports
+`AdditionalPaymentMethods.tapToPay`
+(`_$s20MobilePaymentsSDKAPI24AdditionalPaymentMethodsC8tapToPayACvgZ`). It is
+*not* an implicit primary method. Plugin 2026.8.1's iOS mapper also stopped
+falling back to `.all`:
+
+```swift
+// An empty (or missing) list must result in no additional methods being shown,
+// so we intentionally avoid falling back to `.all`.
+let methods = methodNames.compactMap { getAdditionalPaymentMethod(from: $0) }
+return PromptParameters(mode: mode, additionalMethods: AdditionalPaymentMethods(methods))
+```
+
+The app passed `additionalPaymentMethods: []` — on a comment asserting the
+field was a no-op and that the enum "only has KEYED and CASH", which was true
+of plugin 2026.7.2 and of Android, and false for iOS here. So the prompt got an
+empty option set and had nothing to offer.
+
+**Android was never affected**, which is why it has worked throughout: its
+`PaymentMapper.getPromptParameters` builds `PromptParameters(mode = DEFAULT)`
+and never reads the list.
+
+The fix is `SquarePaymentService._startPaymentIOS`. The plugin's Dart
+`AdditionalPaymentMethodType` enum has only `keyed` and `cash`, so the typed
+API cannot express `tapToPay`, but the iOS mapper accepts the string — so iOS
+calls the plugin's own channel directly with the payload the plugin builds plus
+the one value it can't spell. Remove it when the plugin's enum gains `tapToPay`.
+
+Two things this cost, worth remembering:
+
+- **A stale comment asserting a field was inert stopped anyone looking at it.**
+  It was accurate when written and became wrong on a dependency bump, and
+  nothing re-checks a comment.
+- **`getReaders()` was never called until the diagnostics landed.** The single
+  fact that reframed the whole investigation — reader `ready` — was one SDK
+  call away for the entire time it was blamed on attestation.
+
 ## Before submitting
 
 1. **Land TTP-1, TTP-2, TTP-3** (`BACKEND_SPEC.md`). TTP-1 and TTP-2 are

@@ -20,10 +20,16 @@ enum TapToPayReaderStatus {
   /// Ready to take a tap.
   ready,
 
-  /// Can't be used right now — the reason is deliberately not carried here,
-  /// because the charge path produces far better diagnostics than a reader
-  /// status code (NFC off, developer mode, location not activated, terms not
-  /// accepted). The settings screen just says "not ready" and points at setup.
+  /// Can't be used right now. The reason is carried alongside rather than in
+  /// here — `TapToPayService.lastUnavailableReason` and, authoritatively,
+  /// `blockingReaderReason()` off the reader list — because this enum is the
+  /// *progress indicator's* vocabulary (Apple's 3.9.1/5.7) and has to stay
+  /// small. This used to say the reason wasn't worth keeping at all, on the
+  /// grounds that the charge path produced better diagnostics; that held only
+  /// while the charge path still had catchable failures. Once Square declines
+  /// to arm the reader there is no PaymentError and no text — just the native
+  /// "connect hardware to take card payments" screen — and the discarded
+  /// reason was the only account of why.
   unavailable;
 
   bool get isReady => this == TapToPayReaderStatus.ready;

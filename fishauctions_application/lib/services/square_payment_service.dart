@@ -1,8 +1,15 @@
 import 'dart:io' show Platform;
 
+import 'package:flutter/services.dart' show MethodChannel, PlatformException;
 import 'package:logger/logger.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:square_mobile_payments_sdk/square_mobile_payments_sdk.dart';
+// The plugin's own deep Map<Object?,Object?> → Map<String,Object?> cast, which
+// `Payment.fromJson` needs for its nested Money/CardPaymentDetails maps. Not
+// re-exported from the package root, but this is a public path (not `src/`),
+// and copying a recursive cast to avoid one import would be the worse trade.
+import 'package:square_mobile_payments_sdk/square_mobile_payments_sdk_method_channel.dart'
+    show castToMap;
 
 import '../utils/platform_bridge.dart';
 
@@ -222,45 +229,94 @@ class SquarePaymentService {
     String? note,
     String? referenceId,
   }) async {
-    final payment = await _sdk.paymentManager.startPayment(
-      PaymentParameters(
-        amountMoney: Money(
-          amount: amountCents,
-          currencyCode: _currencyFor(currencyCode),
-        ),
-        // ProcessingMode.autoDetect (0): process online when connected.
-        processingMode: ProcessingMode.autoDetect.index,
-        paymentAttemptId: paymentAttemptId,
-        autocomplete: true,
-        note: note,
-        referenceId: referenceId,
+    final parameters = PaymentParameters(
+      amountMoney: Money(
+        amount: amountCents,
+        currencyCode: _currencyFor(currencyCode),
       ),
-      // NOTE: `additionalPaymentMethods` is currently a no-op — the Flutter
-      // plugin (2026.7.2) drops it on both platforms: Android's
-      // `PaymentMapper.getPromptParameters` builds `PromptParameters(mode =
-      // DEFAULT)` and never reads the list (whose Kotlin default is
-      // `AdditionalPaymentMethod.Companion.allPaymentMethods`), and iOS
-      // hardcodes `additionalMethods: .all`. So the prompt always offers the
-      // full set of *extra* methods regardless of what's passed here. Keep
-      // the empty list to record intent (Tap to Pay only), but don't read it
-      // as a guarantee that keyed/cash entry is hidden.
-      //
-      // Contactless is NOT something to add to this list: its element type is
-      // `AdditionalPaymentMethod.Type`, whose only values are KEYED and CASH.
-      // Contactless (tap) is the prompt's *primary* method — the separate
-      // `CardEntryMethod.CONTACTLESS` enum lives in the SDK's `cardreader`
-      // package and is read-only output
-      // (`ReaderInfo.supportedCardEntryMethods`,
-      // `CardPaymentDetails.entryMethod`), never a prompt input. A missing tap
-      // option means NFC off / location unactivated / no Tap to Pay access —
-      // see the pre-flight checks in `payment_sheet.dart`.
-      const PromptParameters(
-        additionalPaymentMethods: [],
-        mode: PromptMode.defaultMode,
-      ),
+      // ProcessingMode.autoDetect (0): process online when connected.
+      processingMode: ProcessingMode.autoDetect.index,
+      paymentAttemptId: paymentAttemptId,
+      autocomplete: true,
+      note: note,
+      referenceId: referenceId,
     );
+    final payment = Platform.isIOS
+        ? await _startPaymentIOS(parameters)
+        : await _sdk.paymentManager.startPayment(
+            parameters,
+            // Android's `PaymentMapper.getPromptParameters` builds
+            // `PromptParameters(mode = DEFAULT)` and never reads the list, so
+            // this records intent (Tap to Pay only) and changes nothing. Do
+            // not read it as a guarantee that keyed/cash entry is hidden.
+            const PromptParameters(
+              additionalPaymentMethods: [],
+              mode: PromptMode.defaultMode,
+            ),
+          );
     return SquareChargeResult(paymentId: payment.id);
   }
+
+  /// `startPayment` on iOS, going around the plugin's typed API to put
+  /// `tapToPay` in the prompt's method set.
+  ///
+  /// **This is what made every iOS charge dead-end on Square's "Connect
+  /// hardware to take card payments" screen** with a reader reporting `ready`
+  /// (measured on an iPhone 12 / iOS 26.6.1, 2026-09-02).
+  ///
+  /// On iOS, Tap to Pay is not the prompt's implicit primary method — it is a
+  /// member of `AdditionalPaymentMethods`, alongside `.keyed` and `.cash`
+  /// (confirmed in the shipped SquareMobilePaymentsSDK 2.6.0 binary, which
+  /// exports `AdditionalPaymentMethods.tapToPay`). Plugin 2026.8.1's iOS
+  /// mapper stopped falling back to `.all` — *"An empty (or missing) list must
+  /// result in no additional methods being shown, so we intentionally avoid
+  /// falling back to `.all`"* — so the empty list this app passed produced a
+  /// prompt with **no payment methods at all**, whose empty state is that
+  /// screen. Android is unaffected: its mapper ignores the list entirely,
+  /// which is exactly why Android has worked throughout.
+  ///
+  /// The plugin's Dart `AdditionalPaymentMethodType` enum has only `keyed` and
+  /// `cash`, so the typed API cannot express `tapToPay` — but its iOS mapper
+  /// accepts the string. Hence the direct channel call: same channel, same
+  /// method, same payload the plugin builds, with one value it can't spell.
+  /// Revisit when the plugin's enum gains `tapToPay`.
+  Future<Payment> _startPaymentIOS(PaymentParameters parameters) async {
+    final payload = <String, dynamic>{
+      'paymentParameters': {
+        ...parameters.toJson(),
+        // The plugin re-encodes Money by hand because `toJson` emits the
+        // currency as an enum name the native mapper doesn't read; mirrored
+        // here so the two payloads stay identical.
+        'amountMoney': {
+          'amount': parameters.amountMoney.amount,
+          'currencyCode': parameters.amountMoney.currencyCode.name,
+        },
+        'appFeeMoney': null,
+        'tipMoney': null,
+      },
+      'promptParameters': {
+        'additionalPaymentMethods': ['tapToPay'],
+        'mode': 'defaultMode',
+      },
+    };
+    try {
+      final response = await _channel.invokeMethod<Map<Object?, Object?>>(
+        'startPayment',
+        payload,
+      );
+      if (response == null) {
+        throw PaymentError('unexpected', 'startPayment() returned null');
+      }
+      return Payment.fromJson(castToMap(response));
+    } on PlatformException catch (e) {
+      // Re-wrapped so callers keep catching PaymentError and reading
+      // `code == PaymentErrorCode.canceled`, exactly as on Android.
+      throw PaymentError(e.code, e.message, e.details);
+    }
+  }
+
+  /// The plugin's own channel. Only [_startPaymentIOS] uses it.
+  static const _channel = MethodChannel('square_mobile_payments_sdk');
 
   /// Releases the current authorization (e.g. on logout).
   Future<void> deauthorize() => _sdk.authManager.deauthorize();

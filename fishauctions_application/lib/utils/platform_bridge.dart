@@ -211,11 +211,6 @@ class PlatformBridge {
   /// Presents Apple's Tap to Pay on iPhone education sheet, resolving once the
   /// user dismisses it.
   ///
-  /// Returns `presented` when it was shown, `unsupported` on iOS 17 and
-  /// earlier (and on every non-iOS platform), or `failed` if the sheet itself
-  /// errored — the caller falls back to its own explanation for anything but
-  /// `presented`. Never throws: education failing must not break the flow it's
-  /// attached to (enabling Tap to Pay).
   /// Why the last [presentTapToPayEducation] call fell back, or null if it has
   /// never failed.
   ///
@@ -225,6 +220,11 @@ class PlatformBridge {
   /// on screen, exactly like an iPhone too old to have it.
   static String? lastTapToPayEducationError;
 
+  /// Returns `presented` when it was shown, `unsupported` on iOS 17 and
+  /// earlier (and on every non-iOS platform), or `failed` if the sheet itself
+  /// errored — the caller falls back to its own explanation for anything but
+  /// `presented`. Never throws: education failing must not break the flow it's
+  /// attached to (enabling Tap to Pay).
   static Future<String> presentTapToPayEducation() async {
     if (!Platform.isIOS) {
       return 'unsupported';

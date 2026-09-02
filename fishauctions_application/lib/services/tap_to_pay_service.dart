@@ -135,7 +135,7 @@ class TapToPayService {
       if (applicationId == null || !info.canCharge) {
         return;
       }
-      _listenToReader();
+      listenToReader();
       // Deliberately no "already prepared for this location" short-circuit
       // here. `ensureAuthorized` is itself a no-op when the SDK still holds an
       // authorization for the same location — it just reads two SDK getters —
@@ -176,7 +176,17 @@ class TapToPayService {
 
   /// Subscribes to Square's reader changes so [status] tracks the reader's
   /// configuration progress. Idempotent — the shell prepares on every resume.
-  void _listenToReader() {
+  ///
+  /// Public because [prepare] is not the only path that authorizes the SDK,
+  /// and it is the *authorization* that makes a reader exist. Warm-up bails
+  /// before subscribing whenever the backend withholds credentials — the
+  /// endpoint 404ing, `canCharge` false, or a transient fetch failure — and in
+  /// every one of those cases the per-invoice charge path still authorizes and
+  /// still needs a reader. Without a subscription [status] stays
+  /// [TapToPayReaderStatus.unknown] for the life of the process, which the
+  /// payment sheet reads as "still configuring" and waits the full reader
+  /// timeout on, every single charge, showing "Checking Tap to Pay…".
+  void listenToReader() {
     if (_readerCallback != null) {
       return;
     }
@@ -259,6 +269,10 @@ class TapToPayService {
   /// same block reaches `flutter logs` / `idevicesyslog` on a build with no
   /// debugger attached.
   Future<TapToPayDiagnostics> diagnose({String? applicationId}) async {
+    // The callback is what fills `lastUnavailableReason`, and a diagnostics
+    // run is often the first thing that happens on a device the warm-up
+    // declined to subscribe on. Cheap and idempotent.
+    listenToReader();
     final errors = <String>[];
     Future<T?> probe<T>(String label, Future<T> Function() read) async {
       try {
