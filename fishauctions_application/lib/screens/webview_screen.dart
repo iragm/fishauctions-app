@@ -9,7 +9,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:flutter_web_auth_2/flutter_web_auth_2.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:go_router/go_router.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -33,6 +32,7 @@ import '../services/auth_service.dart';
 import '../services/bluetooth_service.dart';
 import '../services/checkin_service.dart';
 import '../services/config_service.dart';
+import '../services/connect_flow_service.dart';
 import '../services/deep_link_service.dart';
 import '../services/dictation_service.dart';
 import '../services/download_service.dart';
@@ -53,6 +53,7 @@ import '../services/shortcut_service.dart';
 import '../services/tap_to_pay_service.dart';
 import '../services/voice_command_service.dart';
 import '../utils/bi_icons.dart';
+import '../utils/connect_flows.dart';
 import '../utils/external_links.dart';
 import '../utils/platform_bridge.dart';
 import '../widgets/payment_sheet.dart';
@@ -143,8 +144,9 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   // the first load boots through the backend handoff when the WebView has no
   // session cookie yet (see _initialUrl), and _reconcileWebSession repairs a
   // lapsed session when the server bounces a page to /login/. The
-  // repair is bounded to one attempt per screen lifetime so a failed/looping
-  // handoff can't spin.
+  // repair is bounded so a failed/looping handoff can't spin: one attempt per
+  // run of consecutive /login/ landings, reset by any page that renders (see
+  // _reconcileWebSession) and by a returning connect flow.
   int _handoffAttempts = 0;
 
   // Check-in nudges that could not be delivered as a tray notification (the
@@ -389,7 +391,18 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     await MenuStore.instance.ensureLoaded();
     try {
       final cfg = await ConfigService.instance.loadForCurrentUser();
-      await MenuStore.instance.adopt(cfg.menu);
+      // **Only adopt a menu the server built for this user.** The config
+      // endpoint reads the bearer token optionally: a missing or stale one is
+      // answered with 200 and the *signed-out* menu, not a 401. Adopting that
+      // would overwrite a perfectly good drawer — and persist it — leaving a
+      // signed-in user with signed-out chrome and nothing to retry, since
+      // nothing failed. `loadForCurrentUser` re-fetches on the next warm-up,
+      // by which point the token has usually been refreshed.
+      if (ConfigService.instance.configIsForCurrentUser) {
+        await MenuStore.instance.adopt(cfg.menu);
+      } else {
+        debugPrint('Config came back signed out; keeping the previous menu');
+      }
     } on Object catch (e) {
       debugPrint('Drawer menu warm-up skipped: $e');
     }
@@ -415,15 +428,29 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   /// the notification offer would tell the user notifications "aren't available
   /// on this device". Riverpod caches the failure, so re-ask on resume — by
   /// which point the user has usually fixed the network themselves.
+  ///
+  /// Also re-asks for the *menu* when config loaded fine but anonymously; see
+  /// the second branch.
   Future<void> _rewarmConfigIfFailed() async {
-    if (!ref.read(configProvider).hasError) {
+    if (ref.read(configProvider).hasError) {
+      ref.invalidate(configProvider);
+      await _warmSquare();
+      await _warmPush();
+      await _warmVoice();
+      await _warmMenu();
       return;
     }
-    ref.invalidate(configProvider);
-    await _warmSquare();
-    await _warmPush();
-    await _warmVoice();
-    await _warmMenu();
+    // The other way config can be wrong is subtler and doesn't look like a
+    // failure at all: `/api/mobile/config/` reads the bearer token optionally,
+    // so a fetch made with a stale one came back 200 with the **signed-out**
+    // menu. Nothing errored, so the branch above never fires and the drawer
+    // would stay signed-out for the life of the process. `_warmMenu` refreshes
+    // the access token before re-asking (`ConfigService._fetch`), which is the
+    // whole point of doing this on resume rather than on a timer: by now the
+    // user has usually fixed whatever the network was doing.
+    if (!ConfigService.instance.configIsForCurrentUser) {
+      await _warmMenu();
+    }
   }
 
   /// The first argument of a `callHandler(name, arg)` call, or null when the
@@ -466,6 +493,18 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       ..addJavaScriptHandler(
         handlerName: 'addToCalendar',
         callback: _onAddToCalendar,
+      )
+      // The website's own sign-out button, caught at submit time by
+      // `_webLogoutHook` so the JWT pair dies with the cookie session. Never
+      // fired by a mere visit to /logout/ — that URL is a confirmation page.
+      ..addJavaScriptHandler(
+        handlerName: 'webLogout',
+        callback: (List<dynamic> args) {
+          if (ref.read(authProvider).value != null) {
+            unawaited(_signOut());
+          }
+          return {'ok': true};
+        },
       )
       ..addJavaScriptHandler(
         handlerName: 'printerGetState',
@@ -2032,9 +2071,25 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   /// sessions (a web-form login would create a cookie session with no JWT).
   Future<void> _reconcileWebSession(Uri uri) async {
     final webHost = Uri.parse(EnvironmentConfig.webBaseUrl).host;
-    if (uri.path != '/login/' || uri.host != webHost) {
+    if (uri.host != webHost) {
       return;
     }
+    if (uri.path != '/login/') {
+      // A page that rendered is proof the cookie session works, so the next
+      // lapse is a new event rather than the same failed handoff looping.
+      // Without this reset the repair below is a once-per-screen-lifetime
+      // affair, and a shell that has been up for hours — through an OAuth
+      // detour, a suspend, a network change — would sit showing the web login
+      // form inside a signed-in app the second time a session lapsed.
+      _handoffAttempts = 0;
+      return;
+    }
+    // **Landing on /login/ is never a sign-out.** The JWT pair and the Django
+    // session cookie are independent: the cookie can lapse (it expired, it was
+    // cleared, this is a fresh WebView) while the native session is perfectly
+    // alive. So re-mint the handoff and resume the page the user was actually
+    // asking for; the web login form is never shown in-app, because a web-form
+    // login would create a cookie session with no JWT behind it.
     if (ref.read(authProvider).value != null) {
       await _ensureWebSession(next: uri.queryParameters['next']);
     }
@@ -2270,6 +2325,52 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
 ''',
   );
 
+  /// Catch the website's own sign-out **submission**, at document start.
+  ///
+  /// The two sessions have to stay in lockstep: a web sign-out that left the
+  /// JWT pair alive would leave the app signed in, and the shell would
+  /// cheerfully re-mint a web session on the next `/login/` bounce and sign the
+  /// user straight back in.
+  ///
+  /// It has to be the submission and not the URL, though. `/logout/` on a GET
+  /// is allauth's *confirmation page*, so treating a navigation there as a
+  /// sign-out signs people out for merely visiting the URL — and everything
+  /// that ends up there by accident (a stale link, a redirect chain, a
+  /// mistyped path) becomes a sign-out. The POST is the user actually saying
+  /// yes, and it is what both the navbar's button and that confirmation page
+  /// submit.
+  ///
+  /// In JS rather than in `shouldOverrideUrlLoading` because Android's WebView
+  /// makes no promise about surfacing a POST navigation there at all; the
+  /// native check remains as a fallback for the case where this script didn't
+  /// run.
+  static final _webLogoutHook = UserScript(
+    injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+    source: '''
+(function () {
+  function isLogout(form) {
+    try {
+      var action = form.getAttribute('action') || window.location.href;
+      return new URL(action, window.location.href).pathname === '/logout/';
+    } catch (e) { return false; }
+  }
+  document.addEventListener('submit', function (e) {
+    var form = e.target;
+    if (!form || form.tagName !== 'FORM' || !isLogout(form)) { return; }
+    e.preventDefault();
+    e.stopPropagation();
+    try {
+      window.flutter_inappwebview.callHandler('webLogout');
+    } catch (err) {
+      // No bridge (an older build): let the form go through, so the web half
+      // signs out even if the native half can't be told.
+      form.submit();
+    }
+  }, true);
+})();
+''',
+  );
+
   /// The website's single-lot label PDF (`SingleLotLabelView`, Django's
   /// `lots/print/<int:pk>/`).
   static final _singleLotLabelPath = RegExp(r'^/lots/print/(\d+)/?$');
@@ -2317,7 +2418,11 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     // iframes still load in place. Nothing we need inline lives off our host —
     // social login is hidden for the app UA, so no OAuth redirect to preserve.
     if (uri.host != webHost && action.isForMainFrame) {
-      await _openExternally(uri);
+      // Not awaited: this navigation is cancelled either way, and a connect
+      // flow keeps `_openExternally` on the stack for as long as the user is
+      // in the authentication session — minutes, on an OAuth consent screen.
+      // WKWebView holds its decision handler open until this returns.
+      unawaited(_openExternally(uri));
       return NavigationActionPolicy.CANCEL;
     }
 
@@ -2339,82 +2444,102 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       }
     }
 
-    // A logout link on our host — an in-page web sign-out — means sign out
-    // everywhere: the two sessions stay in lockstep, so run the full native
-    // sign-out (which also POSTs the web logout and wipes cookies) instead of
-    // letting the page navigate. Skip if already signed out so our own menu
-    // logout doesn't double-fire.
-    if (uri.path == '/logout/' && ref.read(authProvider).value != null) {
-      unawaited(_signOut());
+    // A connect flow's launcher (/square/connect/, /paypal/connect/,
+    // /mailchimp/connect/<club>/, /google-calendar/connect/<club>/) never
+    // renders anything: it stashes the club slug and a CSRF nonce in the
+    // Django session and 302s to the provider. Letting it run here is the bug
+    // — the state lands in the *shell's* session while the provider's callback
+    // comes back into the authentication session's, so the callback dies on
+    // "your connection session expired" no matter who is signed in. Divert it
+    // before it navigates, so one session holds the whole round trip.
+    if (startsConnectFlowInShell(uri) && action.isForMainFrame) {
+      unawaited(_openExternally(uri));
       return NavigationActionPolicy.CANCEL;
+    }
+
+    // **A GET of /logout/ is not a sign-out.** allauth renders a confirmation
+    // page there, so intercepting the GET signed people out for merely
+    // visiting the URL — a link, a redirect, a mistyped path. The real signal
+    // is the POST that page (and the navbar's own sign-out button) submits,
+    // which `_webLogoutHook` catches in JS on both platforms; this is the
+    // native belt to that braces, for a POST navigation that reaches here
+    // without the script having run.
+    if (uri.path == '/logout/') {
+      final isPost = (action.request.method ?? 'GET').toUpperCase() == 'POST';
+      if (isPost && ref.read(authProvider).value != null) {
+        unawaited(_signOut());
+        return NavigationActionPolicy.CANCEL;
+      }
+      return NavigationActionPolicy.ALLOW;
+    }
+
+    // Account deletion is the other real sign-out signal. It ends by logging
+    // the web session out server-side and redirecting through /logout/ to this
+    // page, so arriving here still natively signed in means the deletion POST
+    // went through — and leaving the app sitting on a signed-in shell for an
+    // account on its way out is exactly what the backend's redirect is asking
+    // us to prevent. Safe to key on because it is a terminal confirmation page
+    // with nothing linking to it: unlike /logout/, you do not pass through it
+    // by accident. The navigation is allowed so it renders for the moment
+    // before the router swaps the screen out.
+    final deleted = uri.path == '/account/deleted/';
+    if (deleted && ref.read(authProvider).value != null) {
+      unawaited(_signOut());
+      return NavigationActionPolicy.ALLOW;
     }
 
     return NavigationActionPolicy.ALLOW;
   }
 
-  /// `target="_blank"` / `window.open` — always route to the system browser
-  /// rather than open a nested WebView window. Covers the seller-connect
-  /// banners (which link to our own host with target="_blank" precisely to
-  /// escape the WebView for the Square/PayPal OAuth the app can't run) and the
-  /// Google Wallet save URL. Returning false tells the engine not to create the
-  /// window.
+  /// `target="_blank"` / `window.open` — routed out of the shell rather than
+  /// opened as a nested WebView window. Connect flows go to the authentication
+  /// session (the Discord bot invite arrives here, and so do the seller-connect
+  /// banners that carry target="_blank" precisely to escape a WebView that
+  /// cannot run the provider's login); everything else — the Google Wallet
+  /// save URL, map links — goes to the system browser. Returning false tells
+  /// the engine not to create the window.
   Future<bool> _onCreateWindow(
     InAppWebViewController controller,
     CreateWindowAction action,
   ) async {
     final uri = action.request.url;
     if (uri != null) {
-      await _openExternally(uri);
+      // Not awaited — see the note in _shouldOverrideUrlLoading. The engine
+      // needs its answer now; a connect flow finishes whenever the user does.
+      unawaited(_openExternally(uri));
     }
     return false;
   }
 
   Future<void> _openExternally(Uri uri) async {
-    // Payment-seller onboarding is the one off-host flow that must not leave
-    // the app. Apple's Tap to Pay review guide requires the merchant to be able
-    // to onboard "without needing other apps" (General Requirements) and calls
-    // for "a fully digital onboarding experience within the app ... fully
-    // completed on an iPhone" (requirement 2.2). Handing the Square OAuth
-    // redirect to Safari fails both.
-    //
-    // It goes to an in-app browser view rather than this WebView because that
-    // is what an OAuth flow needs: SFSafariViewController on iOS (Chrome
-    // Custom Tabs on Android) is the surface Apple treats as in-app, and it
-    // shares Safari's cookie jar — so a merchant whose Square login is "Sign in
-    // with Google" still works. Google blocks its sign-in inside embedded
-    // WebViews, so loading this in the shell would have traded one failure for
-    // another.
-    final onboarding = _isSellerOnboarding(uri);
-    var target = uri;
-    // **The browser view has Safari's cookies, not ours** — which is the whole
-    // reason it was chosen (a merchant whose Square login is Google SSO needs
-    // Safari's jar), and is also why our *own* half of the flow can't run in it
-    // unaided. `/square/connect/` is `LoginRequiredMixin` and the Square
-    // callback lands back here too, so a browser view with no `sessionid`
-    // bounces the merchant to the web login form — mid-OAuth, with the full
-    // site chrome, inside what looks to them like a broken handoff. Found by
-    // recording the onboarding video, not by reading the code.
-    //
-    // So bridge the session in the same way the shell bootstraps its own
-    // WebView: mint a single-use handoff token and let the consume view set the
-    // cookie server-side, with the connect URL as `next`. Only for our host —
-    // Square's own domains neither need nor should see it. A null handoff (the
-    // endpoint unavailable) falls through to the bare URL, which is exactly
-    // today's behaviour rather than a new failure.
-    if (onboarding &&
-        uri.host == Uri.parse(EnvironmentConfig.webBaseUrl).host) {
-      final next = uri.hasQuery ? '${uri.path}?${uri.query}' : uri.path;
-      final handoff = await AuthService.instance.createWebSessionHandoffUrl(
-        next: next,
-      );
-      if (handoff != null && handoff.isNotEmpty) {
-        target = Uri.parse(handoff);
-      }
-    }
-    if (onboarding && await _runSellerOnboarding(target)) {
+    // A connect flow — Square, PayPal, Mailchimp, Google Calendar, Discord —
+    // is the one kind of off-host trip that must not leave the app, and must
+    // not leave the app's session behind either. `ConnectFlowService` opens it
+    // in an authentication session with a freshly minted Django session
+    // already inside; `utils/connect_flows.dart` explains why both halves are
+    // necessary. Everything else still goes to the system browser: map links,
+    // the Google Wallet save URL, arbitrary links in user-authored lot
+    // descriptions.
+    final isConnect = runsInAuthSession(uri);
+    // Resolved once, up front: the handoff minted here is reused by the
+    // browser-view fallback below rather than re-minted, because the first
+    // token was never consumed and burning a second would be pointless.
+    final target = isConnect
+        ? await ConnectFlowService.instance.resolve(uri)
+        : uri;
+    if (isConnect && await _runConnectFlow(target)) {
       return;
     }
-    final mode = onboarding
+    // Apple's Tap to Pay review guide requires a merchant to be able to
+    // onboard "without needing other apps" (General Requirements) and calls
+    // for "a fully digital onboarding experience within the app ... fully
+    // completed on an iPhone" (requirement 2.2), so a connect flow that could
+    // not run in the authentication session falls back to an in-app browser
+    // view rather than Safari. That view shares Safari's cookie jar, so a
+    // merchant whose Square login is "Sign in with Google" still works —
+    // Google blocks its sign-in inside embedded WebViews, which is why this is
+    // never the shell's own WebView.
+    final mode = isConnect
         ? LaunchMode.inAppBrowserView
         : LaunchMode.externalApplication;
     try {
@@ -2427,92 +2552,47 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     }
   }
 
-  /// The callback scheme that ends a seller-onboarding session.
+  /// Runs a connect round trip in the authentication session, returning
+  /// whether it handled the flow.
   ///
-  /// Deliberately **not** `fishauctions://`. That scheme is intentionally
-  /// unregistered with the OS — its links only ever appear inside our own pages
-  /// and are caught by `shouldOverrideUrlLoading`, so registering it would let
-  /// any app, or any web page in any browser, drive the shell's native flows.
-  /// A separate scheme keeps that property while giving the auth session
-  /// something to match on. Nothing but a pending session can act on it, and on
-  /// Android the plugin uses Chrome's Auth Tab, which returns the result to the
-  /// launching activity rather than through an intent filter — so this is not
-  /// registered anywhere either.
-  static const _oauthCallbackScheme = 'fishauctions-oauth';
-
-  /// Runs seller onboarding in an authentication session, returning whether it
-  /// handled the flow.
+  /// `ASWebAuthenticationSession` (Chrome's Auth Tab on Android) is what an
+  /// OAuth round trip is supposed to use: it presents a Safari-backed view —
+  /// same cookie jar, so a provider login that goes through Google SSO still
+  /// works — and *dismisses itself* when the redirect matches the callback
+  /// scheme. A plain browser view can do neither.
   ///
-  /// `ASWebAuthenticationSession` is what an OAuth round trip is supposed to
-  /// use: it presents the same Safari-backed view as before — same cookie jar,
-  /// so a merchant whose Square login is Google SSO still works — but it
-  /// *dismisses itself* when the redirect matches [_oauthCallbackScheme] and
-  /// hands control back. A plain browser view can do neither, which is why the
-  /// flow used to end with the merchant parked on auction.fish wondering what
-  /// to press.
-  ///
-  /// **Safe to ship before the backend redirects.** Until `BACKEND_SPEC.md`
-  /// Part TTP-7 lands, the callback page has no `fishauctions-oauth://` redirect
-  /// to emit, so the session ends the only other way it can: the merchant taps
-  /// Done and the platform reports a cancellation. That is treated as a normal
-  /// finish rather than an error, because from here the two are
-  /// indistinguishable and both mean "they came back" — the credentials may
-  /// have changed either way, so reload and re-warm regardless.
+  /// **A dismissal is not a failure and is never reported as one.** Only
+  /// Square currently ends with a `fishauctions-oauth://` redirect; Mailchimp,
+  /// PayPal and Google Calendar succeed and then leave the user on one of our
+  /// web pages with the sheet open, which they close with Done — and the
+  /// platform reports that to us as a user cancellation. It cannot be told
+  /// apart from a genuine mid-flow back-out, and both mean the same thing: the
+  /// user
+  /// has returned and only the server knows whether anything changed. So both
+  /// endings do the same thing — reload the page behind and re-warm the
+  /// reader — and say nothing.
   ///
   /// Returns false only when the session could not start at all (an older
   /// platform, a build without the plugin), leaving the caller to fall through
-  /// to the browser view it used before.
-  Future<bool> _runSellerOnboarding(Uri url) async {
-    try {
-      await FlutterWebAuth2.authenticate(
-        url: url.toString(),
-        callbackUrlScheme: _oauthCallbackScheme,
-      );
-    } on PlatformException catch (e) {
-      if (e.code != 'CANCELED') {
-        return false;
-      }
-    } on Object {
+  /// to the browser view.
+  Future<bool> _runConnectFlow(Uri resolvedUrl) async {
+    final outcome = await ConnectFlowService.instance.openResolved(resolvedUrl);
+    if (outcome == ConnectFlowOutcome.unavailable) {
       return false;
     }
     if (!mounted) {
       return true;
     }
+    // A connect flow can outlive the 60-minute access token, and it ends in a
+    // burst of API calls; letting the shell re-mint its web session lets a
+    // page that comes back at /login/ be repaired rather than sat on.
+    _handoffAttempts = 0;
     // The merchant may have just connected Square, so the page behind this is
     // stale and the reader's credentials may be new.
     unawaited(_warmSquare());
     unawaited(_controller?.reload() ?? Future<void>.value());
     return true;
   }
-
-  /// Whether [uri] is a payment-seller connect/OAuth destination — Square's or
-  /// PayPal's own domains, or our host's connect endpoints that redirect
-  /// straight to them.
-  ///
-  /// Host-matched (rather than by path alone) so the whole redirect chain stays
-  /// in the same in-app browser session; an OAuth flow that changes host
-  /// mid-way and gets ejected to Safari is exactly the failure this avoids.
-  static bool _isSellerOnboarding(Uri uri) {
-    final host = uri.host.toLowerCase();
-    const oauthHosts = {
-      'squareup.com',
-      'squareupsandbox.com',
-      'connect.squareup.com',
-      'connect.squareupsandbox.com',
-      'paypal.com',
-      'sandbox.paypal.com',
-    };
-    if (oauthHosts.any((h) => host == h || host.endsWith('.$h'))) {
-      return true;
-    }
-    return host == Uri.parse(EnvironmentConfig.webBaseUrl).host &&
-        _sellerConnectPath.hasMatch(uri.path);
-  }
-
-  /// Our host's seller-connect entry points, which 302 to the provider.
-  static final RegExp _sellerConnectPath = RegExp(
-    r'^/(square|paypal)/(connect|oauth)',
-  );
 
   /// The WebView can't download files itself, and these Django endpoints are
   /// session-authenticated — DownloadService refetches with the WebView's
@@ -3005,7 +3085,10 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
               top: false,
               child: InAppWebView(
                 initialSettings: _webViewSettings,
-                initialUserScripts: UnmodifiableListView([_hideWebSpeechApi]),
+                initialUserScripts: UnmodifiableListView([
+                  _hideWebSpeechApi,
+                  _webLogoutHook,
+                ]),
                 onWebViewCreated: (c) => unawaited(_onWebViewCreated(c)),
                 onLoadStart: _onLoadStart,
                 onLoadStop: (c, url) => unawaited(_onLoadStop(c, url)),

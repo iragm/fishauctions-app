@@ -5,6 +5,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:square_mobile_payments_sdk/square_mobile_payments_sdk.dart';
 
+import '../models/tap_to_pay_diagnostics.dart';
 import '../models/tap_to_pay_status.dart';
 import '../utils/platform_bridge.dart';
 import 'api_service.dart';
@@ -64,6 +65,18 @@ class TapToPayService {
   bool _preparing = false;
 
   ReaderCallbackReference? _readerCallback;
+
+  /// The last reason Square gave for the Tap to Pay reader being unavailable
+  /// — the SDK enum's name, e.g. `tapToPayIsNotLinked`, `internalError`.
+  ///
+  /// This used to be thrown away ("the charge path produces far better
+  /// diagnostics"), which was true only while the charge path had catchable
+  /// failures left to report. Once Square declines to arm the reader there is
+  /// no [PaymentError] at all — just the native "connect hardware to take card
+  /// payments" screen — and this string is the only account of why.
+  String? _lastUnavailableReason;
+
+  String? get lastUnavailableReason => _lastUnavailableReason;
 
   /// True on the platform Apple's requirements apply to. Android has its own
   /// Tap to Pay story (already shipping and verified) and none of Apple's
@@ -176,6 +189,17 @@ class TapToPayService {
         if (reader.model != ReaderModel.tapToPay) {
           return;
         }
+        // Set the reason *before* the notifier fires: a listener woken by the
+        // status change must not read a reason from the previous event.
+        final reason = reader.statusInfo.unavailableReason?.name;
+        _lastUnavailableReason = reason;
+        if (reason != null) {
+          // The only place this failure is ever legible from outside the app.
+          debugPrint(
+            'Tap to Pay reader unavailable: $reason — '
+            '${describeUnavailableReason(reason)}',
+          );
+        }
         status.value = TapToPayReaderStatus.fromSquare(
           reader.statusInfo.status,
           reader.statusInfo.unavailableReason,
@@ -186,6 +210,108 @@ class TapToPayService {
       // stays "unknown", which the UI renders as a neutral spinner.
       debugPrint('Tap to Pay reader status unavailable: $e');
     }
+  }
+
+  /// The SDK's current reader list, flattened to primitives.
+  Future<List<TapToPayReaderLine>> readerLines() async {
+    final readers = await SquarePaymentService.instance.readers();
+    return [
+      for (final r in readers)
+        TapToPayReaderLine(
+          model: r.model.name,
+          status: r.statusInfo.status.name,
+          id: r.id,
+          name: r.name,
+          unavailableReason: r.statusInfo.unavailableReason?.name,
+        ),
+    ];
+  }
+
+  /// Why a tap can't happen right now, or null when nothing objects.
+  ///
+  /// Reads the reader **list** rather than [lastUnavailableReason], because
+  /// the callback only fires on *changes*: a reader that has been unavailable
+  /// since before the app subscribed never produces one, which is exactly the
+  /// case at checkout on a cold start.
+  ///
+  /// A probe that throws also answers null. Never block a charge on our own
+  /// diagnostics — same rule as [prepare] and the reader-ready timeout: if
+  /// this is wrong, Square's prompt is still the authority.
+  Future<String?> blockingReaderReason() async {
+    try {
+      for (final line in await readerLines()) {
+        if (line.isTapToPay) {
+          return line.unavailableReason;
+        }
+      }
+      return null;
+    } on Object catch (e) {
+      debugPrint('Tap to Pay reader probe failed: $e');
+      return null;
+    }
+  }
+
+  /// Everything that decides whether a tap can happen, in one snapshot.
+  ///
+  /// Each field is collected independently: a probe that throws contributes
+  /// its error to the report instead of aborting it, because the half that did
+  /// come back is usually the half that matters. Also `debugPrint`ed, so the
+  /// same block reaches `flutter logs` / `idevicesyslog` on a build with no
+  /// debugger attached.
+  Future<TapToPayDiagnostics> diagnose({String? applicationId}) async {
+    final errors = <String>[];
+    Future<T?> probe<T>(String label, Future<T> Function() read) async {
+      try {
+        return await read();
+      } on Object catch (e) {
+        errors.add('$label: $e');
+        return null;
+      }
+    }
+
+    final square = SquarePaymentService.instance;
+    final environment = await probe(
+      'environment',
+      () async => (await square.environment()).name,
+    );
+    final capable = await probe('isDeviceCapable', square.isDeviceCapable);
+    final linked = Platform.isIOS
+        ? await probe('isAppleAccountLinked', square.isAppleAccountLinked)
+        : null;
+    final authorized = await probe('isAuthorized', () => square.isAuthorized);
+    final location = await probe(
+      'authorizedLocation',
+      square.authorizedLocation,
+    );
+    final readers =
+        await probe('getReaders', readerLines) ?? const <TapToPayReaderLine>[];
+    final os = await probe('osVersion', PlatformBridge.osVersion) ?? '';
+    final standing = eligibility.value;
+
+    final report = TapToPayDiagnostics(
+      capturedAt: DateTime.now(),
+      platform: Platform.operatingSystem,
+      osVersion: os,
+      readers: readers,
+      errors: errors,
+      applicationId: applicationId,
+      environment: environment,
+      deviceCapable: capable,
+      appleAccountLinked: linked,
+      authorized: authorized,
+      locationId: location?.id,
+      locationName: location?.name,
+      merchantId: location?.merchantId,
+      cardProcessingActivated: location?.cardProcessingActivated,
+      eligible: standing?.eligible,
+      canCharge: standing?.canCharge,
+      sellerName: standing?.sellerName,
+      eligibilityMessage: standing?.message,
+      readerStatus: status.value.name,
+      lastUnavailableReason: _lastUnavailableReason,
+    );
+    debugPrint(report.toReport());
+    return report;
   }
 
   /// Runs the merchant's acceptance of Apple's Tap to Pay Terms and Conditions
@@ -303,5 +429,6 @@ class TapToPayService {
     _endpointAvailable = true;
     eligibility.value = null;
     status.value = TapToPayReaderStatus.unknown;
+    _lastUnavailableReason = null;
   }
 }

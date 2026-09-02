@@ -1,8 +1,10 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../models/tap_to_pay_diagnostics.dart';
 import '../models/tap_to_pay_status.dart';
 import '../providers/config_provider.dart';
 import '../services/tap_to_pay_service.dart';
@@ -58,6 +60,10 @@ class _TapToPayScreenState extends ConsumerState<TapToPayScreen> {
   /// iOS 17 — and the two are indistinguishable to anyone looking at the
   /// screen. Shown so they aren't.
   String? _educationError;
+
+  /// The last troubleshooting snapshot, or null until one is run.
+  TapToPayDiagnostics? _diagnostics;
+  bool _diagnosing = false;
 
   @override
   void initState() {
@@ -123,6 +129,35 @@ class _TapToPayScreenState extends ConsumerState<TapToPayScreen> {
     }
   }
 
+  /// Collects the troubleshooting snapshot.
+  ///
+  /// This is the screen's answer to a failure mode with no other witness: when
+  /// Square declines to arm the reader it shows a native "connect hardware to
+  /// take card payments" prompt carrying no error, no code and no text, so
+  /// without this the only way to tell "NFC is off" from "the merchant account
+  /// is not activated" from "the app attestation was rejected" is a rebuild
+  /// with a debugger attached.
+  Future<void> _runDiagnostics() async {
+    setState(() => _diagnosing = true);
+    String? applicationId;
+    try {
+      final cfg = await ref.read(configProvider.future);
+      applicationId = cfg.hasSquare ? cfg.squareApplicationId : null;
+    } on Object {
+      // Config not loaded (offline cold start). The rest of the snapshot is
+      // still worth having, and the missing app id is itself reported.
+      applicationId = null;
+    }
+    final report = await _service.diagnose(applicationId: applicationId);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _diagnostics = report;
+      _diagnosing = false;
+    });
+  }
+
   /// Apple's education sheet, with a text fallback for iOS 17 and earlier.
   Future<void> _showEducation() async {
     if (await _service.presentEducation()) {
@@ -181,6 +216,12 @@ class _TapToPayScreenState extends ConsumerState<TapToPayScreen> {
                     ),
                   ),
                 ],
+                const SizedBox(height: 24),
+                _TroubleshootingSection(
+                  diagnostics: _diagnostics,
+                  running: _diagnosing,
+                  onRun: _runDiagnostics,
+                ),
               ],
             ),
           ),
@@ -256,18 +297,47 @@ class _TapToPayScreenState extends ConsumerState<TapToPayScreen> {
   List<Widget> _enabledState(BuildContext context) => [
     ValueListenableBuilder<TapToPayReaderStatus>(
       valueListenable: _service.status,
-      builder: (context, status, _) => _StatusCard(
-        icon: status.isReady ? Icons.check_circle_outline : Icons.sync,
-        tone: status.isReady ? _Tone.success : _Tone.info,
-        title: status.isReady ? '$tapToPayName is ready' : status.message,
-        body: status.isReady
-            ? 'Open an invoice from a checkout page and tap the '
-                  '$tapToPayName button to take a payment.'
-            : 'Your iPhone is finishing setup. This usually takes a few '
-                  'seconds and happens automatically.',
-        // 3.9.1: the progress indicator itself.
-        progress: status.isBusy,
-      ),
+      builder: (context, status, _) {
+        final blocked = status == TapToPayReaderStatus.unavailable;
+        // Square's own account of the refusal. Nothing else has one: by the
+        // time the cashier hits the charge path there is no catchable error
+        // left, only the native "connect hardware" screen.
+        final reason = _service.lastUnavailableReason;
+        final String body;
+        if (status.isReady) {
+          body =
+              'Open an invoice from a checkout page and tap the '
+              '$tapToPayName button to take a payment.';
+        } else if (blocked && reason != null) {
+          body =
+              '${describeUnavailableReason(reason)}\n\n'
+              'Square reported: $reason';
+        } else if (blocked) {
+          body =
+              'Square could not get the reader ready and did not say why. '
+              'Open Troubleshooting below for the full picture.';
+        } else {
+          body =
+              'Your iPhone is finishing setup. This usually takes a few '
+              'seconds and happens automatically.';
+        }
+        return _StatusCard(
+          icon: status.isReady
+              ? Icons.check_circle_outline
+              : blocked
+              ? Icons.error_outline
+              : Icons.sync,
+          tone: status.isReady
+              ? _Tone.success
+              : blocked
+              ? _Tone.warning
+              : _Tone.info,
+          title: status.isReady ? '$tapToPayName is ready' : status.message,
+          body: body,
+          // 3.9.1: the progress indicator itself.
+          progress: status.isBusy,
+        );
+      },
     ),
   ];
 
@@ -374,6 +444,116 @@ class _StatusCard extends StatelessWidget {
           ],
         ],
       ),
+    );
+  }
+}
+
+/// Everything the app can find out about whether a tap would work, collapsed
+/// by default and copyable.
+///
+/// Collapsed because this is a merchant settings screen, not a debug console.
+/// Present, because the failure it explains has no other witness: Square shows
+/// one opaque "connect hardware to take card payments" prompt for every cause,
+/// so without this the only way to tell them apart is a signed rebuild per
+/// hypothesis — which is exactly how this feature lost several days.
+class _TroubleshootingSection extends StatelessWidget {
+  const _TroubleshootingSection({
+    required this.diagnostics,
+    required this.running,
+    required this.onRun,
+  });
+
+  final TapToPayDiagnostics? diagnostics;
+  final bool running;
+  final Future<void> Function() onRun;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final report = diagnostics;
+    return Card(
+      margin: EdgeInsets.zero,
+      clipBehavior: Clip.antiAlias,
+      child: ExpansionTile(
+        title: const Text('Troubleshooting'),
+        subtitle: const Text('Check what this iPhone reports'),
+        // Collected on first expand rather than on screen load: it wakes the
+        // Square SDK and the reader, which is not something a merchant who
+        // came here to read the education should pay for.
+        onExpansionChanged: (open) {
+          if (open && report == null && !running) {
+            unawaited(onRun());
+          }
+        },
+        childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+        expandedCrossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (running)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 24),
+              child: Center(child: CircularProgressIndicator()),
+            )
+          else if (report == null)
+            const Text('Nothing checked yet.')
+          else ...[
+            if (report.headline != null) ...[
+              Text(
+                report.headline!,
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  color: theme.colorScheme.error,
+                ),
+              ),
+              const SizedBox(height: 12),
+            ],
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: theme.colorScheme.surfaceContainerHighest,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              // Selectable as well as copyable: on a phone in a noisy room,
+              // reading one line out loud beats mailing the whole block.
+              child: SelectableText(
+                report.toReport(),
+                style: const TextStyle(
+                  fontFamily: 'monospace',
+                  fontSize: 11,
+                  height: 1.4,
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () => unawaited(_copy(context, report)),
+                    icon: const Icon(Icons.copy_all_outlined),
+                    label: const Text('Copy'),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: FilledButton.tonalIcon(
+                    onPressed: running ? null : () => unawaited(onRun()),
+                    icon: const Icon(Icons.refresh),
+                    label: const Text('Re-check'),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Future<void> _copy(BuildContext context, TapToPayDiagnostics report) async {
+    final messenger = ScaffoldMessenger.of(context);
+    await Clipboard.setData(ClipboardData(text: report.toReport()));
+    messenger.showSnackBar(
+      const SnackBar(content: Text('Diagnostics copied.')),
     );
   }
 }

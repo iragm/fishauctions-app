@@ -133,6 +133,28 @@
                       same FLAVOR dart-define points Dart at (prod →
                       auction.fish, dev/staging → staging.auction.fish).
                    3. Verify: adb shell pm get-app-links com.fishauctions.app
+                   4. Exclude the OAuth callbacks. The filter below claims the
+                      whole host, and assetlinks.json is host-level — it has no
+                      path field, so unlike iOS's AASA (which the backend
+                      already writes exclusions into) ALL Android path
+                      filtering has to happen right here. These four must never
+                      reach the app:
+                        /square/onboard/success/   /paypal/onboard/success/
+                        /mailchimp/callback/       /google-calendar/callback/
+                      They are the return leg of a connect flow running inside
+                      Chrome's Auth Tab, and waking the app mid-flow kills the
+                      browsing context that holds the OAuth state — the exact
+                      failure ConnectFlowService exists to prevent. Android has
+                      no "exclude" and pathAdvancedPattern has no negation, so
+                      it must be an enumeration of the prefixes you *do* want
+                      (/lots/, /auctions/, …) — a list someone then has to
+                      maintain, which is a good reason not to claim the host
+                      until somebody wants the feature.
+                      Reproduce before writing that list: Chrome avoids
+                      launching the app that opened the Custom Tab, so this may
+                      simply not happen. Run a real Google Calendar connect on
+                      a build with the filter on and watch whether the callback
+                      stays in the tab.
                  The Dart half (DeepLinkService, the router's redirect) is
                  already in place and needs no change.
 

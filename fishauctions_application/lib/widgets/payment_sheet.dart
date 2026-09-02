@@ -9,6 +9,7 @@ import 'package:square_mobile_payments_sdk/square_mobile_payments_sdk.dart';
 
 import '../models/app_config.dart';
 import '../models/payment_context.dart';
+import '../models/tap_to_pay_diagnostics.dart';
 import '../models/tap_to_pay_status.dart';
 import '../providers/config_provider.dart';
 import '../services/api_service.dart';
@@ -303,6 +304,32 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
         return;
       }
 
+      // The reader can be *unavailable* rather than merely not-ready-yet, and
+      // once the charge starts Square never says which: `startPayment` puts up
+      // the native "connect hardware to take card payments" screen, throws no
+      // PaymentError, and looks identical whether the cause is NFC, the
+      // merchant account, Apple's terms or a rejected app attestation. The
+      // reader's own `unavailableReason` is the single machine-readable
+      // account of it, so ask before diving in — and ask the reader *list*,
+      // since the status callback only fires on changes and a reader that was
+      // already unavailable at subscribe time never produced one.
+      //
+      // Blocking here is deliberate even though every other pre-flight defers
+      // to Square: this reason came from Square, not from our own inference,
+      // and the screen it saves the cashier from is a dead end. Retry stays
+      // available, so a momentary reason costs one button press.
+      final blocked = await TapToPayService.instance.blockingReaderReason();
+      if (!mounted) {
+        return;
+      }
+      if (blocked != null) {
+        _fail(
+          '${describeUnavailableReason(blocked)}\n\n'
+          'Square reported: $blocked',
+        );
+        return;
+      }
+
       // Square's Sandbox environment can't simulate a real NFC tap — there's
       // no way to PCI-certify a software card read, so `charge()` in sandbox
       // always surfaces the native "connect hardware to take card payments"
@@ -484,7 +511,10 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
   /// behaviour this replaces.
   Future<void> _awaitReaderReady() async {
     final status = TapToPayService.instance.status;
-    if (status.value.isReady) {
+    // `unavailable` is an answer, not a stage on the way to one — waiting the
+    // full timeout for it only delays the message that explains it.
+    if (status.value.isReady ||
+        status.value == TapToPayReaderStatus.unavailable) {
       return;
     }
     setState(() {
@@ -493,7 +523,10 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
     });
     final ready = Completer<void>();
     void listener() {
-      if (status.value.isReady && !ready.isCompleted) {
+      final settled =
+          status.value.isReady ||
+          status.value == TapToPayReaderStatus.unavailable;
+      if (settled && !ready.isCompleted) {
         ready.complete();
       }
     }

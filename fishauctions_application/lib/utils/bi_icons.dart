@@ -97,4 +97,12 @@ const Map<String, IconData> _biIcons = <String, IconData>{
   'bi-wrench': Icons.build_outlined,
   'bi-link-45deg': Icons.link,
   'bi-three-dots': Icons.more_horiz,
+  // The five the superuser Admin section names that nothing else did. An
+  // unmapped name is only a chevron, not a break — but every row in a
+  // twelve-item collapsed menu looking identical defeats the point of icons.
+  'bi-check2-square': Icons.check_box_outlined,
+  'bi-exclamation-triangle': Icons.warning_amber_outlined,
+  'bi-geo-alt': Icons.location_on_outlined,
+  'bi-signpost-split': Icons.alt_route,
+  'bi-stars': Icons.auto_awesome_outlined,
 };

@@ -82,7 +82,25 @@ class SquarePaymentService {
   /// `AuthorizationErrorCode.locationNotActivatedForCardProcessing` for the
   /// same underlying reason.
   Future<bool?> get cardProcessingActivated async =>
-      (await _sdk.authManager.getAuthorizedLocation())?.cardProcessingActivated;
+      (await authorizedLocation())?.cardProcessingActivated;
+
+  /// The Square location the SDK is currently authorized for, or null when it
+  /// holds no authorization.
+  Future<Location?> authorizedLocation() =>
+      _sdk.authManager.getAuthorizedLocation();
+
+  /// Every reader the SDK currently knows about, the Tap to Pay one included.
+  ///
+  /// Tap to Pay's "reader" is a software one: it exists once the SDK is
+  /// authorized and Square is willing to arm it, and its
+  /// `statusInfo.unavailableReason` is the **only** machine-readable account
+  /// Square gives of why a tap can't happen. The native "connect hardware to
+  /// take card payments" screen carries none of it, throws no
+  /// [PaymentError], and looks identical whether the cause is NFC, the
+  /// merchant account, Apple's terms or a failed app attestation — so this is
+  /// what the checkout pre-flight and the diagnostics screen read instead of
+  /// guessing.
+  Future<List<ReaderInfo>> readers() => _sdk.readerManager.getReaders();
 
   /// iOS only: Tap to Pay on iPhone requires the device to be linked to an
   /// Apple account once (an interactive Apple sheet, Square terms included).

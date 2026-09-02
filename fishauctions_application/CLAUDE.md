@@ -948,20 +948,106 @@ that shaped the app:
   `isDeviceCapable() == false`, so the OS version is read natively and anything
   below iOS 17.6 — the boundary Apple names — is reported as an update.
 - **Square OAuth onboarding must not leave the app** (2.2 + the General
-  Requirements' "without needing other apps"). It now opens in an in-app
-  browser view (`SFSafariViewController`/Custom Tabs) rather than the system
-  browser: that's the surface Apple counts as in-app, and it shares Safari's
-  cookies so a merchant whose Square login is Google SSO still works — which it
-  would *not* in the shell's own WebView, since Google blocks embedded
-  WebViews. **The website now renders those connect links in the app** (TTP-1,
-  landed; this used to be called the likeliest rejection). The callback also
-  ends on a page offering a `fishauctions://square-connected` link back into
-  the app, which nothing receives — the app registers no OS handler for that
-  scheme on purpose, and this is the one page emitting such a link that renders
-  in the *in-app browser view* rather than the shell's WebView, so there is no
+  Requirements' "without needing other apps"). It runs in an authentication
+  session rather than the system browser: that's the surface Apple counts as
+  in-app, and it shares Safari's cookies so a merchant whose Square login is
+  Google SSO still works — which it would *not* in the shell's own WebView,
+  since Google blocks embedded WebViews. **The website now renders those
+  connect links in the app** (TTP-1, landed; this used to be called the
+  likeliest rejection). The callback also ends on a page offering a
+  `fishauctions://square-connected` link back into the app, which nothing
+  receives — the app registers no OS handler for that scheme on purpose, and
+  this is the one page emitting such a link that renders in the browsing
+  session rather than the shell's WebView, so there is no
   `shouldOverrideUrlLoading` to catch it (`BACKEND_SPEC.md` Part TTP-7 replaces
   the button with "close this window"). The merchant returns by tapping Done,
-  and the on-resume warm-up picks up the new credentials.
+  and the on-resume warm-up picks up the new credentials. Square is now one of
+  five providers sharing one mechanism — see **Connect flows** below.
+
+### Connect flows (Square, PayPal, Mailchimp, Google Calendar, Discord)
+
+`utils/connect_flows.dart` (which URLs) + `services/connect_flow_service.dart`
+(how). Reworked 2026-09-02, from the report that **connecting anything signed
+the user out**.
+
+- **The authentication session carries Safari's cookie jar, not the shell
+  WebView's** — which is exactly why it was chosen, and exactly why our own
+  half of the flow could not run in it unaided. Every connect view is
+  `LoginRequiredMixin`, so it 302s to `/login/`: a sign-in page inside a
+  signed-in app, which is what "it signed me out" turned out to mean. Signing
+  in again there doesn't help either, because each flow stashes its OAuth state
+  (club slug, CSRF nonce) in the Django session before redirecting, so a
+  callback landing in a *different* session dies on "your connection session
+  expired" no matter who is signed in to it.
+- **So the session is minted, not inherited**: `POST auth/web-session/` →
+  open the consume URL with `next=<connect path>?return_to_app=1`. `next` is
+  percent-encoded (an unencoded `&` is eaten by the query parser and the server
+  falls back to home) and site-relative (off-host is rejected). `return_to_app`
+  is nearly redundant now — consuming a handoff marks the session
+  app-originated server-side, which is the same switch the Square callback's
+  closing page reads — but it costs a query parameter and covers the path where
+  the mint failed.
+- **Mint immediately before opening, and mint again on every retry.** The token
+  is single-use with a 300 s TTL, and the consume view answers a replayed one
+  by redirecting to `/login/` — i.e. by reproducing the exact bug. A token is
+  never stored, never cached, never retried. The one exception is the
+  browser-view fallback inside a single attempt, which reuses the token the
+  auth session never consumed (`resolve` / `openResolved`).
+- **The launcher is intercepted in the shell, before it navigates**
+  (`startsConnectFlowInShell`). `/square/connect/` and friends render nothing —
+  they write session state and 302 — so letting one run in the shell is what
+  splits the round trip across two sessions in the first place. The Discord
+  settings page is deliberately *not* a launcher: it is a real page with forms
+  and belongs in the shell, and is listed only so a handoff is minted if
+  something opens it outside one.
+- **A dismissal is not a failure.** Only Square ends with a
+  `fishauctions-oauth://` redirect that closes the sheet by itself. Mailchimp,
+  PayPal and Google Calendar *succeed* and leave the user on one of our pages
+  with the sheet open; they tap Done, and the platform reports that to us as a
+  user cancellation. It cannot be told apart from a real back-out, and both
+  mean the same thing — re-read the state from the server (reload, re-warm) and
+  say nothing. Never show "connection failed" on a cancel.
+- **Not awaited from the navigation callbacks.** `_openExternally` now stays on
+  the stack for as long as the user is in the sheet — minutes on a consent
+  screen — and WKWebView holds its decision handler open until
+  `shouldOverrideUrlLoading` returns.
+
+### What must never be read as a sign-out
+
+The JWT pair and the Django session cookie are independent, and conflating them
+is how a hiccup became "signed out". There are exactly three real signals:
+a completed **POST** `/logout/`, account deletion, and
+`auth/refresh/` answering **401** for a token that was not concurrently
+rotated. Everything else leaves the session alone.
+
+- **A GET of `/logout/` is a confirmation page, not a sign-out.** allauth
+  renders one there, so intercepting the GET signed people out for merely
+  visiting the URL. The POST is caught by `_webLogoutHook` (a `UserScript` that
+  hooks the submit) with a native `action.request.method == 'POST'` check as
+  the fallback, since Android makes no promise about surfacing a POST
+  navigation to `shouldOverrideUrlLoading`. Account deletion is caught at
+  `/account/deleted/` instead — it redirects *through* `/logout/` after logging
+  the web session out server-side, so the GET interception used to be what
+  carried it.
+- **Landing on `/login/` is never a sign-out** — it means the cookie session
+  lapsed while the native one is fine, so `_reconcileWebSession` re-mints the
+  handoff and resumes the intended page. The repair is bounded so a failed
+  handoff can't loop, but the counter now resets on any page that renders (and
+  on a returning connect flow), because a shell that has been up for hours
+  would otherwise sit on the web login form the second time a session lapsed.
+- **`auth/refresh/` narrowed to 401 only** (verified against staging: an
+  invalid, expired or blacklisted refresh token is 401; a **400** is a missing
+  field, i.e. a client bug). 400/403/5xx/timeouts/offline no longer wipe
+  anything. **429 never signs out either** — the endpoint is throttled per IP
+  and an auction hall is a room full of these phones behind one NAT — it backs
+  off with jitter (honouring `Retry-After`, capped) and retries.
+- **A 401 for a token that was rotated mid-flight is ignored.** Rotation makes
+  a stale rejection possible: a sign-in or an earlier refresh may have replaced
+  the pair while the request was in the air, and wiping the fresh one would be
+  the bug. The stored token is re-read and compared before anything is cleared.
+- Single-flight refresh was already in place and is load-bearing here: an OAuth
+  detour easily outlives the 60-minute access token, so the whole app 401s at
+  once on return.
 
 ## Django Backend Notes (from CLAUDE.md in iragm/fishauctions)
 
@@ -1286,6 +1372,24 @@ JWT auth is bridged into the WebView's Django cookie session:
     admin section — which is why `ConfigService.loadForCurrentUser` re-fetches
     when the cached copy was taken by the signed-out login screen, and why
     `AuthService.logout` deletes the persisted menu.
+  - **The endpoint reads the bearer token *optionally*, which makes a stale one
+    silent and dangerous.** A missing, expired or malformed token is not a 401:
+    it is a **200 carrying the signed-out menu**. Nothing errors, so nothing
+    retries, and the app would render signed-out chrome around a live session
+    for the whole process. Two rules follow, both in `ConfigService`:
+    **refresh the access token before asking** (`ensureFreshAccessToken`, which
+    reads `exp` out of the JWT and makes no network call when there's time
+    left), and record whether the answer can be trusted
+    (`configIsForCurrentUser`) so `_warmMenu` **declines to adopt an anonymous
+    menu** rather than overwriting — and persisting — a good one. Resume
+    re-asks for the menu when the cached config came back anonymous, which is
+    the only way out of that state, since by definition nothing failed.
+  - Section ids are `main`, `lots`, `account`, `admin`, `about`; `lots` and
+    `account` appear only when authenticated, `admin` only for superusers, and
+    an unknown id is an ordinary section. **Nothing is hardcoded** — the real
+    paths differ from the spec's illustrative ones (`/lots/all/`, `/about/`,
+    `/admin-usermap/?view=recent&filter=24`) and the query strings are
+    load-bearing, so every row is built from what was sent.
   - Icons are the website's Bootstrap Icons names, mapped by
     `lib/utils/bi_icons.dart` (shared with the command palette). **The map and
     its fallback must stay `const`**: release builds tree-shake the icon font
@@ -1433,7 +1537,22 @@ JWT auth is bridged into the WebView's Django cookie session:
     fingerprint is the certificate **Google Play re-signs with** (Play Console →
     Release → Setup → App signing), *not* the upload key, which is the classic
     silent failure — then uncomment the filter, then check with `adb shell pm
-    get-app-links com.fishauctions.app`. iOS: enable **Associated Domains on the
+    get-app-links com.fishauctions.app`, then **enumerate the paths**: the
+    four OAuth callbacks (`/square/onboard/success/`,
+    `/paypal/onboard/success/`, `/mailchimp/callback/`,
+    `/google-calendar/callback/`) must never reach the app, because waking it
+    mid-flow kills the browsing session holding the OAuth state. The backend
+    already excludes them from the iOS AASA, but `assetlinks.json` is
+    host-level and has no path field, so **all Android path filtering lives in
+    the intent filter** — and Android has no "exclude" and
+    `pathAdvancedPattern` has no negation, so it has to be a list of the
+    prefixes you *do* want, maintained by hand. Reproduce first: Chrome avoids
+    launching the app that opened the Custom Tab, so it may not happen at all.
+    Today this is all moot — the filter is commented out, so nothing claims the
+    host and no callback can reach the app; on iOS there is no
+    `associated-domains` entitlement either, so no URL is ever delivered and
+    `ASWebAuthenticationSession` does not follow Universal Links into its own
+    app regardless. iOS: enable **Associated Domains on the
     App ID first**, then set `IOS_APP_LINKS` (`TEAMID.bundle.id`) so the
     association file serves, and only then add the entitlement key — adding it
     before the capability exists on the App ID means cloud signing can't build a

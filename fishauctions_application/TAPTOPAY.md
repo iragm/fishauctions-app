@@ -385,6 +385,84 @@ three things — worth checking in this order:
 3. **The account isn't a merchant.** Least likely on a site owner's login —
    `_user_can_take_payments` short-circuits to True for any superuser.
 
+### The reader never arms, and it is Square's attestation (open, 2026-09-02)
+
+Symptom: the checkout sheet ends on Square's native "connect hardware to take
+card payments" screen on a production build, on an iPhone 12 / iOS 26.6.1 that
+is registered, entitled and provisioned. **The Apple half is proven good** —
+stop re-testing it:
+
+- The **signed binary** (not just the profile) carries
+  `com.apple.developer.proximity-reader.payment.acceptance`,
+  `com.apple.developer.devicecheck.appattest-environment = production` and
+  `com.apple.developer.nfc.readersession.formats`. Read them off an IPA on
+  Linux without `codesign`: unzip it and scan `Payload/Runner.app/Runner` for
+  the embedded XML plist in the code-signature blob.
+- The device log shows Apple's reader session being built successfully:
+  `PaymentCardReader.isSupported: true` → `[SessionTask] reader is prepared` →
+  `Kernels installed successfully` → `Result (prepare): session created`.
+- The Square **application signature** row exists in the Developer Console
+  (bundle `com.fishauctions.app`, team `N33JNG353Y`).
+
+What fails is one second later, in **Square's App Attest startup attestation**:
+
+```
+Runner(DeviceCheck): DCAppAttestController.m:393  Dispatching generate assertion
+devicecheckd(AppAttestInternal): .206  Production environment override set.
+devicecheckd(AppAttestInternal) <Error>: .385
+Runner(libxpc): invalidated because the current process cancelled the connection
+```
+
+It is Square's, not Firebase's: there is no `firebase_app_check` in this app,
+and `SquareMobilePaymentsSDK.framework` contains `DCAppAttestRunner`,
+`app_attest.startup_attestation`, `AppAttestAssertion`, `AttestationInvalid`
+and `AttestationAppIdMismatch`. Square cannot prove the app signature, so it
+declines to arm the reader — and by design says nothing, which is the whole
+reason the screen is opaque.
+
+**A stale key was the first theory and it is wrong.** Before build 19 the app
+carried no `appattest-environment` entitlement, so a development-signed build
+defaulted to the *development* App Attest environment; a key attested there
+cannot assert under `production`. Deleting and reinstalling the app **did**
+clear it — the next launch logged `Dispatching generate key` then
+`Dispatching attest key` rather than `generate assertion`, so the key ID lives
+in the app container, not the keychain — **and Tap to Pay still did not arm**.
+So the cause is downstream of the key: Apple's attestation server, or Square's
+verification of it.
+
+Next lever is the reader's own `unavailableReason`, which the app now collects
+(see below). `secureConnectionToSquareFailure` would confirm Square refusing to
+vouch for the app; `internalError` is what a failed attestation surfaces as.
+
+### Capturing the device log from Linux
+
+No Mac needed, and this is how the above was found:
+
+```bash
+idevice_id -l                    # device must be unlocked and trusted
+idevicesyslog -p Runner -p devicecheckd -p merchantd > syslog.txt
+```
+
+Unfiltered, `idevicesyslog` drops the connection under load — both of the first
+two captures stalled at exactly the busiest moment — so filter by process.
+`<private>` redaction hides the App Attest error's text; the surrounding
+call sequence is what carries the meaning.
+
+### Reading the failure without a rebuild
+
+`TapToPayService.diagnose()` collects the reader list (`getReaders()`), the
+reader's `unavailableReason`, the authorized location and its
+`cardProcessingActivated`, the SDK environment, device capability, Apple-account
+linkage and the backend's eligibility answer into one copyable block, rendered
+under **Troubleshooting** on `/tap-to-pay` and `debugPrint`ed so it also reaches
+`idevicesyslog`. The checkout sheet pre-flights the same reason and fails with
+it by name rather than entering Square's prompt.
+
+This exists because the reason used to be discarded on the grounds that "the
+charge path produces far better diagnostics" — true only while the charge path
+still had catchable failures. Once Square refuses to arm the reader there is no
+`PaymentError` at all, and that string is the only account of why.
+
 ## Before submitting
 
 1. **Land TTP-1, TTP-2, TTP-3** (`BACKEND_SPEC.md`). TTP-1 and TTP-2 are
