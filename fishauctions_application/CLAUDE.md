@@ -1253,6 +1253,44 @@ JWT auth is bridged into the WebView's Django cookie session:
   reports back rather than opening a sheet with a dead "Add" button. `.ics` opens
   in the OS calendar importer, everything else goes to the share sheet, and a PDF
   goes to the OS print dialog on the "System printer" method.
+- **The navigation drawer is the server's, not a copy of the navbar**
+  (2026-09-02). It renders the `menu` block of `GET /api/mobile/config/`
+  (`DrawerMenu`, `BACKEND_SPEC.md` Part MENU), because the hand-written mirror
+  it replaced could only follow `base.html` through an app-store release — the
+  navbar changed in fifteen commits in a year — and was lossy besides: the
+  superuser **Admin** menu and **About site** were never in the app at all,
+  since who may see them is a server question. Three tiers, resolved by
+  `MenuStore`: **server payload > last good payload persisted in the app
+  documents dir > a bundled skeleton**. The middle one is why the class exists
+  — `ConfigService` caches for the process only, so without a file on disk
+  every offline cold start would drop a long-time user back to six links.
+  - **The bundled skeleton is not a fallback menu, it is a life raft**
+    (`bundledDrawerMenu`, six links). Growing it back into a mirror of the
+    navbar recreates the exact problem — a third copy, hand-maintained, that
+    rots where nobody looks. If something is missing from the drawer, the
+    payload is what should change.
+  - **A bad payload can never empty the drawer.** Bad rows are dropped
+    individually, a section left with no rows goes with them, and a payload
+    that yields nothing renderable is *ignored* — the previous tier keeps
+    rendering and the good file on disk is left alone, so a broken deploy
+    degrades to yesterday's working menu. Off-host `path`s are refused under
+    the same rule as `terms_url` (`sitePathOrNull`), since these load in the
+    shell's own WebView.
+  - **The four app-owned rows are merged in at anchors, never positioned by
+    the server**: Sign out, Offline mode (gated on offline data existing),
+    Tap to Pay (platform + backend eligibility) and Clubs (live from
+    `myClubsProvider`) attach to the `main`/`account` section ids, and a row
+    whose anchor section is absent lands in a trailing section rather than
+    disappearing. None of them can be expressed as a URL.
+  - **This is the one per-user part of `/api/mobile/config/`** — staff get the
+    admin section — which is why `ConfigService.loadForCurrentUser` re-fetches
+    when the cached copy was taken by the signed-out login screen, and why
+    `AuthService.logout` deletes the persisted menu.
+  - Icons are the website's Bootstrap Icons names, mapped by
+    `lib/utils/bi_icons.dart` (shared with the command palette). **The map and
+    its fallback must stay `const`**: release builds tree-shake the icon font
+    and an `IconData` built from a runtime codepoint renders tofu. An unknown
+    name falls back to a chevron, so a new navbar icon never needs a release.
 - **The command palette is the website's, opened from the app-bar title.** The
   web palette is where the LLM assist lives (streamed NDJSON progress, the
   confirm countdown, clarify options, cancel/report telemetry) — a second

@@ -38,5 +38,49 @@
 	<array>
 		<string>Default</string>
 	</array>
+
+	<!-- Square's Mobile Payments SDK requires THREE capabilities on iOS, and the
+	     app shipped with only the Tap to Pay one for weeks. From Square's own
+	     iOS setup: "add these capabilities: App Attest, NFC Tag Reading, Tap to
+	     Pay on iPhone", then regenerate the provisioning profile.
+
+	     **App Attest is the mechanism behind the application signature.** Square
+	     requires every integration on SDK 2.1+ to register a bundle id + team id
+	     in the Developer Console before it will take production payments — "an
+	     extra layer of security to ensure that your application hasn't been
+	     tampered with" — and App Attest is how the app proves it is that
+	     application. Both halves are required and neither says so when it
+	     fails: with the signature unregistered, or with it registered but no
+	     way to attest, Square declines to arm the reader and shows its generic
+	     "connect hardware to take card payments" screen. There is no error code
+	     for it in the SDK (see its documented error enums), nothing in the
+	     device log from Square, and the failure is indistinguishable from
+	     missing hardware or a missing entitlement. That cost several debugging
+	     sessions on 2026-09-02, on a phone whose Apple-side reader session was
+	     being created correctly the whole time.
+
+	     `production`, not `development`, and deliberately so even here in the
+	     debug/development entitlements: these builds take **real** payments
+	     against the production Square application, and Square validates the
+	     attestation server-side against Apple's production App Attest root. A
+	     development attestation carries a different root and would be rejected.
+	     If Square ever refuses this one, its note that "debug builds taking
+	     production payments also require separate signatures" is the thread to
+	     pull, not this value.
+
+	     Unlike Tap to Pay, both of these are **self-serve** on the App ID
+	     (Certificates, Identifiers & Profiles) — no Apple review, no waiting.
+	     Enabling them invalidates existing provisioning profiles, which costs
+	     nothing here: both release workflows sign with `-allowProvisioningUpdates`
+	     and cloud signing regenerates the profile on the next run. But the App ID
+	     must have the capabilities BEFORE a build carries these keys, or signing
+	     fails outright — the same ordering trap as the Tap to Pay key above. -->
+	<key>com.apple.developer.devicecheck.appattest-environment</key>
+	<string>production</string>
+	<key>com.apple.developer.nfc.readersession.formats</key>
+	<array>
+		<string>NDEF</string>
+		<string>TAG</string>
+	</array>
 </dict>
 </plist>

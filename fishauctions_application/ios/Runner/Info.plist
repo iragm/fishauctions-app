@@ -51,6 +51,16 @@
 	<string>Add auction pickup times to your calendar.</string>
 	<key>NSCalendarsFullAccessUsageDescription</key>
 	<string>Add auction pickup times to your calendar.</string>
+	<!-- Core NFC, which the app itself never calls: it comes with the NFC Tag
+	     Reading capability Square's Mobile Payments SDK requires (see
+	     Runner.entitlements). The string is here for the same reason
+	     NSLocationAlwaysAndWhenInUseUsageDescription is — App Store Connect scans
+	     for API *references* rather than calls, and an entitlement that admits
+	     Core NFC is exactly such a reference (ITMS-90683 asked for the location
+	     one by name on build 8). Worded for what a customer's card actually does,
+	     since a tap is the only NFC this app is ever part of. -->
+	<key>NFCReaderUsageDescription</key>
+	<string>Read a customer's contactless card, Apple Pay, or other digital wallet when you take a payment with Tap to Pay on iPhone.</string>
 	<!-- Every use of location, in the order the user meets them: distances on the
 	     auction/lot listings (soft, contextual banner — never at app open),
 	     arriving at an in-person auction (CheckinService reports the position so

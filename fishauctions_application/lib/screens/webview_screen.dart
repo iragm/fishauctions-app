@@ -21,6 +21,7 @@ import '../constants/app_constants.dart';
 import '../models/ar_models.dart';
 import '../models/checkin_models.dart';
 import '../models/club_menu_item.dart';
+import '../models/drawer_menu.dart';
 import '../models/label_prefs.dart';
 import '../models/tap_to_pay_status.dart';
 import '../providers/auth_provider.dart';
@@ -31,6 +32,7 @@ import '../services/api_service.dart';
 import '../services/auth_service.dart';
 import '../services/bluetooth_service.dart';
 import '../services/checkin_service.dart';
+import '../services/config_service.dart';
 import '../services/deep_link_service.dart';
 import '../services/dictation_service.dart';
 import '../services/download_service.dart';
@@ -39,6 +41,7 @@ import '../services/label_print_service.dart';
 import '../services/last_page_service.dart';
 import '../services/local_notification_service.dart';
 import '../services/location_service.dart';
+import '../services/menu_store.dart';
 import '../services/notification_prefs_service.dart';
 import '../services/offline_store.dart';
 import '../services/offline_sync_service.dart';
@@ -49,6 +52,7 @@ import '../services/remote_print_service.dart';
 import '../services/shortcut_service.dart';
 import '../services/tap_to_pay_service.dart';
 import '../services/voice_command_service.dart';
+import '../utils/bi_icons.dart';
 import '../utils/external_links.dart';
 import '../utils/platform_bridge.dart';
 import '../widgets/payment_sheet.dart';
@@ -186,6 +190,8 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     // voiceGetState answers with this deployment's settings rather than the
     // bundled defaults.
     unawaited(_warmVoice());
+    // Load the drawer's menu — the persisted copy first, then the server's.
+    unawaited(_warmMenu());
     // Keep an offline copy of the operator's last admin auction warm
     // (periodic snapshot pulls), and drain any changes queued while offline.
     // Conflicts the server reports surface as a snackbar.
@@ -370,6 +376,25 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     }
   }
 
+  /// Bring up the navigation drawer's menu: the last-good payload off disk
+  /// first — so an offline cold start still gets this deployment's drawer
+  /// rather than the bundled six links — then whatever the server says.
+  ///
+  /// Deliberately not `configProvider`: the `menu` block is the one per-user
+  /// part of the config response, and [ConfigService.loadForCurrentUser] is
+  /// what stops a copy fetched by the signed-out login screen from being this
+  /// session's menu. Nothing here is on the critical path — the drawer isn't
+  /// on screen at launch and rebuilds itself when the payload lands.
+  Future<void> _warmMenu() async {
+    await MenuStore.instance.ensureLoaded();
+    try {
+      final cfg = await ConfigService.instance.loadForCurrentUser();
+      await MenuStore.instance.adopt(cfg.menu);
+    } on Object catch (e) {
+      debugPrint('Drawer menu warm-up skipped: $e');
+    }
+  }
+
   Future<void> _warmPush() async {
     try {
       final cfg = await ref.read(configProvider.future);
@@ -398,6 +423,7 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     await _warmSquare();
     await _warmPush();
     await _warmVoice();
+    await _warmMenu();
   }
 
   /// The first argument of a `callHandler(name, arg)` call, or null when the
@@ -2688,6 +2714,16 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   // The router only mounts this screen for a signed-in session, so the drawer
   // always shows the full account menu — there is no signed-out variant
   // (signed-out users live on the login/signup screens).
+  //
+  // The rows themselves are **the server's**, from the `menu` block of
+  // `/api/mobile/config/` (BACKEND_SPEC.md Part MENU). This used to be a
+  // hand-written mirror of base.html's navbar, which meant every navbar change
+  // needed an app release to follow — fifteen of them in the last year — and
+  // the copy was lossy anyway, missing the superuser Admin menu and "About
+  // site" because who may see those is a server question. `MenuStore` resolves
+  // server payload > last-good persisted payload > bundled skeleton, and is a
+  // ChangeNotifier because config is fetched off the startup critical path and
+  // routinely lands after the drawer has already been built.
   Widget _buildDrawer(BuildContext ctx, String brand) => Drawer(
     child: SafeArea(
       child: Column(
@@ -2704,91 +2740,92 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
           ),
           const Divider(height: 1),
           Expanded(
-            child: ListView(
-              padding: EdgeInsets.zero,
-              children: [
-                _navTile(ctx, Icons.gavel, 'Auctions', '/auctions/'),
-                _navTile(ctx, Icons.grid_view, 'Lots', '/lots/all/'),
-                _offlineModeTile(ctx),
-                _clubsTile(ctx),
-                // The full account menu, mirroring the website navbar.
-                const Divider(),
-                _sectionHeader(ctx, 'My lots'),
-                _navTile(ctx, Icons.sell, 'Selling', '/selling/'),
-                _navTile(
-                  ctx,
-                  Icons.favorite_border,
-                  'Watched lots',
-                  '/lots/watched/',
-                ),
-                _navTile(ctx, Icons.monetization_on, 'Bids', '/bids/'),
-                _navTile(ctx, Icons.emoji_events, 'Won lots', '/lots/won/'),
-                const Divider(),
-                _sectionHeader(ctx, 'Account'),
-                _navTile(
-                  ctx,
-                  Icons.account_circle,
-                  'Account information',
-                  '/account/',
-                ),
-                _navTile(ctx, Icons.receipt_long, 'Invoices', '/invoices/'),
-                _navTile(
-                  ctx,
-                  Icons.chat_bubble_outline,
-                  'Messages',
-                  '/messages/',
-                ),
-                _navTile(
-                  ctx,
-                  Icons.contact_phone,
-                  'Contact info',
-                  '/contact_info/',
-                ),
-                _navTile(ctx, Icons.tune, 'Preferences', '/preferences/'),
-                _navTile(
-                  ctx,
-                  Icons.label_outline,
-                  'Label printing',
-                  '/printing/',
-                ),
-                _tapToPayTile(ctx),
-                _navTile(ctx, Icons.block, 'Ignore categories', '/ignore/'),
-                _navTile(
-                  ctx,
-                  Icons.feedback_outlined,
-                  'Feedback',
-                  '/feedback/',
-                ),
-                const Divider(),
-                ExpansionTile(
-                  leading: const Icon(Icons.info_outline),
-                  title: const Text('About'),
-                  children: [
-                    _navTile(ctx, null, 'FAQ', '/faq/', indent: true),
-                    _navTile(
-                      ctx,
-                      null,
-                      'Terms & Conditions',
-                      '/tos/',
-                      indent: true,
-                    ),
-                  ],
-                ),
-                const Divider(),
-                ListTile(
-                  leading: const Icon(Icons.logout),
-                  title: const Text('Sign out'),
-                  onTap: () {
-                    Navigator.of(ctx).pop();
-                    unawaited(_signOut());
-                  },
-                ),
-              ],
+            child: ListenableBuilder(
+              listenable: MenuStore.instance,
+              builder: (_, _) => ListView(
+                padding: EdgeInsets.zero,
+                children: _drawerRows(ctx, MenuStore.instance.menu),
+              ),
             ),
           ),
         ],
       ),
     ),
+  );
+
+  /// The whole drawer body: the server's sections with the app's own rows
+  /// merged in at their anchors (see [DrawerMenu.withNativeRows]).
+  List<Widget> _drawerRows(BuildContext ctx, DrawerMenu menu) {
+    final rows = <Widget>[];
+    final sections = menu.withNativeRows();
+    for (var i = 0; i < sections.length; i++) {
+      final section = sections[i];
+      if (i > 0) {
+        rows.add(const Divider());
+      }
+      if (section.collapsed) {
+        // The navbar's dropdowns (About, and the superuser Admin menu, which
+        // is a dozen links) — collapsed here too, or they bury everything.
+        rows.add(
+          ExpansionTile(
+            leading: section.icon.isEmpty ? null : Icon(biIcon(section.icon)),
+            title: Text(section.title),
+            childrenPadding: EdgeInsets.zero,
+            children: [
+              for (final entry in section.entries)
+                _drawerEntry(ctx, entry, indent: true),
+            ],
+          ),
+        );
+        continue;
+      }
+      if (section.title.isNotEmpty) {
+        rows.add(_sectionHeader(ctx, section.title));
+      }
+      for (final entry in section.entries) {
+        rows.add(_drawerEntry(ctx, entry));
+      }
+    }
+    return rows;
+  }
+
+  /// One merged row. A native entry hands off to the widget that owns it —
+  /// each of those does its own gating and its own live rebuilding, which is
+  /// exactly why the server can neither send nor position them.
+  Widget _drawerEntry(
+    BuildContext ctx,
+    DrawerEntry entry, {
+    bool indent = false,
+  }) => switch (entry) {
+    DrawerLinkEntry(:final item) => _navTile(
+      ctx,
+      // An indented sub-row deliberately keeps no icon even when the payload
+      // names one: it sits under its section's icon, and a second column of
+      // glyphs inside an expanded tile reads as noise.
+      indent || item.icon.isEmpty ? null : biIcon(item.icon),
+      item.title,
+      item.path,
+      indent: indent,
+    ),
+    DrawerNativeEntry(:final row) => switch (row) {
+      DrawerNativeRow.offlineMode => _offlineModeTile(ctx),
+      DrawerNativeRow.clubs => _clubsTile(ctx),
+      DrawerNativeRow.tapToPay => _tapToPayTile(ctx),
+      DrawerNativeRow.signOut => _signOutTile(ctx),
+    },
+  };
+
+  /// Sign out is app-owned and unconditional. It tears down a native session
+  /// — the JWT pair, the WebView cookie jar, the cached profile, the offline
+  /// files, the persisted drawer menu and the Square authorization — so it is
+  /// never a row the server sends, and never a row a bad payload can remove.
+  Widget _signOutTile(BuildContext ctx) => ListTile(
+    leading: const Icon(Icons.logout),
+    title: const Text('Sign out'),
+    onTap: () {
+      Navigator.of(ctx).pop();
+      unawaited(_signOut());
+    },
   );
 
   /// The drawer's Tap to Pay entry — setup, status and merchant education.
@@ -2887,7 +2924,9 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     child: Text(
       text.toUpperCase(),
       style: Theme.of(ctx).textTheme.labelSmall?.copyWith(
-        color: Theme.of(ctx).colorScheme.primary,
+        // `secondary`, not `primary`: the latter is the web's btn-primary fill
+        // and is unreadable as ink on the page background. See AppTheme.
+        color: Theme.of(ctx).colorScheme.secondary,
         fontWeight: FontWeight.bold,
         letterSpacing: 0.8,
       ),

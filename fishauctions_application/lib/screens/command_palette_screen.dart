@@ -10,6 +10,7 @@ import '../services/command_palette_service.dart';
 import '../services/last_used_auction_service.dart';
 import '../services/location_service.dart';
 import '../services/tap_to_pay_service.dart';
+import '../utils/bi_icons.dart';
 import '../widgets/tap_to_pay_branding.dart';
 
 /// Opens the command palette as a full-screen dialog.
@@ -326,7 +327,8 @@ class _CommandPaletteDialogState extends State<_CommandPaletteDialog> {
             group.label.toUpperCase(),
             style: theme.textTheme.labelSmall?.copyWith(
               fontWeight: FontWeight.bold,
-              color: theme.colorScheme.primary,
+              // Ink, so `secondary` — `primary` is a fill color. See AppTheme.
+              color: theme.colorScheme.secondary,
               letterSpacing: 0.8,
             ),
           ),
@@ -337,7 +339,7 @@ class _CommandPaletteDialogState extends State<_CommandPaletteDialog> {
           ListTile(
             dense: true,
             leading: Icon(
-              _biIcon(item.icon),
+              biIcon(item.icon),
               size: 20,
               color: theme.colorScheme.onSurfaceVariant,
             ),
@@ -459,50 +461,4 @@ class _CommandPaletteDialogState extends State<_CommandPaletteDialog> {
       ),
     );
   }
-}
-
-/// Maps a Bootstrap Icons class name to the closest Material icon.
-IconData _biIcon(String bi) {
-  const icons = <String, IconData>{
-    'bi-grid': Icons.grid_view,
-    'bi-hammer': Icons.gavel,
-    'bi-tag': Icons.sell,
-    'bi-tags': Icons.local_offer,
-    'bi-people': Icons.group_outlined,
-    'bi-people-fill': Icons.group,
-    'bi-person': Icons.person_outline,
-    'bi-person-badge': Icons.badge_outlined,
-    'bi-person-vcard': Icons.contact_page_outlined,
-    'bi-person-fill-lock': Icons.lock_person,
-    'bi-person-fill': Icons.person,
-    'bi-bag': Icons.shopping_bag_outlined,
-    'bi-bag-heart': Icons.favorite_border,
-    'bi-bag-check': Icons.check_circle_outline,
-    'bi-bag-heart-fill': Icons.favorite,
-    'bi-printer': Icons.print,
-    'bi-gear': Icons.settings_outlined,
-    'bi-clock-history': Icons.history,
-    'bi-calendar-event': Icons.event_outlined,
-    'bi-calendar-check': Icons.event_available_outlined,
-    'bi-arrow-right-short': Icons.arrow_forward,
-    'bi-plus-circle': Icons.add_circle_outline,
-    'bi-card-list': Icons.list_alt_outlined,
-    'bi-award': Icons.emoji_events_outlined,
-    'bi-map': Icons.map_outlined,
-    'bi-envelope': Icons.mail_outline,
-    'bi-envelope-at': Icons.alternate_email,
-    'bi-discord': Icons.chat_bubble_outline,
-    'bi-credit-card': Icons.credit_card_outlined,
-    'bi-key': Icons.key_outlined,
-    'bi-paypal': Icons.payment,
-    'bi-sliders': Icons.tune,
-    'bi-house': Icons.home_outlined,
-    'bi-qr-code-scan': Icons.qr_code_scanner,
-    'bi-input-cursor-text': Icons.text_fields,
-    'bi-telephone-fill': Icons.phone,
-    'bi-google': Icons.language,
-    'bi-star': Icons.star_outline,
-    'bi-heart': Icons.favorite_border,
-  };
-  return icons[bi] ?? Icons.arrow_forward_ios;
 }

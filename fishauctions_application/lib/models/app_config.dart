@@ -1,4 +1,4 @@
-import '../config/environment.dart';
+import '../utils/site_path.dart';
 
 /// Deployment-wide configuration, parsed from `GET /api/mobile/config/`.
 ///
@@ -18,6 +18,7 @@ class AppConfig {
     this.privacyPath = '',
     this.firebase,
     this.voice,
+    this.menu,
   });
 
   factory AppConfig.fromJson(Map<String, dynamic> json) => AppConfig(
@@ -31,6 +32,9 @@ class AppConfig {
     firebase: FirebaseClientConfig.tryParse(json['firebase']),
     voice: json['voice'] is Map<String, dynamic>
         ? json['voice'] as Map<String, dynamic>
+        : null,
+    menu: json['menu'] is Map<String, dynamic>
+        ? json['menu'] as Map<String, dynamic>
         : null,
   );
 
@@ -113,6 +117,21 @@ class AppConfig {
   /// field. See `VOICE.md` §3 and `BACKEND_SPEC.md` Part VOICE-3.
   final Map<String, dynamic>? voice;
 
+  /// The `menu` block — the navigation drawer's sections and links, built
+  /// server-side from the same structure that renders the website's navbar, or
+  /// null when the deployment doesn't serve one (older backend, or the fetch
+  /// failed) — in which case the app falls back to the last menu it persisted
+  /// and then to `bundledDrawerMenu`.
+  ///
+  /// Raw for the same reason [voice] is: it is *content*, not app config, and
+  /// `DrawerMenu.tryParse` owns its validation — including the rule that a
+  /// payload it can't read is a payload to ignore, never one to render.
+  ///
+  /// Unlike everything else on this endpoint, this block is **per user**: it
+  /// carries the superuser admin section for staff. `ConfigService` re-fetches
+  /// when its cached copy was taken before sign-in for exactly that reason.
+  final Map<String, dynamic>? menu;
+
   /// Whether this deployment can do Tap to Pay at all (has a Square app id).
   bool get hasSquare => squareApplicationId.isNotEmpty;
 
@@ -139,28 +158,13 @@ class AppConfig {
   static String _str(Object? v) => v == null ? '' : v.toString();
 
   /// Normalizes a config URL to a **site-relative path** so the app can load it
-  /// in its own restricted WebView against `EnvironmentConfig.webBaseUrl`. The
-  /// backend may send either form; an absolute URL pointing somewhere else
-  /// entirely is rejected in favour of [fallback], because these links are
-  /// rendered inside the login trap and must not become an escape hatch to an
-  /// arbitrary host.
-  static String _pathOr(Object? raw, String fallback) {
-    final value = _str(raw);
-    if (value.isEmpty) {
-      return fallback;
-    }
-    if (value.startsWith('/') && !value.startsWith('//')) {
-      return value;
-    }
-    final uri = Uri.tryParse(value);
-    if (uri == null || !uri.hasScheme) {
-      return fallback;
-    }
-    final path = uri.path.isEmpty ? '/' : uri.path;
-    return uri.host == Uri.parse(EnvironmentConfig.webBaseUrl).host
-        ? path
-        : fallback;
-  }
+  /// in its own restricted WebView. The backend may send either form; an
+  /// absolute URL pointing somewhere else entirely is rejected in favour of
+  /// [fallback], because these links are rendered inside the login trap and
+  /// must not become an escape hatch to an arbitrary host. The same rule
+  /// governs every drawer link — hence [sitePathOrNull], which both use.
+  static String _pathOr(Object? raw, String fallback) =>
+      sitePathOrNull(_str(raw)) ?? fallback;
 }
 
 /// The `firebase` block of `GET /api/mobile/config/` — the public client config

@@ -844,7 +844,9 @@ class _PrinterConnectSheetState extends ConsumerState<PrinterConnectSheet> {
                   child: Text(
                     'AVAILABLE DEVICES',
                     style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                      color: Theme.of(context).colorScheme.primary,
+                      // Ink on the sheet background: `primary` is the web's
+                      // btn-primary fill and unreadable here. See AppTheme.
+                      color: Theme.of(context).colorScheme.secondary,
                     ),
                   ),
                 ),
@@ -861,7 +863,7 @@ class _PrinterConnectSheetState extends ConsumerState<PrinterConnectSheet> {
                     leading: Icon(
                       match != null ? Icons.print : Icons.bluetooth,
                       color: match != null
-                          ? Theme.of(context).colorScheme.primary
+                          ? Theme.of(context).colorScheme.secondary
                           : null,
                     ),
                     title: Text(entry.name),

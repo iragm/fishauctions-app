@@ -9,6 +9,7 @@ import '../utils/device_identity.dart';
 import '../utils/secure_storage.dart';
 import 'api_service.dart';
 import 'last_page_service.dart';
+import 'menu_store.dart';
 import 'offline_sync_service.dart';
 import 'push_prompt_service.dart';
 import 'push_service.dart';
@@ -148,6 +149,10 @@ class AuthService {
     // Where the last session was browsing is this account's business too —
     // the next sign-in starts at the home page, not someone else's lot.
     await LastPageService.instance.clear();
+    // The drawer's menu is built for one user — staff get an admin section
+    // nobody else does — so the next account starts from the bundled skeleton
+    // and gets its own menu on the first config fetch.
+    await MenuStore.instance.clear();
     // "This phone already declined notifications" was an answer for the
     // previous account, not the next one.
     await PushPromptService.instance.clear();
