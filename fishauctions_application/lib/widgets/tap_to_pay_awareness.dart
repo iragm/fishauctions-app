@@ -77,6 +77,20 @@ class TapToPayAwarenessSheet extends StatelessWidget {
     }
   }
 
+  /// Forgets that the modal was shown, so it fires again on the next eligible
+  /// auction page. For re-recording Apple's onboarding video without a
+  /// reinstall; see `TapToPayService.resetForRecording`.
+  static Future<void> clearShown() async {
+    try {
+      final marker = await _marker();
+      if (marker.existsSync()) {
+        await marker.delete();
+      }
+    } on Object {
+      // Best effort — the fallback is deleting the app.
+    }
+  }
+
   /// Presents the modal. Resolves true when the merchant chose to set it up, so
   /// the caller can route them to the settings screen.
   static Future<bool> show(BuildContext context) async =>

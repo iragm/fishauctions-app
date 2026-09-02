@@ -8,6 +8,7 @@ import 'package:square_mobile_payments_sdk/square_mobile_payments_sdk.dart';
 import '../models/tap_to_pay_diagnostics.dart';
 import '../models/tap_to_pay_status.dart';
 import '../utils/platform_bridge.dart';
+import '../widgets/tap_to_pay_awareness.dart';
 import 'api_service.dart';
 import 'square_payment_service.dart';
 
@@ -433,6 +434,34 @@ class TapToPayService {
     }
     final minor = parts.length > 1 ? (int.tryParse(parts[1]) ?? 0) : 0;
     return minor < osVersionFloor[1];
+  }
+
+  /// Puts this device back to its pre-setup state so Apple's onboarding and
+  /// education flows can be recorded again.
+  ///
+  /// Clears the once-per-install awareness marker, releases the Square
+  /// authorization (so the reader has to arm from cold) and drops this
+  /// service's own state. The one thing it cannot clear is the **Apple Account
+  /// link** — the SDK has no unlink — so the linking step is re-recorded with
+  /// `SquarePaymentService.relinkAppleAccount()`, which presents the same
+  /// sheet on an already-linked device.
+  ///
+  /// Best-effort throughout: a step that throws must not strand the rest, or
+  /// the reset is only usable on a device that didn't need it.
+  Future<List<String>> resetForRecording() async {
+    final failures = <String>[];
+    Future<void> step(String label, Future<void> Function() run) async {
+      try {
+        await run();
+      } on Object catch (e) {
+        failures.add('$label: $e');
+      }
+    }
+
+    await step('awareness marker', TapToPayAwarenessSheet.clearShown);
+    await step('deauthorize', SquarePaymentService.instance.deauthorize);
+    reset();
+    return failures;
   }
 
   /// Drops the reader subscription and forgets the warm-up. Called on sign-out,

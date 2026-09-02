@@ -560,6 +560,21 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
           return {'offered': _bannerGeneration != before};
         },
       )
+      // Warm the reader ahead of the pay button, asked for by the page that
+      // renders one (quick checkout, a single invoice). Never throws — a
+      // rejected promise reads to the page as "this build has no handler".
+      //   tapToPayWarm() → {warmed}
+      ..addJavaScriptHandler(
+        handlerName: 'tapToPayWarm',
+        callback: (List<dynamic> args) async {
+          try {
+            return {'warmed': await _warmTapToPayFromPage()};
+          } on Object catch (e) {
+            debugPrint('Tap to Pay warm-up from page failed: $e');
+            return {'warmed': false, 'error': '$e'};
+          }
+        },
+      )
       ..addJavaScriptHandler(
         handlerName: 'pushEnable',
         callback: (List<dynamic> args) async {
@@ -1461,6 +1476,34 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     await PushPromptService.instance.markOffered(surface);
     await _enablePushFromBanner(surface);
   }
+
+  /// Warms Tap to Pay's reader because a page said it is about to be needed.
+  ///
+  /// Apple's 1.5 asks for the warm-up at launch/foreground and 5.6 wants the
+  /// prompt on screen within a second; a resume can be hours before the charge,
+  /// so the page that renders the pay button is the last honest moment. Which
+  /// pages those are is the *server's* question — same rule as `tapToPayOffer`.
+  ///
+  /// Throttled because `prepare` re-fetches eligibility on every call and a
+  /// page may call this on each HTMX re-render. Mount and resume are not
+  /// throttled, which is what requirement 1.5 actually asks for.
+  Future<bool> _warmTapToPayFromPage() async {
+    final last = _lastPageWarm;
+    final now = DateTime.now();
+    if (last != null && now.difference(last) < _pageWarmInterval) {
+      return false;
+    }
+    _lastPageWarm = now;
+    await _warmSquare();
+    return true;
+  }
+
+  /// When [_warmTapToPayFromPage] last ran, so a burst costs one warm-up.
+  DateTime? _lastPageWarm;
+
+  /// How long a page-triggered warm-up suppresses the next one. Comfortably
+  /// longer than walking between invoices, far shorter than a checkout queue.
+  static const _pageWarmInterval = Duration(minutes: 2);
 
   Future<void> _maybeOfferPushForPath(String path, int generation) async {
     if (!_isPreferencesPath(path)) {

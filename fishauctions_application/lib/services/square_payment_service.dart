@@ -123,6 +123,18 @@ class SquarePaymentService {
     await _sdk.tapToPaySettings.linkAppleAccount();
   }
 
+  /// Re-runs Apple's Tap to Pay account sheet on a device that is *already*
+  /// linked. iOS-only.
+  ///
+  /// The SDK offers no unlink, so this is the only way to see the linking step
+  /// again — which is what re-recording Apple's onboarding video needs.
+  Future<void> relinkAppleAccount() async {
+    if (!Platform.isIOS) {
+      return;
+    }
+    await _sdk.tapToPaySettings.relinkAppleAccount();
+  }
+
   /// Whether this device is linked to an Apple account for Tap to Pay — i.e.
   /// whether the merchant has accepted Apple's Tap to Pay Terms and Conditions.
   ///

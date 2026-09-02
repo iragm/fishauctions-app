@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/tap_to_pay_diagnostics.dart';
 import '../models/tap_to_pay_status.dart';
 import '../providers/config_provider.dart';
+import '../services/square_payment_service.dart';
 import '../services/tap_to_pay_service.dart';
 import '../widgets/tap_to_pay_branding.dart';
 
@@ -158,6 +159,37 @@ class _TapToPayScreenState extends ConsumerState<TapToPayScreen> {
     });
   }
 
+  /// Puts this device back to its pre-setup state so Apple's onboarding and
+  /// education flows can be recorded again, then offers the Apple Account
+  /// sheet — the one step no reset can clear, since the SDK has no unlink.
+  Future<void> _resetForRecording() async {
+    final failures = await _service.resetForRecording();
+    if (!mounted) {
+      return;
+    }
+    setState(() => _diagnostics = null);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          failures.isEmpty
+              ? 'Reset. The awareness moment fires again on the next auction '
+                    'page, and the reader arms from cold.'
+              : 'Partly reset — ${failures.join('; ')}',
+        ),
+        duration: const Duration(seconds: 8),
+      ),
+    );
+    if (!_service.isApplePlatform) {
+      return;
+    }
+    try {
+      await SquarePaymentService.instance.relinkAppleAccount();
+    } on Object catch (e) {
+      // Cancelling the sheet lands here and is the normal way out of it.
+      debugPrint('Apple account relink not completed: $e');
+    }
+  }
+
   /// Apple's education sheet, with a text fallback for iOS 17 and earlier.
   Future<void> _showEducation() async {
     if (await _service.presentEducation()) {
@@ -221,6 +253,7 @@ class _TapToPayScreenState extends ConsumerState<TapToPayScreen> {
                   diagnostics: _diagnostics,
                   running: _diagnosing,
                   onRun: _runDiagnostics,
+                  onReset: _resetForRecording,
                 ),
               ],
             ),
@@ -461,11 +494,13 @@ class _TroubleshootingSection extends StatelessWidget {
     required this.diagnostics,
     required this.running,
     required this.onRun,
+    required this.onReset,
   });
 
   final TapToPayDiagnostics? diagnostics;
   final bool running;
   final Future<void> Function() onRun;
+  final Future<void> Function() onReset;
 
   @override
   Widget build(BuildContext context) {
@@ -544,6 +579,21 @@ class _TroubleshootingSection extends StatelessWidget {
               ],
             ),
           ],
+          // Outside the `else` above so it works before anything is collected:
+          // the state this clears is exactly what a stuck device has.
+          const Divider(height: 32),
+          TextButton.icon(
+            onPressed: () => unawaited(onReset()),
+            icon: const Icon(Icons.restart_alt),
+            label: const Text('Reset for re-recording'),
+          ),
+          Text(
+            'Clears the one-time awareness moment and releases this device\'s '
+            'Square authorization, then re-opens the Apple Account sheet, so '
+            'the setup flow can be recorded again. Does not affect payments '
+            'already taken.',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
         ],
       ),
     );

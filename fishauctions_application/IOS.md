@@ -1,374 +1,59 @@
-# iOS — current state and what's left
+# iOS — state and what's left
 
-The Dart layer is fully platform-aware (Bluetooth printing, permission flows,
-AirPrint, downloads, calendar all branch correctly), and the Square Tap to Pay
-plumbing is now written for iOS too. What remains is Mac-only: the first
-signed build, and the Apple/Square approvals below.
+The Dart layer is fully platform-aware and Tap to Pay works on real hardware (2026-09-02). What remains is Apple's publishing entitlement and the App Store submission.
 
-## Done in-repo (no Mac needed, committed here)
+## Settled decisions
 
-- Bundle ids: `com.fishauctions.app` / `.RunnerTests` (was `com.example.*`).
-- `IPHONEOS_DEPLOYMENT_TARGET = 16.0` — forced by the Square Mobile Payments
-  SDK pod (`s.platform = :ios, '16.0'`). Cuts iOS 15 devices (iPhone 6s/7/SE1);
-  everything iPhone 8+ is fine.
-- `CFBundleDisplayName` = `auction.fish`.
-- **`TARGETED_DEVICE_FAMILY = "1"` — iPhone only, decided 2026-08-29 and a
-  one-way door.** Every hardware feature here is a phone feature (Tap to Pay is
-  iPhone-only; BLE label printing, lot scanning and voice set-winners are all
-  "standing in a room holding a phone"), and nobody has ever looked at the shell
-  stretched to 13". Universal support would also have required a 13" iPad
-  screenshot set and handed App Review a surface to reject under 2.4.1/4.0. The
-  reason it had to be settled *before* the first submission: once a version
-  ships supporting iPad, App Store Connect will not accept an update that drops
-  it — adding iPad later is trivial, removing it is not. iPad users can still
-  install and run it in iPhone compatibility mode.
-  `UISupportedInterfaceOrientations~ipad` is left in Info.plist as dead config;
-  it costs nothing and is what an iPad re-add would need.
-- Info.plist usage descriptions: Bluetooth, camera, photo library, calendar
-  (legacy + iOS 17 write-only/full-access keys), location (distances + Square
-  charge requirement).
-- Plugins integrate via Swift Package Manager (Flutter 3.44) — no
-  permission_handler Podfile macros needed.
-- `AppDelegate.swift` implements the `com.fishauctions.app/platform` channel
-  (`initializeSquare`) with the cached-id early-init pattern; the Dart bridge
-  (`lib/utils/platform_bridge.dart`, ex-`android_platform.dart`) now routes
-  Square init through the channel on iOS as well.
-- `SquarePaymentService`: location permission is requested on iOS before a
-  charge (Square requires it there too), and `ensureAppleAccountLinked()` runs
-  the one-time Apple account link ahead of the first iOS charge (the payment
-  sheet calls it; no-op on Android).
-- Home-screen quick actions (`ShortcutService`) work on iOS with no extra
-  project config.
-- `Runner/PrivacyInfo.xcprivacy` (in the target's Resources) declares the one
-  required-reason API the app target itself calls — `UserDefaults`, for
-  AppDelegate's cached Square app id — under reason `CA92.1`. Without it every
-  upload returns `ITMS-91053: Missing API declaration`. Plugins ship their own
-  manifests; extend this one only if native code starts reading file
-  timestamps, disk space, boot time, or the active keyboard list. The privacy
-  *nutrition label* is answered in the App Store Connect questionnaire, not
-  here (see the comment in the file).
+- Bundle ids `com.fishauctions.app` / `.RunnerTests`; `CFBundleDisplayName` = `auction.fish`.
+- **`IPHONEOS_DEPLOYMENT_TARGET = 16.0`** — forced by the Square pod. Cuts iPhone 6s/7/SE1.
+- **`TARGETED_DEVICE_FAMILY = "1"` (iPhone only) is a one-way door.** Every hardware feature here is a phone feature, and once a version ships supporting iPad, App Store Connect will not accept an update that drops it. iPad users can still run it in compatibility mode. `UISupportedInterfaceOrientations~ipad` is left in as dead config for a future re-add.
+- **`PrivacyInfo.xcprivacy`** declares `UserDefaults` under reason `CA92.1` (AppDelegate's cached Square app id). Without it every upload returns `ITMS-91053`. Extend it only if native code starts reading file timestamps, disk space, boot time, or the keyboard list. The nutrition label is answered in App Store Connect, not here.
+- **`ENABLE_USER_SCRIPT_SANDBOXING = NO`** — Square's setup script can't run under sandboxing.
+- iOS "flavors" aren't needed; environment selection is dart-define only. Only add per-env bundle ids if staging and prod must coexist on one iPhone.
 
-## First run on a device (needs a Mac + Xcode)
+## Getting an entitled build onto a phone with no Mac
 
-1. `open ios/Runner.xcworkspace`, pick a signing team for the Runner target.
-2. Run with **no `--flavor`** (iOS has no schemes; environment selection is
-   dart-define only — Android's `--flavor` merely picks the applicationId):
+Apple's **development** Tap to Pay entitlement attaches to *development* profiles, so it can never reach TestFlight. `ios-release.yml` with `distribute: true` + **`export_method: development`** swaps `RunnerDebug.entitlements` into place, exports with `method=development`, skips App Store Connect, and leaves a sideloadable IPA as the artifact.
 
-   ```bash
-   flutter run -t lib/main.dart --dart-define=FLAVOR=staging
-   ```
+**The only prerequisite is one registered device** — Apple issues no development profile to a team with zero of them.
 
-3. At this point everything except Tap to Pay should work: WebView shell +
-   session handoff, Google sign-in, BLE label printing, PDF/system printing,
-   authenticated downloads, camera check-in scanner, add-to-calendar.
+1. Get the UDID: `idevice_id -l` (no app can read it; the `device_uuid` this app sends is an unrelated random v4).
+2. developer.apple.com → Certificates, Identifiers & Profiles → **Devices** → **+**. Capped at 100/year, and removals don't free a slot until renewal.
+3. **No new CI secrets** — a development export uses the same App Store Connect API key.
+4. `ideviceinstaller -i <the>.ipa`. It only installs on a registered device. Artifact retention is one day.
 
-## Google sign-in on iOS — done in-repo
+That build gets `aps-environment: development`, so its push tokens are sandbox ones.
 
-The **iOS OAuth client** exists (Google Cloud console → Credentials → OAuth
-client ID → *iOS*, bundle id `com.fishauctions.app`, same Cloud project as the
-web client so the ID token's audience lines up), and Info.plist carries both
-halves it needs: `GIDClientID`, and a `CFBundleURLTypes` entry whose scheme is
-that id with the domain reversed.
+**Use `flavor: prod` for a real Tap to Pay test.** The workflow defaults to `staging`, whose Square config is sandbox — and `MockReaderUI` is pod'd `:configurations => ['Debug']` while the archive is Release, so a sandbox build can only ever show the "connect hardware" screen.
 
-Both are **committed in plaintext, deliberately.** An OAuth client id for a
-mobile app is public by construction — it ships inside every copy of the
-binary and falls out of an IPA in seconds. iOS OAuth clients have no client
-secret at all; they're public clients, and the security boundary is the
-backend verifying the ID token's issuer and audience, plus Google binding the
-client to the bundle id. Same category as `square_application_id`. Moving it
-to an Actions secret would buy nothing (the value still lands in the shipped
-plist) and cost a build-time plist mutation that breaks `flutter run` locally.
-The genuinely secret material — the App Store Connect `.p8`, Square access
-tokens, `FIREBASE_CREDENTIALS_JSON` — never appears in the app at all.
+## Signing — four runs' worth of dead ends, don't re-try
 
-`serverClientId` (the *web* client id) keeps coming from
-`/api/mobile/config/`, already wired in `SocialAuthService` — that one is
-per-deployment, and it's the reason a fork only has to edit Info.plist rather
-than rebuild against new constants.
+- **Not `flutter build ipa`.** It passes `-allowProvisioningUpdates` but never the `-authenticationKey*` flags, which xcodebuild requires in the absence of an Apple ID in Xcode's Accounts pane. Staging the `.p8` doesn't help — nothing points xcodebuild at it. The workflow runs `flutter build ios --config-only` then archives/exports with `xcodebuild` itself.
+- **The archive is ad-hoc signed and `-exportArchive` applies the real signature.** Archive-then-resign is how Xcode works, but Apple won't issue a development profile to a team with zero registered devices. Ad-hoc (`CODE_SIGN_IDENTITY=-`) satisfies the archive half with no profile, and is the one identity that doesn't trip a conflict under `CODE_SIGN_STYLE=Automatic`. This is what Xcode Cloud does ([DevForums 756119](https://developer.apple.com/forums/thread/756119)).
+- **Not `CODE_SIGNING_ALLOWED=NO`** — a fully unsigned archive exports an *unsigned* IPA and pairs with `signingStyle: manual`.
+- The Flutter template pins `"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Developer"` in all three project-level configs; deleting the pin doesn't help, because Xcode's default is "Apple Development", which wants the same kind of profile.
 
-**Verify on device:** under Flutter 3.44's `SceneDelegate` lifecycle,
-`application(_:open:options:)` is never called — the OAuth callback arrives via
-`scene(_:openURLContexts:)` and reaches `google_sign_in_ios` only through
-Flutter's forwarding shim. If sign-in opens Google and then hangs on the way
-back, that's the suspect, and it looks identical to a mistyped URL scheme.
+## `ios/Podfile` exists only for Square's setup phase — don't delete it
 
-## Tap to Pay on iPhone — remaining to-do list
+Flutter regenerates a stock Podfile on demand, silently taking the App Store rejection with it. `SquareMobilePaymentsSDK.framework` ships nested frameworks and a `setup` executable, both illegal in an App Store binary (ITMS-90035/90205/90206); the phase hoists and re-signs them and must be **last**, so it's added from `post_integrate`. It's skipped when `CODE_SIGNING_ALLOWED=NO`, because the re-sign needs a real identity.
 
-Code is written; everything left needs a Mac, an Apple Developer account, or
-Square-side approval. In order:
+## Apple-side prerequisites for a signed build
 
-- [x] AppDelegate `com.fishauctions.app/platform` channel with
-      `initializeSquare` → `MobilePaymentsSDK.initialize(squareApplicationID:)`
-      (cached-id early init in `didFinishLaunching`; refuse a different id —
-      restart to switch deployments, same semantics as Android).
-- [x] Dart bridge routes Square init through the channel on iOS
-      (`PlatformBridge.initializeSquare`); capability check uses the plugin's
-      `isDeviceCapable()` on iOS (hardware floor: iPhone XS+ on iOS 16.4+).
-- [x] Location permission requested on iOS before a charge
-      (`ensureLocationPermission`; `NSLocationWhenInUseUsageDescription` in
-      Info.plist).
-- [x] One-time Apple account link step in the payment sheet
-      (`ensureAppleAccountLinked` → plugin's `isAppleAccountLinked` /
-      `linkAppleAccount`), with a clear message on cancel/failure.
-- [ ] **First build on a Mac** — `AppDelegate.swift` was written without an
-      iOS toolchain; expect at most minor compile fixes (the
-      `MobilePaymentsSDK.initialize` call matches the Square plugin's own
-      example app verbatim). `open ios/Runner.xcworkspace`, pick a signing
-      team, `flutter run -t lib/main.dart --dart-define=FLAVOR=staging`.
-- [ ] **Sandbox smoke test with the mock reader** — with the staging config
-      (sandbox app id), authorize completes on a simulator/device; the plugin
-      ships `MockReaderUI` (`showMockReaderUI`) to exercise a full tap → 
-      `payments/confirm/` round-trip without the entitlement or real hardware.
-      Temporary debug hook; don't ship a button for it.
-- [x] **Request the Tap to Pay *development* entitlement** —
-      `com.apple.developer.proximity-reader.payment.acceptance`. **Granted
-      2026-07-31.** It's in `ios/Runner/RunnerDebug.entitlements`, which is
-      what Debug builds sign with, so a real charge on a tethered iPhone works.
-- [ ] **Request the Tap to Pay *publishing* entitlement.** A second, separate
-      grant, and the one TestFlight **and** the App Store both need — Apple
-      issues it only after reviewing the app against its published checklist.
-      Status of every item, plus the videos and materials Apple asks for, is in
-      **`TAPTOPAY.md`**; the backend half is `BACKEND_SPEC.md` Part TTP (three
-      of those are review blockers).
-- [ ] **After the publishing grant**: add the same entitlement key to
-      `ios/Runner/Runner.entitlements` and regenerate the distribution profile.
-      (`CODE_SIGN_ENTITLEMENTS` is already wired for both configurations.)
-      Deliberately NOT there now — a *distribution* profile can't carry it
-      until the publishing grant lands, and an entitlements file the profile
-      doesn't satisfy breaks every Release/TestFlight export.
-- [ ] **Real-device production test**: iPhone XS+ on iOS 16.4+, production
-      Square app id from prod `/api/mobile/config/`, real card, small
-      invoice; verify the invoice flips to PAID and the web checkout page
-      re-renders.
+Cloud signing can use an app record but can't invent one.
 
-> No Square "per-seller Tap to Pay" sign-off exists. The integrator's Square
-> account is already approved for Tap to Pay, and OAuth-connected seller
-> accounts inherit that — there is no per-seller dashboard T&C step to gate on
-> (applies to both platforms; don't reintroduce it).
-- [ ] When iOS *push* lands later: the backend's `send_fcm_message` needs an
-      `notification`+`data` hybrid so iOS displays it (the current data-only
-      message doesn't) — the exact backend change is in `PUSH.md` Part D — plus
-      an APNs auth key in Firebase and the push capability below.
+1. **Apple Developer Program membership**, active.
+2. **Register the App ID** (explicit `com.fishauctions.app`). Enable capabilities only alongside the matching entitlements file — an entitlement the profile doesn't carry breaks signing. Currently needed: Push Notifications, Background Modes → Remote notifications, App Attest, NFC Tag Reading, Sign in with Apple, Tap to Pay.
+3. **Create the App Store Connect record.** The App Store name is globally unique, ≤30 chars, and independent of `CFBundleDisplayName`.
+4. **App Store Connect API key, role Admin.** **Admin is not a suggestion** — Certificates, Identifiers & Profiles is a separate permission area only Admin and Account Holder reach over the API, and cloud signing *creates* the distribution certificate. An App Manager key fails with `Cloud signing permission error` / `No signing certificate "iOS Distribution" found`, and a key's role **cannot be edited after creation** ([DevForums 698117](https://developer.apple.com/forums/thread/698117)). Download the `.p8` once.
+5. Repo secrets: `APPSTORE_API_KEY_ID`, `APPSTORE_API_ISSUER_ID`, `APPSTORE_API_PRIVATE_KEY` (whole file, BEGIN lines included), `APPLE_TEAM_ID`.
+6. Run **iOS Release** with `distribute: true`. First run is the shakeout.
 
-## Distribution — CI only, no Mac
+TestFlight processing is ~5–15 min. **Internal testers need no review**; external ones need Beta App Review. `ITSAppUsesNonExemptEncryption=false` already skips the per-upload encryption question.
 
-Builds run on the `macos-latest` runner in `.github/workflows/ios-release.yml`:
-- **Unsigned (default):** `flutter build ios --no-codesign`, no secrets — the
-  compile/link check on Apple toolchain. Works today.
-- **Signed → TestFlight (`distribute: true`):** **App Store Connect API key +
-  Xcode automatic cloud signing** — no hand-made certificate or provisioning
-  profile to maintain. Four secrets: `APPSTORE_API_KEY_ID`,
-  `APPSTORE_API_ISSUER_ID`, `APPSTORE_API_PRIVATE_KEY`, `APPLE_TEAM_ID`.
+## Remaining
 
-### Getting a Tap to Pay-entitled build onto a phone, with no Mac
+- [ ] **Tap to Pay *publishing* entitlement** — checklist, videos and materials in `TAPTOPAY.md`.
+- [ ] **After the grant**: add `com.apple.developer.proximity-reader.payment.acceptance` to `Runner.entitlements` and regenerate the distribution profile. Deliberately not there now.
+- [ ] **iOS push**: upload an APNs auth key to Firebase; the backend's `send_fcm_message` needs a `notification`+`data` hybrid for iOS to display it (`PUSH.md`).
 
-Apple's **development** Tap to Pay entitlement (granted 2026-07-31) attaches to
-*development* provisioning profiles, so it can never reach a TestFlight build —
-those are distribution-signed, and `Runner.entitlements` deliberately omits the
-key until the publishing grant. `ios-release.yml` therefore has a third mode:
-`distribute: true` + **`export_method: development`**. It swaps
-`RunnerDebug.entitlements` into place, exports with `method=development`, skips
-App Store Connect entirely, and leaves a sideloadable IPA as the run's artifact.
-
-Prerequisite, and the only one: **at least one registered device.** Apple issues
-no development profile to a team with zero of them — which is the whole reason
-the archive here is ad-hoc signed. Registration is in the **Apple Developer
-portal**, not App Store Connect:
-
-1. Get the UDID. No app can read it (Apple removed that in iOS 7 — the
-   `device_uuid` this app sends to `devices/register/` is a random v4 UUID it
-   generates itself, and is unrelated). Off a Linux box:
-   `sudo apt install libimobiledevice-utils && idevice_id -l`. Windows: the
-   Apple Devices app, click the Serial Number field to cycle to UDID.
-2. developer.apple.com/account → **Certificates, Identifiers & Profiles** →
-   **Devices** → **+** → platform *iOS, tvOS, watchOS*, any name, paste the
-   UDID → Continue → Register. Capped at 100 devices per membership year, and
-   removals don't free a slot until renewal.
-3. **No new CI secrets.** The four that already exist are what cloud signing
-   uses, and a development export uses the same App Store Connect API key —
-   which must be **Admin**, as it already must be to create the distribution
-   certificate. `-allowProvisioningUpdates` builds a fresh development profile
-   including every registered device at export time.
-4. Install over USB with the same toolchain that produced the UDID:
-   `sudo apt install ideviceinstaller && ideviceinstaller -i <the>.ipa`. The IPA
-   only installs on a registered device, which is the point. Artifact retention
-   is one day.
-
-That build gets `aps-environment: development`, so its push tokens are sandbox
-ones — right for a development build, wrong for anything a user touches.
-
-**The signed path does not use `flutter build ipa`,** and must not be
-"simplified" back to it. That command passes `-allowProvisioningUpdates` but
-never the `-authenticationKey*` flags, and `man xcodebuild` is explicit that
-the option needs *either* an Apple ID in Xcode's Accounts pane (impossible on a
-fresh runner) *or* the API key named via `-authenticationKeyPath` /
-`-authenticationKeyID` / `-authenticationKeyIssuerID`. Staging the `.p8` in
-`~/private_keys` doesn't help — nothing points xcodebuild at it, and cloud
-signing fails with "No Accounts: Add a new account in Accounts settings".
-flutter_tools exposes no way to add xcodebuild flags, so the workflow instead
-runs `flutter build ios --config-only` (which writes `Generated.xcconfig`,
-updates the SPM minimum deployment, and runs `pod install` for the
-CocoaPods-only plugins — `square_mobile_payments_sdk` ships no `Package.swift`)
-and then archives/exports with `xcodebuild` itself.
-
-**The archive is ad-hoc signed and `-exportArchive` applies the real
-signature.** That looks odd and is load-bearing. Archive-then-resign is simply
-how Xcode works — the archive is signed for *development*, and choosing a
-distribution method at export re-signs it — but Apple will not issue a
-development profile to a team with **zero registered devices**, which is every
-team that doesn't own a Mac or an iPhone yet. Ad-hoc signing
-(`CODE_SIGN_IDENTITY=-`, `AD_HOC_CODE_SIGNING_ALLOWED=YES`, alongside
-`CODE_SIGN_STYLE=Automatic` + `DEVELOPMENT_TEAM`) satisfies the archive half
-with no provisioning profile and therefore no device, while still producing a
-properly signed bundle for the export to re-sign. It's also the one identity
-that doesn't trip the conflict described below, because ad-hoc has no profile to
-conflict over. This is what Xcode Cloud does; the recipe comes from
-[Apple DevForums 756119](https://developer.apple.com/forums/thread/756119).
-
-**Don't "simplify" that to `CODE_SIGNING_ALLOWED=NO`.** A fully unsigned archive
-is the recipe for exporting an *unsigned* IPA and pairs with
-`signingStyle: manual` + empty signing keys; `signingStyle: automatic` expects a
-normally-signed bundle to re-sign.
-
-Four runs established that there is no way to make a signed archive work here,
-so don't re-try these:
-
-1. The Flutter template pins
-   `"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Developer"` in all three
-   project-level configs (still true in 3.44). That pinned the Release archive
-   to a *development* identity → *"No profiles for 'com.fishauctions.app' were
-   found: Xcode couldn't find any iOS App Development provisioning profiles"* +
-   *"Your team has no devices from which to generate a provisioning profile."*
-2. Overriding the identity as an xcodebuild command-line setting leaks it to
-   **every target in the workspace** → *"GoogleUtilities_…-UserDefaults has
-   conflicting provisioning settings"*. xcodebuild cannot scope a build setting
-   to one target.
-3. Scoping the override to Runner via an xcconfig just relocates the same
-   conflict → *"Runner is automatically signed for development, but a
-   conflicting code signing identity Apple Distribution has been manually
-   specified."* Automatic signing rejects a specified identity at **any** scope.
-4. Deleting the template's three pins (done — they're gone from
-   `project.pbxproj`, which also fixes local Mac builds that carried the same
-   development-only pin) changes nothing on its own: Xcode's default iOS
-   `CODE_SIGN_IDENTITY` is `Apple Development`, the same kind of identity
-   wanting the same kind of profile. Same error as (1).
-
-Registering one device would also fix it — and is the answer Apple DTS gives —
-but a UDID requires a Mac or an iPhone, which is the thing we don't have yet.
-The other alternative is **manual** signing: a distribution certificate and App
-Store profile minted and stored as secrets ourselves. That works with no devices
-and is the fallback if export-time signing ever fails, but it reintroduces
-exactly the certificate maintenance this pipeline exists to avoid.
-
-`ExportOptions.plist` asks for `method=app-store` + `signingStyle=automatic`,
-and the export step gets the API key flags, so Xcode creates/fetches the
-distribution certificate and App Store profile in the cloud and signs the app
-plus every embedded framework in one pass.
-
-The exported `.ipa` filename is **globbed, never hardcoded**: xcodebuild names
-it from the archive's product and nothing predicts whether that resolves to
-`PRODUCT_NAME` (`Runner`), `CFBundleName` (`fishauctions_application`) or
-`CFBundleDisplayName` (`auction.fish`) — flutter_tools prints `"$path/*.ipa"`
-for the same reason.
-
-### `ios/Podfile` exists only for Square's setup phase — don't delete it
-
-`SquareMobilePaymentsSDK.framework` ships nested frameworks and a `setup`
-executable inside the framework. Both are illegal in an App Store binary, so the
-upload is **rejected during processing** — the build succeeds, TestFlight
-accepts the file, and the failure arrives by email minutes later:
-
-```
-ITMS-90035  …/SquareMobilePaymentsSDK.framework/setup is not properly signed
-ITMS-90205  …/SquareMobilePaymentsSDK.framework contains disallowed nested bundles
-ITMS-90206  …/SquareMobilePaymentsSDK.framework contains disallowed file 'Frameworks'
-```
-
-Square's fix is to run that `setup` executable as a build phase, and it must run
-**after** `[CP] Embed Pods Frameworks` (which is what puts the framework in the
-bundle) — Square documents it as "must be the last build phase". That's the
-whole reason this project has a Podfile: Flutter otherwise generates the stock
-one, and deleting ours silently restores the rejection.
-
-The phase is added from a **`post_integrate`** hook, not `post_install` and not
-`project.pbxproj`. CocoaPods appends its own phases during user-project
-integration, which happens *after* `post_install` — so a phase added any earlier
-sits ahead of the embed phase, finds no framework, no-ops, and the rejection
-comes back looking exactly the same. Don't "simplify" it into the pbxproj.
-
-Don't hand-roll the cleanup with `rm -rf` either: the nested frameworks are real
-dependencies, and deciding which get hoisted into the app's own `Frameworks`
-directory versus dropped is the setup script's job.
-
-Related build setting: `ENABLE_USER_SCRIPT_SANDBOXING = NO` (already set in all
-three configs) — Square's script can't run under script sandboxing.
-
-### Apple-side prerequisites for the first signed build
-
-Cloud signing can only *use* an app record; it can't invent one. In order:
-
-1. **Apple Developer Program membership**, $99/yr, paid and active. If
-   <https://developer.apple.com/account> shows no "Certificates, Identifiers &
-   Profiles" section at all, enrollment hasn't completed — everything below is
-   blocked until it does. (An empty list inside that section is fine and
-   expected; cloud signing fills it in.)
-2. **Register the App ID**: Certificates, Identifiers & Profiles → Identifiers
-   → ＋ → *App IDs* → *App* → Description `auction.fish`, Bundle ID **explicit**
-   `com.fishauctions.app`. Leave every capability **off** for now — Push
-   Notifications and Tap to Pay get enabled alongside `Runner.entitlements`,
-   and an entitlement the profile doesn't carry breaks signing.
-3. **Create the App Store Connect record**: App Store Connect → Apps → ＋ →
-   New App. Platform iOS; Name `auction.fish` (App Store names are globally
-   unique and ≤30 chars — if it's taken, `auction.fish` with a suffix, and note
-   that this name is independent of `CFBundleDisplayName`, which is what shows
-   under the icon); Primary Language English (U.S.); Bundle ID = the identifier
-   from step 2; SKU any private string, e.g. `auction-fish-ios`; Full access.
-4. **App Store Connect API key**: Users and Access → Integrations → App Store
-   Connect API → Team Keys → Generate. Role **Admin** — nothing less works, see
-   below. Download the `.p8` **once** (Apple never shows it again). Key ID and
-   Issuer ID are on that page.
-
-   **Admin is not a suggestion.** Certificates, Identifiers & Profiles is a
-   separate permission area that only Admin and Account Holder reach over the
-   API, so cloud signing — which *creates* the distribution certificate — fails
-   under any lesser role with:
-
-   ```
-   error: exportArchive Cloud signing permission error
-   error: exportArchive No signing certificate "iOS Distribution" found
-   ```
-
-   That is what an App Manager key produces, and there is no way to grant a key
-   the "Access to Cloud Managed Distribution Certificate" setting that exists
-   for human users ([DevForums 698117](https://developer.apple.com/forums/thread/698117)).
-   A key's role also **cannot be edited after creation** — revoke it and
-   generate a new one, then update `APPSTORE_API_KEY_ID` and
-   `APPSTORE_API_PRIVATE_KEY` (the Issuer ID is per-team and doesn't change).
-5. Repo secrets (Settings → Secrets and variables → Actions):
-   `APPSTORE_API_KEY_ID`, `APPSTORE_API_ISSUER_ID`, `APPSTORE_API_PRIVATE_KEY`
-   (the whole `.p8`, `-----BEGIN…` lines included), `APPLE_TEAM_ID` (10 chars,
-   from developer.apple.com → Membership).
-6. Run **iOS Release** with `distribute: true`, flavor `staging`. First run is
-   the shakeout: cloud signing creates the distribution certificate and
-   provisioning profile on the fly.
-
-Then in App Store Connect → TestFlight: the build takes ~5–15 min to process.
-**Internal testers** (up to 100 people on your team, added under Users and
-Access) need **no review at all** — that's the fast path to a phone. External
-testers require Beta App Review. `ITSAppUsesNonExemptEncryption=false` in
-Info.plist already skips the per-upload encryption question.
-
-> **Guideline 4.8 (Login Services)** applies at *App Store* submission, not to
-> TestFlight. Offering Google sign-in alongside first-party accounts can draw a
-> demand for an equivalent privacy-preserving option (in practice: Sign in with
-> Apple). Enforcement is inconsistent and the first-party username/password
-> login is a reasonable defense, so this is deliberately **not** pre-built —
-> if it's cited, adding Sign in with Apple is the fix, not removing Google.
-
-Also needed for iOS **push**: enable the **Push Notifications** + **Background
-Modes → Remote notifications** capabilities on the Runner target (do it with the
-Tap to Pay entitlement work above), and upload the APNs key to Firebase.
-
-iOS "flavors": not needed for environment selection. Only add per-env bundle
-ids/schemes if staging and prod must coexist on one iPhone the way they do on
-Android.
+> **No Square "per-seller Tap to Pay" sign-off exists.** The integrator's account is approved and OAuth-connected sellers inherit that. Don't reintroduce a per-seller T&C step on either platform.
