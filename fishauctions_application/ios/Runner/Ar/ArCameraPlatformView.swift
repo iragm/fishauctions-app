@@ -40,8 +40,6 @@ class ArCameraPlatformView: NSObject, FlutterPlatformView, ARSessionDelegate {
     session.delegate = self
     session.delegateQueue = DispatchQueue.main
 
-    UIDevice.current.beginGeneratingDeviceOrientationNotifications()
-
     if ARWorldTrackingConfiguration.isSupported {
       let config = ARWorldTrackingConfiguration()
       config.planeDetection = []
@@ -61,7 +59,6 @@ class ArCameraPlatformView: NSObject, FlutterPlatformView, ARSessionDelegate {
 
   func dispose() {
     session.pause()
-    UIDevice.current.endGeneratingDeviceOrientationNotifications()
     events.clearStatus()
     onDispose()
   }
@@ -97,10 +94,15 @@ class ArCameraPlatformView: NSObject, FlutterPlatformView, ARSessionDelegate {
     lastDetectionAttempt = now
     detectionInFlight = true
 
+    // The buffer is owned by `frame`, and ARKit recycles its pool. The Vision pass below runs on
+    // another queue and outlives this function, so the frame has to be held for the duration or a
+    // long pass can read a buffer ARKit has already handed to a newer frame — occasional garbled
+    // detections with nothing in the log. `detectionInFlight` keeps it to one at a time, which is
+    // why this has stayed rare rather than impossible.
     let pixelBuffer = frame.capturedImage
     let bufferWidth = CVPixelBufferGetWidth(pixelBuffer)
     let bufferHeight = CVPixelBufferGetHeight(pixelBuffer)
-    let cgOrientation = Self.exifOrientation(for: UIDevice.current.orientation)
+    let cgOrientation = Self.exifOrientation(for: interfaceOrientation)
     // ARKit's captured buffer is always in the sensor's native (landscape) orientation; Vision
     // rotates its conceptual frame per `cgOrientation`, so a portrait hint (.left/.right) means
     // the corner points it reports are relative to a width/height-swapped image.
@@ -118,7 +120,12 @@ class ArCameraPlatformView: NSObject, FlutterPlatformView, ARSessionDelegate {
         DispatchQueue.main.async { self?.detectionInFlight = false }
       }
       guard let self = self else { return }
-      try? handler.perform([request])
+      // Explicitly `-> Void`: with the single-expression form the closure returns `Void?` (from
+      // `try?`), which makes `withExtendedLifetime`'s own result non-Void and unused, and Swift
+      // warns about it.
+      withExtendedLifetime(frame) { () -> Void in
+        try? handler.perform([request])
+      }
       let observations = (request.results as? [VNBarcodeObservation]) ?? []
       let barcodes: [[String: Any?]] = observations.compactMap { obs in
         guard obs.symbology == .qr else { return nil }
@@ -137,15 +144,51 @@ class ArCameraPlatformView: NSObject, FlutterPlatformView, ARSessionDelegate {
     }
   }
 
-  private static func exifOrientation(for deviceOrientation: UIDeviceOrientation)
+  /// How the UI is currently laid out, which is what the camera buffer has to be interpreted
+  /// against — **not** `UIDevice.current.orientation`.
+  ///
+  /// The two are different questions and the device one is wrong here twice over. It reports the
+  /// physical attitude of the handset, so it answers `.faceUp` / `.faceDown` the moment the phone
+  /// is held flat — which on this screen is not an edge case but *the* use case: someone holding a
+  /// phone over a table of lot labels. Those cases have no image orientation at all, so the old
+  /// code fell back to portrait, silently, whatever the UI was actually doing. And it is
+  /// unconstrained by the app's supported orientations, so it can report a rotation the interface
+  /// never adopted.
+  ///
+  /// The consequence is not a wrong-way-up preview — ARKit renders the passthrough itself — it is
+  /// that `reportedWidth`/`reportedHeight` swap and every QR corner is normalized in a transposed
+  /// frame. Bearings computed from those corners are then wrong, so the overlay chips sit on the
+  /// wrong labels and the locate beacon points into the room. Android reads the interface rotation
+  /// for exactly this reason (`ar/ArCameraPlatformView.kt`, `activity.display?.rotation`).
+  ///
+  /// Read on the main thread only, which is where `maybeDetect` runs (`session.delegateQueue`).
+  private var interfaceOrientation: UIInterfaceOrientation {
+    if let scene = sceneView.window?.windowScene {
+      return scene.interfaceOrientation
+    }
+    // Not in a window yet. The app's own foreground scene is the next best answer; portrait is the
+    // last resort, and matches how this screen is almost always held.
+    let scene = UIApplication.shared.connectedScenes
+      .compactMap { $0 as? UIWindowScene }
+      .first { $0.activationState == .foregroundActive }
+    return scene?.interfaceOrientation ?? .portrait
+  }
+
+  /// Interface orientation → the EXIF orientation Vision needs for ARKit's captured buffer, which
+  /// is always in the sensor's native landscape frame.
+  ///
+  /// Note the deliberate cross: `UIInterfaceOrientation.landscapeRight` is the *device* rotated
+  /// left and vice versa (Apple documents the inversion). The four mappings below are therefore
+  /// the same four the device-orientation version had — only the question being asked has changed.
+  private static func exifOrientation(for orientation: UIInterfaceOrientation)
     -> CGImagePropertyOrientation
   {
-    switch deviceOrientation {
+    switch orientation {
     case .portraitUpsideDown: return .left
-    case .landscapeLeft: return .up
-    case .landscapeRight: return .down
+    case .landscapeRight: return .up
+    case .landscapeLeft: return .down
     case .portrait: return .right
-    default: return .right  // .faceUp/.faceDown/.unknown — portrait is this app's common case
+    default: return .right  // .unknown — portrait is this app's common case
     }
   }
 

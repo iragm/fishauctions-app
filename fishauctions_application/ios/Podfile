@@ -45,6 +45,50 @@ end
 post_install do |installer|
   installer.pods_project.targets.each do |target|
     flutter_additional_ios_build_settings(target)
+
+    # ── permission_handler: which permissions are compiled in ──────────────────
+    #
+    # Every PERMISSION_* macro defaults to **0** (PermissionHandlerEnums.h), and a
+    # permission compiled out is not absent — it is a stub that answers
+    # `PermissionStatusDenied` without ever asking iOS. So the failure looks like
+    # a user who declined: lot scanning shows its "camera is off" explainer
+    # forever, and every voice feature reports no microphone, with no prompt, no
+    # error and nothing in the log.
+    #
+    # This is currently a **belt**, not a fix: Flutter 3.44 enables Swift Package
+    # Manager by default on stable, and under SPM the plugin's Package.swift
+    # derives each macro from the Info.plist keys — camera, microphone, speech
+    # and location all resolve ON from keys this app already has. But that is one
+    # `flutter config --no-enable-swift-package-manager`, or one fallback to the
+    # CocoaPods path, away from silently disabling all of it. The defines are
+    # ignored under SPM, so stating them costs nothing and removes the trap.
+    #
+    # Exactly the five `Permission.*` values the Dart code uses (camera,
+    # microphone, speech, locationWhenInUse, bluetooth*) and no more: each macro
+    # compiles in a strategy that touches its framework, so enabling one nothing
+    # asks for only adds surface. Keep the list in step with both the Dart usage
+    # and ios/Runner/Info.plist — a macro set here with no matching
+    # NS*UsageDescription is an App Store rejection, and the reverse is the
+    # silent denial above.
+    #
+    # Merged rather than assigned with `||=` (the snippet in permission_handler's
+    # own README). `||=` writes nothing at all when *anything* already set the
+    # key — a Pods target that carries `DEBUG=1`, say — and what it writes
+    # nothing about is a permission that then compiles out. Silently. That is the
+    # same failure this block exists to prevent, so it must not be reachable
+    # through the block itself.
+    permissions = %w[
+      PERMISSION_CAMERA
+      PERMISSION_MICROPHONE
+      PERMISSION_SPEECH_RECOGNIZER
+      PERMISSION_LOCATION
+      PERMISSION_BLUETOOTH
+    ].map { |name| "#{name}=1" }
+    target.build_configurations.each do |config|
+      existing = config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] || ['$(inherited)']
+      existing = [existing] unless existing.is_a?(Array)
+      config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] = (existing + permissions).uniq
+    end
   end
 end
 

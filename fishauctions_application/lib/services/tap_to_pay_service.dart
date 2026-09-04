@@ -149,6 +149,11 @@ class TapToPayService {
         accessToken: info.accessToken!,
         locationId: info.locationId!,
       );
+      // Again, because the call above is the first thing guaranteed to have
+      // initialized the SDK — and `listenToReader` declines to subscribe
+      // before that, since on Android touching the plugin first ends the
+      // process. Idempotent: it returns immediately once subscribed.
+      listenToReader();
     } on Object catch (e) {
       // An authorize failure at warm-up time is not the cashier's problem yet:
       // the charge path re-authorizes and reports failures with real context.
@@ -189,6 +194,12 @@ class TapToPayService {
   /// timeout on, every single charge, showing "Checking Tap to Pay…".
   void listenToReader() {
     if (_readerCallback != null) {
+      return;
+    }
+    if (!SquarePaymentService.instance.isInitialized) {
+      // Nothing to subscribe to yet, and on Android asking anyway ends the
+      // process (see PlatformBridge.squareInitialized). `prepare` calls this
+      // again after `ensureAuthorized`, which initializes.
       return;
     }
     try {
@@ -287,7 +298,7 @@ class TapToPayService {
     final square = SquarePaymentService.instance;
     final environment = await probe(
       'environment',
-      () async => (await square.environment()).name,
+      () async => (await square.environment())?.name,
     );
     final capable = await probe('isDeviceCapable', square.isDeviceCapable);
     final linked = Platform.isIOS
@@ -445,6 +456,12 @@ class TapToPayService {
   /// link** — the SDK has no unlink — so the linking step is re-recorded with
   /// `SquarePaymentService.relinkAppleAccount()`, which presents the same
   /// sheet on an already-linked device.
+  ///
+  /// A *real* unlink does exist, just not through any API: Apple's
+  /// `businessconnect.apple.com/taptopay/removeall` removes every Tap to Pay
+  /// merchant id from an Apple Account, after which acceptance is genuinely
+  /// first-time again. Do that before recording if the relink sheet isn't
+  /// convincing enough.
   ///
   /// Best-effort throughout: a step that throws must not strand the rest, or
   /// the reset is only usable on a device that didn't need it.

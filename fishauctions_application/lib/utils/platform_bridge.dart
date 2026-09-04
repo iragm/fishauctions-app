@@ -319,5 +319,32 @@ class PlatformBridge {
     await _channel.invokeMethod<void>('initializeSquare', {
       'applicationId': applicationId,
     });
+    _squareInitialized = true;
   }
+
+  /// Whether [initializeSquare] has completed successfully in this process.
+  ///
+  /// **This is a crash guard, not a convenience.** Every Square plugin module
+  /// on Android holds its manager in a `companion object` property —
+  /// `AuthModule` is `private val authManager =
+  /// MobilePaymentsSdk.authorizationManager()`, and `SettingsModule` and
+  /// `PaymentModule` are the same shape. The JVM runs that initializer the
+  /// first time the class is touched, so calling *any* of those methods before
+  /// `MobilePaymentsSdk.initialize()` throws inside a static initializer, which
+  /// the JVM rewraps as an `ExceptionInInitializerError`.
+  ///
+  /// That is an `Error`, not a `RuntimeException` — and Flutter's
+  /// `MethodChannel.IncomingMethodCallHandler` catches only `RuntimeException`
+  /// before turning a failure into a `PlatformException`. So the error escapes
+  /// onto the Android main thread and takes the process down **before any reply
+  /// crosses the channel**: no `try`/`catch` on the Dart side can save it,
+  /// because there is nothing to catch. Not calling is the only defence, which
+  /// is what this flag is for. (The class stays poisoned afterwards too — every
+  /// later touch raises `NoClassDefFoundError` — so one such call breaks Square
+  /// for the rest of the process even if the crash were survivable.)
+  ///
+  /// Set only on success, so a rejected application id leaves it false and the
+  /// guards below keep holding.
+  static bool get squareInitialized => _squareInitialized;
+  static bool _squareInitialized = false;
 }

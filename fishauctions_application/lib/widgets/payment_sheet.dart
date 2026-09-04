@@ -17,6 +17,7 @@ import '../services/config_service.dart';
 import '../services/square_payment_service.dart';
 import '../services/tap_to_pay_service.dart';
 import 'tap_to_pay_branding.dart';
+import 'tap_to_pay_education.dart';
 
 /// How a [PaymentSheet] ended. [paid] means the invoice is settled — the caller
 /// should refresh the checkout page so it re-renders PAID (HTMX-style).
@@ -285,14 +286,30 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
       // interactive Apple sheet). Doing it here — before the location gate
       // and the tap — keeps the first-ever charge flow linear. No-op on
       // Android and on every later charge.
+      final bool justLinked;
       try {
-        await square.ensureAppleAccountLinked();
+        justLinked = await square.ensureAppleAccountLinked();
       } on Exception {
         _fail(
           'Tap to Pay on iPhone needs this device linked to an Apple '
           'account. The link was cancelled or failed — try again.',
         );
         return;
+      }
+      // Requirement 4.2: merchant education follows an acceptance of the
+      // terms, wherever the acceptance happened. This is the likeliest place
+      // for a first-ever acceptance — the settings screen is where setup is
+      // *offered*, but checkout is where it becomes urgent — and until now
+      // education was wired to the settings screen alone, so accepting here
+      // educated nobody.
+      //
+      // Only on a fresh link, and only ever once: every later charge takes the
+      // no-op branch above and goes straight to the tap.
+      if (justLinked && mounted) {
+        await showTapToPayEducation(context);
+        if (!mounted) {
+          return;
+        }
       }
 
       // Square won't start a Tap to Pay charge without runtime location

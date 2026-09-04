@@ -10,6 +10,7 @@ import '../providers/config_provider.dart';
 import '../services/square_payment_service.dart';
 import '../services/tap_to_pay_service.dart';
 import '../widgets/tap_to_pay_branding.dart';
+import '../widgets/tap_to_pay_education.dart';
 
 /// The app's Tap to Pay on iPhone settings and merchant-education screen.
 ///
@@ -111,7 +112,26 @@ class _TapToPayScreenState extends ConsumerState<TapToPayScreen> {
         _enabling = false;
       });
       if (ok) {
-        // 4.2: education comes *after* the terms are accepted.
+        // Start the reader arming now. The status the progress indicator
+        // renders comes from Square's reader callback, and nothing subscribes
+        // to it or authorizes until `prepare` runs — so without this the
+        // merchant who just accepted the terms watches an indicator sitting at
+        // `unknown` (which reads as "busy") with no configuration actually
+        // under way behind it. Not awaited: it is the thing the indicator is
+        // there to cover.
+        final cfg = await ref.read(configProvider.future);
+        unawaited(
+          _service.prepare(
+            applicationId: cfg.hasSquare ? cfg.squareApplicationId : null,
+          ),
+        );
+        if (!mounted) {
+          return;
+        }
+        // 4.2: education comes *after* the terms are accepted. Dismissing it
+        // lands back on the status card above, which is 3.9.1's progress
+        // indicator — the requirement that the merchant who completes or skips
+        // education mid-configuration is told where configuration has got to.
         await _showEducation();
       }
     } on Object {
@@ -161,7 +181,8 @@ class _TapToPayScreenState extends ConsumerState<TapToPayScreen> {
 
   /// Puts this device back to its pre-setup state so Apple's onboarding and
   /// education flows can be recorded again, then offers the Apple Account
-  /// sheet — the one step no reset can clear, since the SDK has no unlink.
+  /// sheet — the one step no *in-app* reset can clear, since the SDK has no
+  /// unlink. Apple's own web page can: see the note under the button.
   Future<void> _resetForRecording() async {
     final failures = await _service.resetForRecording();
     if (!mounted) {
@@ -192,21 +213,10 @@ class _TapToPayScreenState extends ConsumerState<TapToPayScreen> {
 
   /// Apple's education sheet, with a text fallback for iOS 17 and earlier.
   Future<void> _showEducation() async {
-    if (await _service.presentEducation()) {
-      if (mounted && _educationError != null) {
-        setState(() => _educationError = null);
-      }
-      return;
+    final error = await showTapToPayEducation(context);
+    if (mounted && error != _educationError) {
+      setState(() => _educationError = error);
     }
-    if (!mounted) {
-      return;
-    }
-    setState(() => _educationError = _service.lastEducationError);
-    await showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      builder: (_) => const _EducationFallbackSheet(),
-    );
   }
 
   @override
@@ -591,7 +601,12 @@ class _TroubleshootingSection extends StatelessWidget {
             'Clears the one-time awareness moment and releases this device\'s '
             'Square authorization, then re-opens the Apple Account sheet, so '
             'the setup flow can be recorded again. Does not affect payments '
-            'already taken.',
+            'already taken.\n\n'
+            'To record a genuine first-time acceptance, unlink the Apple '
+            'Account first at businessconnect.apple.com/taptopay/removeall '
+            '(sign in, then "Remove all merchant IDs"), which the SDK cannot '
+            'do. Not possible from an Apple Business Connect account — remove '
+            'the merchant ID inside Business Connect instead.',
             style: Theme.of(context).textTheme.bodySmall,
           ),
         ],
@@ -606,95 +621,4 @@ class _TroubleshootingSection extends StatelessWidget {
       const SnackBar(content: Text('Diagnostics copied.')),
     );
   }
-}
-
-/// Text-only merchant education for iOS 17 and earlier, where Apple's
-/// `ProximityReaderDiscovery` sheet doesn't exist.
-///
-/// Kept deliberately plain — no illustrations, no depictions of an iPhone or of
-/// the Tap to Pay interface, because Apple's marketing rules forbid creating
-/// custom imagery for Tap to Pay on iPhone. The wording covers what the guide's
-/// education requirements list: contactless cards (4.5), Apple Pay and other
-/// digital wallets (4.6), and PIN entry (4.7, required in every region except
-/// Japan and Taiwan). On iOS 18+ none of this is shown; Apple's own sheet is.
-class _EducationFallbackSheet extends StatelessWidget {
-  const _EducationFallbackSheet();
-
-  @override
-  Widget build(BuildContext context) => SafeArea(
-    child: Padding(
-      padding: const EdgeInsets.fromLTRB(24, 24, 24, 24),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            'How to take a payment',
-            style: Theme.of(context).textTheme.titleLarge,
-          ),
-          const SizedBox(height: 16),
-          const _EducationStep(
-            number: '1',
-            text:
-                'Enter the amount and tap the $tapToPayName button on the '
-                'checkout page.',
-          ),
-          const _EducationStep(
-            number: '2',
-            text:
-                'Hold your iPhone steady and ask the customer to hold their '
-                'contactless card, iPhone, or Apple Watch near the top of your '
-                'iPhone, over the contactless symbol. Other digital wallets '
-                'work the same way.',
-          ),
-          const _EducationStep(
-            number: '3',
-            text:
-                'Wait for the checkmark. Some cards ask the customer to enter '
-                'a PIN on your iPhone — hand them the phone, and they can use '
-                'the accessibility options on the PIN screen if they need to.',
-          ),
-          const SizedBox(height: 8),
-          Align(
-            alignment: Alignment.centerRight,
-            child: FilledButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('Got it'),
-            ),
-          ),
-        ],
-      ),
-    ),
-  );
-}
-
-class _EducationStep extends StatelessWidget {
-  const _EducationStep({required this.number, required this.text});
-
-  final String number;
-  final String text;
-
-  @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.only(bottom: 16),
-    child: Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        CircleAvatar(
-          radius: 13,
-          backgroundColor: Theme.of(context).colorScheme.primaryContainer,
-          child: Text(
-            number,
-            style: TextStyle(
-              fontSize: 13,
-              fontWeight: FontWeight.bold,
-              color: Theme.of(context).colorScheme.onPrimaryContainer,
-            ),
-          ),
-        ),
-        const SizedBox(width: 12),
-        Expanded(child: Text(text, style: const TextStyle(height: 1.35))),
-      ],
-    ),
-  );
 }

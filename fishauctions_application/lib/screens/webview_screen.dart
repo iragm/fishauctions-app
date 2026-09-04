@@ -2795,7 +2795,25 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
         // the assist UI live), and a native screen is not something the server
         // can hand back as a URL. Same reason `ar` is a link rather than a
         // path.
-        unawaited(context.push('/tap-to-pay'));
+        //
+        // iOS only, and the guard is load-bearing rather than tidy. That
+        // screen is Apple's flow end to end — its terms sheet, its education
+        // sheet, and copy that says "Tap to Pay on iPhone" throughout — which
+        // is why the drawer tile and the app's own palette row are both gated
+        // on `isApplePlatform`. This entry point wasn't, and the server offers
+        // the row to any mobile client (it varies only the label), so tapping
+        // it on Android opened an iPhone setup screen that then asked an
+        // uninitialized Square SDK for its authorization state and killed the
+        // process. Android takes cards from the invoice page's own button; it
+        // has no terms to accept and nothing to set up here.
+        if (TapToPayService.instance.isApplePlatform) {
+          unawaited(context.push('/tap-to-pay'));
+        } else {
+          _showSnack(
+            'Open the invoice you want to collect and use the card button '
+            'there to take a payment on this phone.',
+          );
+        }
     }
   }
 

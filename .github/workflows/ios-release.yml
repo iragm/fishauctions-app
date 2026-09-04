@@ -4,12 +4,14 @@ name: iOS Release
 # suite as a gate, then builds the iOS app on a macOS runner.
 #
 # Two modes via the `distribute` input:
-#   • false (default) — WORKS TODAY, no secrets needed: an unsigned
-#     `flutter build ios --no-codesign` that compiles the whole app (Swift
-#     AppDelegate, plugins, SPM/CocoaPods) on real Apple toolchain and uploads
-#     the .app as an artifact. This is the macOS equivalent of the Android
-#     compile gate and is how we verify the iOS build before any signing exists.
-#   • true — a signed build. `export_method` then picks what kind:
+#   • false — no secrets needed: an unsigned `flutter build ios --no-codesign`
+#     that compiles the whole app (Swift AppDelegate, plugins, SPM/CocoaPods) on
+#     real Apple toolchain and uploads the .app as an artifact. This is the
+#     macOS equivalent of the Android compile gate, and how the iOS build was
+#     verified before any signing existed. `dependencies.yml` still runs this
+#     shape every week, so the compile gate is covered without this workflow
+#     defaulting to it.
+#   • true (default) — a signed build. `export_method` then picks what kind:
 #       – app-store (default) — uploaded to TestFlight.
 #       – development — a sideloadable IPA, signed with a development profile
 #         and carrying RunnerDebug.entitlements, which is the ONLY way to get
@@ -22,21 +24,25 @@ name: iOS Release
 #
 # The `flavor` input picks the backend (staging vs prod). iOS has no on-device
 # `flutter run` without a Mac, so this workflow is the ONLY way to get a build
-# onto a phone — it therefore serves both roles: `staging` for test builds (the
-# default — don't test push / Tap to Pay against prod invoices) and `prod` for a
-# release. Same App Store Connect signing either way (Apple signing is
+# onto a phone — it therefore serves both roles: `prod` for a release (the
+# default, because the common case now is shipping to TestFlight) and `staging`
+# for test builds. Same App Store Connect signing either way (Apple signing is
 # account-level, not per-environment); only the bundled backend URL changes.
+#
+# Switch `flavor` to staging whenever you are exercising push or Tap to Pay by
+# hand: the default sends real invoices and production APNs tokens, which is
+# right for TestFlight and wrong for poking at the app.
 on:
   workflow_dispatch:
     inputs:
       distribute:
-        description: "Signed build + upload to TestFlight (needs signing secrets)"
+        description: "Signed build + upload to TestFlight (needs signing secrets). Uncheck for an unsigned compile-only check."
         type: boolean
-        default: false
+        default: true
       flavor:
         description: "Backend the build points at"
         type: choice
-        default: staging
+        default: prod
         options: [staging, prod]
       export_method:
         description: "app-store = TestFlight. development = sideloadable build carrying the Tap to Pay DEV entitlement (needs distribute:true and a registered device)"
@@ -105,7 +111,7 @@ jobs:
           Y=$(date -u +%Y); M=$(date -u +%m); D=$(date -u +%d)
           echo "BUILD_NAME=$Y.$((10#$M)).$((10#$D))" >> "$GITHUB_ENV"
 
-      # ── Unsigned build (default) ───────────────────────────────────────────
+      # ── Unsigned build (distribute == false) ───────────────────────────────
       # No --flavor: iOS has no Xcode schemes; environment selection is
       # dart-define only (Android's --flavor merely sets the applicationId).
       # --no-codesign skips signing, so this needs no certificates — it just
@@ -165,7 +171,7 @@ jobs:
           # every run's artifacts are downloadable by anyone. See the note there.
           retention-days: 1
 
-      # ── Signed build + TestFlight (distribute == true) ─────────────────────
+      # ── Signed build + TestFlight (distribute == true, the default) ────────
       # Mac-less signing via an App Store Connect API key + Xcode automatic
       # cloud signing (`-allowProvisioningUpdates`): Xcode creates and manages
       # the distribution certificate and provisioning profile in the cloud, so

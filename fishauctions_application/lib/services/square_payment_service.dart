@@ -35,10 +35,26 @@ class SquarePaymentService {
 
   final _sdk = SquareMobilePaymentsSdk();
 
+  /// Whether [PlatformBridge.initializeSquare] has run successfully.
+  ///
+  /// Every getter below that reaches the Square plugin checks this first,
+  /// because on Android an SDK call made before `initialize()` crashes the
+  /// process outright and cannot be caught from Dart — the full mechanism is
+  /// documented on [PlatformBridge.squareInitialized]. Treat "not initialized"
+  /// as "no authorization, no readers, nothing to release", which is exactly
+  /// true: an uninitialized SDK holds none of those things.
+  ///
+  /// The one caller that must *not* guard is [ensureAuthorized], which
+  /// initializes first and then proceeds.
+  bool get isInitialized => PlatformBridge.squareInitialized;
+
   /// True when the SDK already holds a valid authorization for a location.
+  /// False on a deployment with no Square application id, where the SDK was
+  /// never initialized.
   Future<bool> get isAuthorized async =>
+      isInitialized &&
       await _sdk.authManager.getAuthorizationState() ==
-      AuthorizationState.authorized;
+          AuthorizationState.authorized;
 
   /// Whether this physical device can take a Tap to Pay payment at all
   /// (Android: NFC + API 31+); otherwise a charge fails as unsupported.
@@ -47,11 +63,11 @@ class SquarePaymentService {
   /// Flutter plugin's `tapToPaySettings.isDeviceCapable()` is iOS-only and
   /// throws `MissingPluginException` on Android. iOS asks the SDK (which
   /// checks the iPhone XS+ / iOS 16.4+ Tap to Pay floor).
-  Future<bool> isDeviceCapable() {
+  Future<bool> isDeviceCapable() async {
     if (Platform.isAndroid) {
       return PlatformBridge.isTapToPayCapable();
     }
-    return _sdk.tapToPaySettings.isDeviceCapable();
+    return isInitialized && await _sdk.tapToPaySettings.isDeviceCapable();
   }
 
   /// Whether NFC is currently turned on. Distinct from [isDeviceCapable],
@@ -93,8 +109,8 @@ class SquarePaymentService {
 
   /// The Square location the SDK is currently authorized for, or null when it
   /// holds no authorization.
-  Future<Location?> authorizedLocation() =>
-      _sdk.authManager.getAuthorizedLocation();
+  Future<Location?> authorizedLocation() async =>
+      isInitialized ? await _sdk.authManager.getAuthorizedLocation() : null;
 
   /// Every reader the SDK currently knows about, the Tap to Pay one included.
   ///
@@ -107,20 +123,28 @@ class SquarePaymentService {
   /// merchant account, Apple's terms or a failed app attestation — so this is
   /// what the checkout pre-flight and the diagnostics screen read instead of
   /// guessing.
-  Future<List<ReaderInfo>> readers() => _sdk.readerManager.getReaders();
+  Future<List<ReaderInfo>> readers() async =>
+      isInitialized ? await _sdk.readerManager.getReaders() : const [];
 
   /// iOS only: Tap to Pay on iPhone requires the device to be linked to an
   /// Apple account once (an interactive Apple sheet, Square terms included).
   /// No-op on Android and when already linked. A throw here means the link
   /// was declined/failed — the charge can't proceed.
-  Future<void> ensureAppleAccountLinked() async {
+  ///
+  /// Returns true only when this call is what performed the link — i.e. the
+  /// merchant accepted Apple's terms just now. Callers need that to honour
+  /// requirement 4.2, which puts merchant education immediately *after* an
+  /// acceptance and nowhere else; "already linked" must not re-educate someone
+  /// on every charge.
+  Future<bool> ensureAppleAccountLinked() async {
     if (!Platform.isIOS) {
-      return;
+      return false;
     }
     if (await isAppleAccountLinked()) {
-      return;
+      return false;
     }
     await _sdk.tapToPaySettings.linkAppleAccount();
+    return true;
   }
 
   /// Re-runs Apple's Tap to Pay account sheet on a device that is *already*
@@ -144,7 +168,7 @@ class SquarePaymentService {
   /// `true` sends the app into a charge that can only fail. iOS-only; false on
   /// Android, which has no Apple-account step.
   Future<bool> isAppleAccountLinked() async {
-    if (!Platform.isIOS) {
+    if (!Platform.isIOS || !isInitialized) {
       return false;
     }
     return _sdk.tapToPaySettings.isAppleAccountLinked();
@@ -157,9 +181,11 @@ class SquarePaymentService {
   /// (requirements 3.9.1 and 5.7) — the SDK reports the reader moving through
   /// connecting-to-device / connecting-to-Square / ready as it prepares, which
   /// is the PSP equivalent of `PaymentCardReader.Event.updateProgress`.
-  ReaderCallbackReference onReaderChanged(
+  ReaderCallbackReference? onReaderChanged(
     void Function(ReaderChangedEvent event) callback,
-  ) => _sdk.readerManager.setReaderChangedCallback(callback);
+  ) => isInitialized
+      ? _sdk.readerManager.setReaderChangedCallback(callback)
+      : null;
 
   /// Ensures the runtime location permission that Square Tap to Pay requires
   /// on both platforms. Without it, [charge] fails with
@@ -331,7 +357,15 @@ class SquarePaymentService {
   static const _channel = MethodChannel('square_mobile_payments_sdk');
 
   /// Releases the current authorization (e.g. on logout).
-  Future<void> deauthorize() => _sdk.authManager.deauthorize();
+  /// Releases the SDK's authorization. A no-op before initialization — which
+  /// is what sign-out on a Square-less deployment does, and used to be a
+  /// process-killing SDK call on Android.
+  Future<void> deauthorize() async {
+    if (!isInitialized) {
+      return;
+    }
+    await _sdk.authManager.deauthorize();
+  }
 
   /// The environment the SDK was initialized on. Real Tap to Pay (NFC, no
   /// hardware) only works in [Environment.production] — Square's Sandbox
@@ -339,17 +373,28 @@ class SquarePaymentService {
   /// [charge] in sandbox always surfaces the native "connect a reader"
   /// prompt unless the Mock Reader UI ([showMockReaderUI]) is showing to
   /// simulate the tap instead. See the SDK's own docs on `showMockReaderUI`.
-  Future<Environment> environment() => _sdk.settingsManager.getEnvironment();
+  /// Null before the SDK is initialized — see [isInitialized]; on Android
+  /// asking anyway would end the process rather than throw.
+  Future<Environment?> environment() async =>
+      isInitialized ? await _sdk.settingsManager.getEnvironment() : null;
 
   /// Shows Square's floating Mock Reader overlay (Sandbox only), which lets a
   /// tester simulate a card presentment since Sandbox can't read a real NFC
   /// tap. No-op-ish on failure (e.g. not in sandbox, or already showing) —
   /// callers should treat a throw here as non-fatal and proceed to [charge]
   /// anyway, since the native prompt still explains what's missing.
-  Future<void> showMockReaderUI() => _sdk.readerManager.showMockReaderUI();
+  Future<void> showMockReaderUI() async {
+    if (isInitialized) {
+      await _sdk.readerManager.showMockReaderUI();
+    }
+  }
 
   /// Dismisses the Mock Reader overlay shown by [showMockReaderUI].
-  Future<void> hideMockReaderUI() => _sdk.readerManager.hideMockReaderUI();
+  Future<void> hideMockReaderUI() async {
+    if (isInitialized) {
+      await _sdk.readerManager.hideMockReaderUI();
+    }
+  }
 
   CurrencyCode _currencyFor(String code) {
     switch (code.toUpperCase()) {

@@ -65,6 +65,32 @@ App → page is a push, not a poll — `evaluateJavascript` into a receiver the 
 
 `slot` ∈ `lot` · `bidder` · `price` · `sold` · `unsold` · `undo` · `clear` · `confirm`. **Unknown slots must be ignored by the page**, so either side can add one without the other shipping.
 
+## The native halves, and the three rules both must obey
+
+Each side owns **one utterance** and knows nothing about sessions. That keeps them small, but it
+means the same three hazards exist twice, and the iOS half was missing two of them until
+2026-09-03.
+
+1. **A stopped recognizer keeps calling back.** `SFSpeechRecognitionTask.finish()` and Android's
+   `stopListening()` both *request* the final result; it arrives later, by which time the next
+   utterance's task is already installed. Acting on it either attributes a stale transcript to the
+   new phrase or — worse — runs the teardown path and kills the microphone mid-session. Android
+   guarded this from the start (`isCurrent`, checked in five callbacks); iOS now stamps each
+   utterance with an id (`liveUtterance`) and drops anything that isn't the live one, including a
+   buffer arriving late on the audio tap. **A microphone that dies partway through an auction is
+   this bug until proven otherwise.**
+2. **The audio session has to be handed back, but not between two words.** Deactivating on every
+   utterance costs the first fraction of a second of the next one — the part carrying the anchor
+   keyword. But never deactivating leaves the session active in `.record`: the iPhone's microphone
+   indicator stays lit after the operator stops, and later in-app audio plays silently. iOS defers
+   the release by 3 s and any `start` cancels it, which clears the longest legitimate gap
+   (`errorBackoff`, 2 s). It is inferred rather than signalled, because there is no safe "session
+   over" message: `stop()` returns while the final transcript is still in flight.
+3. **All of it runs on the main thread.** Android's `RecognitionListener` arrives there already;
+   iOS's recognition handler runs on an arbitrary queue and is hopped explicitly. The audio tap
+   can't be — it's the render thread — so it captures its own request instead of reading
+   `self.request`, and the level meter's identity check happens inside the emit hop.
+
 ## Not done, deliberately
 
 - **No spoken readback** — needs `flutter_tts` and ducking the recognizer while speaking.

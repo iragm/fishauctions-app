@@ -15,6 +15,7 @@ Backend items are **TTP-n** in `BACKEND_SPEC.md`.
 | Checkout sheet | `lib/widgets/payment_sheet.dart` |
 | Square SDK wrapper | `lib/services/square_payment_service.dart` |
 | Apple education sheet | `ios/Runner/TapToPayEducation.swift` |
+| Education presenter + iOS 17 text fallback | `lib/widgets/tap_to_pay_education.dart` |
 
 ## Two rules that constrain every change
 
@@ -60,14 +61,14 @@ Rule 1 was broken in three places until 2026-08-30, including the "Set up Tap to
 | 3.8.1 | Unauthorized users told to contact an admin | Done — server-authored message |
 | 3.8.2 | Apple Business Connect (*conditional*) | N/A — public App Store |
 | 3.9 | "Try it out" screen (*recommended*) | Done |
-| 3.9.1 | Configuration progress indicator | Done — reader callback → `TapToPayReaderStatus` |
+| 3.9.1 | Configuration progress indicator | Done — reader callback → `TapToPayReaderStatus`, on both paths a merchant can leave education by. Settings: dismissing the sheet lands on the status card, and acceptance now re-runs `prepare()` so the bar tracks a reader that is actually arming instead of parking on `unknown`. Checkout: `_awaitReaderReady`'s `_InitializingView` |
 
 ## 4. Educating merchants
 
 | # | Req | Status |
 |---|---|---|
 | 4.1 | `ProximityReaderDiscovery` on iOS 18+ | Done — verified on device 2026-08-30. Carries 4.4–4.8 with it |
-| 4.2 | Education after terms acceptance | Done |
+| 4.2 | Education after terms acceptance | Done — **both** acceptance points, since 2026-09-03. It was wired to the settings screen alone, so the likeliest first-ever acceptance (3.7's in-checkout trigger, where setup becomes urgent) educated nobody. `showTapToPayEducation` is now shared and the payment sheet calls it on a *fresh* link only |
 | 4.3 | Education in Settings or Help | Done — always present on `/tap-to-pay` |
 | 4.4–4.7 | Contactless, wallets, PIN entry, accessibility | Done via 4.1; text fallback on iOS 17 and earlier |
 | 4.8 | Fallback payment method | N/A — US |
@@ -114,7 +115,38 @@ Both are conditional on Tap to Pay being the app's *primary* payment method. It 
 
 **Every part of this needs the entitlement, education included** — established on hardware 2026-08-30. `ProximityReaderDiscovery` presents education rather than a reader and Apple's docs never mention an entitlement, but in a TestFlight build `content(for:)` fails with `ContentError.unknown` while the identical development-signed build presents the sheet. So **none of the entitlement-review videos is recordable from a distribution build.**
 
-**Resetting between takes**: Troubleshooting on `/tap-to-pay` → **Reset for re-recording** (`TapToPayService.resetForRecording()`) clears the once-per-install awareness marker and releases the Square authorization, then re-opens the Apple Account sheet via `relinkAppleAccount()` — the SDK has no unlink, so that is the only way to see the linking step again.
+**Resetting between takes**: Troubleshooting on `/tap-to-pay` → **Reset for re-recording** (`TapToPayService.resetForRecording()`) clears the once-per-install awareness marker and releases the Square authorization, then re-opens the Apple Account sheet via `relinkAppleAccount()` — the SDK has no unlink, so that is the only way *in the app* to see the linking step again.
+
+**There is a real unlink, and it isn't an API.** Apple's own page removes every Tap to Pay merchant id from an Apple Account:
+
+> <https://businessconnect.apple.com/taptopay/removeall> → sign in → **Remove all merchant IDs**
+
+After that the next `linkAppleAccount()` is a genuine first-time acceptance, not a relink, which is what video 2 wants. Two caveats: it is **account-wide**, so every device and every Tap to Pay app linked to that Apple Account is unlinked together; and it **does not work if the Apple Account has an Apple Business Connect account** — there the merchant id has to be removed from inside Business Connect (Tap to Pay on iPhone → the merchant id → Remove), which disables it on all devices. `isAppleAccountLinked()` is asked of Apple every call (1.6), so the app needs no reset of its own to notice.
+
+### Solved: the palette's Tap to Pay row crashed Android (2026-09-03)
+
+Not an iOS bug, but it lives here because it is the same screen. The website's
+palette offers `fishauctions://tap-to-pay` to any mobile client; the shell pushed
+`/tap-to-pay` with no platform guard, and that screen asked Square for its
+authorization state.
+
+**Why that is a crash and not an exception.** Every Square plugin module on
+Android holds its manager in a `companion object` property — `AuthModule` is
+`private val authManager = MobilePaymentsSdk.authorizationManager()`, and
+`SettingsModule` and `PaymentModule` are the same shape. The JVM runs that
+initializer on first touch of the class, so calling any of them before
+`MobilePaymentsSdk.initialize()` throws *inside a static initializer*, which the
+JVM rewraps as `ExceptionInInitializerError`. That is an `Error`, and Flutter's
+`MethodChannel.IncomingMethodCallHandler` catches only `RuntimeException` — so it
+escapes onto the main thread and ends the process before any reply crosses the
+channel. **No Dart `try`/`catch` can help; there is nothing to catch.** Not
+calling is the only defence, hence `PlatformBridge.squareInitialized` and the
+guard on every SDK-touching getter in `SquarePaymentService`.
+
+The same latent bug reached further than the palette: sign-out calls
+`deauthorize()` inside a `try`/`catch` that could never have caught this, so on a
+deployment serving no Square application id, signing out on Android would have
+taken the app down too.
 
 ### Solved: iOS passed Square a prompt with no payment methods (2026-09-02)
 
