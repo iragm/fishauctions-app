@@ -154,6 +154,11 @@ class TapToPayService {
       // before that, since on Android touching the plugin first ends the
       // process. Idempotent: it returns immediately once subscribed.
       listenToReader();
+      // And read the reader's status outright, because subscribing to a change
+      // feed after the change has happened learns nothing — see
+      // [syncStatusFromReaders]. This is also what makes the on-resume warm-up
+      // worth running: it re-reads a reader that armed while we were away.
+      await syncStatusFromReaders();
     } on Object catch (e) {
       // An authorize failure at warm-up time is not the cashier's problem yet:
       // the charge path re-authorizes and reports failures with real context.
@@ -227,10 +232,55 @@ class TapToPayService {
           reader.statusInfo.unavailableReason,
         );
       });
+      // The subscription can only report what happens next, and by here the
+      // reader may already be armed. Not awaited: subscribing is the caller's
+      // ask, and this is a best-effort catch-up on what it missed.
+      unawaited(syncStatusFromReaders());
     } on Object catch (e) {
       // No reader stream (SDK not initialized, plugin gap) — the indicator just
       // stays "unknown", which the UI renders as a neutral spinner.
       debugPrint('Tap to Pay reader status unavailable: $e');
+    }
+  }
+
+  /// Sets [status] from the reader **list**, which is the state rather than the
+  /// change feed [listenToReader] subscribes to.
+  ///
+  /// Square only emits a reader event when something *changes*, and this app
+  /// cannot subscribe until the SDK is initialized and authorized (on Android,
+  /// asking earlier ends the process) — while authorizing is the very thing
+  /// that makes the Tap to Pay reader exist and start arming. So the reader
+  /// routinely reaches `ready` a moment before, or in the same breath as, the
+  /// subscription that would have reported it, and no event ever arrives.
+  ///
+  /// [status] then sits at [TapToPayReaderStatus.unknown] for the life of the
+  /// process. Nothing looks broken: the settings screen renders it as
+  /// "Checking Tap to Pay…", and the payment sheet — which treats `unknown` as
+  /// "still configuring", correctly — waits its full reader timeout on an
+  /// "initializing" screen before **every single charge**, on a reader that
+  /// has been ready the whole time.
+  ///
+  /// Leaves [status] untouched when no Tap to Pay reader is listed yet: that is
+  /// "nothing to report", not "unavailable".
+  Future<void> syncStatusFromReaders() async {
+    try {
+      for (final reader in await SquarePaymentService.instance.readers()) {
+        if (reader.model != ReaderModel.tapToPay) {
+          continue;
+        }
+        // Reason before status, same ordering as the callback: a listener woken
+        // by the status change must not read the previous reason.
+        _lastUnavailableReason = reader.statusInfo.unavailableReason?.name;
+        status.value = TapToPayReaderStatus.fromSquare(
+          reader.statusInfo.status,
+          reader.statusInfo.unavailableReason,
+        );
+        return;
+      }
+    } on Object catch (e) {
+      // Same rule as everywhere else here: our own diagnostics never block a
+      // charge. An unreadable list leaves the status where it was.
+      debugPrint('Tap to Pay reader list unreadable: $e');
     }
   }
 
@@ -285,6 +335,9 @@ class TapToPayService {
     // run is often the first thing that happens on a device the warm-up
     // declined to subscribe on. Cheap and idempotent.
     listenToReader();
+    // So that the `readerStatus` line agrees with the reader list printed
+    // underneath it — the callback may never have fired at all.
+    await syncStatusFromReaders();
     final errors = <String>[];
     Future<T?> probe<T>(String label, Future<T> Function() read) async {
       try {
@@ -455,7 +508,14 @@ class TapToPayService {
   /// service's own state. The one thing it cannot clear is the **Apple Account
   /// link** — the SDK has no unlink — so the linking step is re-recorded with
   /// `SquarePaymentService.relinkAppleAccount()`, which presents the same
-  /// sheet on an already-linked device.
+  /// sheet on an already-linked device. That call needs the SDK **authorized**
+  /// and this one releases the authorization, so the caller presents the sheet
+  /// before calling this, never after — see `_resetForRecording` on the
+  /// settings screen.
+  ///
+  /// The released authorization comes back on the next warm-up (launch,
+  /// resume, or a pull-to-refresh on the settings screen), which is the point:
+  /// the reader re-arms where the merchant can watch it.
   ///
   /// A *real* unlink does exist, just not through any API: Apple's
   /// `businessconnect.apple.com/taptopay/removeall` removes every Tap to Pay

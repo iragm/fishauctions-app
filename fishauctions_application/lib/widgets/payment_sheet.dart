@@ -529,18 +529,31 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
   /// reports ready, or until [_readerReadyTimeout] elapses.
   ///
   /// Apple's requirement 5.7 asks for this screen; the timeout is what keeps it
-  /// honest. The reader status is a best-effort signal (it stays `unknown` on a
-  /// deployment where the reader callback never fires, and Android doesn't
-  /// report Tap to Pay readiness the same way), so after the timeout we start
-  /// the charge anyway and let Square's own prompt be the authority. Blocking
-  /// a charge on our own progress indicator would be strictly worse than the
-  /// behaviour this replaces.
+  /// honest. The reader status is a best-effort signal even with the reader
+  /// list read directly below (Android doesn't report Tap to Pay readiness the
+  /// same way, and a deployment can leave it unknown), so after the timeout we
+  /// start the charge anyway and let Square's own prompt be the authority.
+  /// Blocking a charge on our own progress indicator would be strictly worse
+  /// than the behaviour this replaces.
   Future<void> _awaitReaderReady() async {
-    final status = TapToPayService.instance.status;
+    final service = TapToPayService.instance;
+    final status = service.status;
+    bool settled() =>
+        status.value.isReady ||
+        status.value == TapToPayReaderStatus.unavailable;
+    // Ask the reader list before waiting on the callback. `status` is fed by
+    // Square's reader *change* events, and a reader that armed before the app
+    // subscribed never emits one — so a warm reader can leave this notifier at
+    // `unknown` for the whole process, and `unknown` is (correctly) treated
+    // below as "still configuring". That is a full timeout of "initializing"
+    // in front of every charge on a reader that has been ready all along.
+    await service.syncStatusFromReaders();
+    if (!mounted) {
+      return;
+    }
     // `unavailable` is an answer, not a stage on the way to one — waiting the
     // full timeout for it only delays the message that explains it.
-    if (status.value.isReady ||
-        status.value == TapToPayReaderStatus.unavailable) {
+    if (settled()) {
       return;
     }
     setState(() {
@@ -549,15 +562,19 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
     });
     final ready = Completer<void>();
     void listener() {
-      final settled =
-          status.value.isReady ||
-          status.value == TapToPayReaderStatus.unavailable;
-      if (settled && !ready.isCompleted) {
+      if (settled() && !ready.isCompleted) {
         ready.complete();
       }
     }
 
     status.addListener(listener);
+    // Same reason as the read above: the wait must not depend on an event that
+    // may never come. Assigning an unchanged value notifies nobody, so a poll
+    // that finds no news costs a `getReaders()` call and wakes no listener.
+    final poll = Timer.periodic(
+      const Duration(seconds: 1),
+      (_) => unawaited(service.syncStatusFromReaders()),
+    );
     try {
       await ready.future.timeout(
         _readerReadyTimeout,
@@ -566,6 +583,7 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
         },
       );
     } finally {
+      poll.cancel();
       status.removeListener(listener);
     }
   }

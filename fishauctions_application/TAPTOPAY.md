@@ -61,7 +61,7 @@ Rule 1 was broken in three places until 2026-08-30, including the "Set up Tap to
 | 3.8.1 | Unauthorized users told to contact an admin | Done — server-authored message |
 | 3.8.2 | Apple Business Connect (*conditional*) | N/A — public App Store |
 | 3.9 | "Try it out" screen (*recommended*) | Done |
-| 3.9.1 | Configuration progress indicator | Done — reader callback → `TapToPayReaderStatus`, on both paths a merchant can leave education by. Settings: dismissing the sheet lands on the status card, and acceptance now re-runs `prepare()` so the bar tracks a reader that is actually arming instead of parking on `unknown`. Checkout: `_awaitReaderReady`'s `_InitializingView` |
+| 3.9.1 | Configuration progress indicator | Done — reader callback **plus a direct read of the reader list** → `TapToPayReaderStatus`, on both paths a merchant can leave education by. Settings: dismissing the sheet lands on the status card, and acceptance now re-runs `prepare()` so the bar tracks a reader that is actually arming instead of parking on `unknown`. Checkout: `_awaitReaderReady`'s `_InitializingView` |
 
 ## 4. Educating merchants
 
@@ -82,7 +82,7 @@ Rule 1 was broken in three places until 2026-08-30, including the "Set up Tap to
 | 5.3 | Never altered/greyed; pressing opens terms | Done |
 | 5.4 | Correct localized copy | Done — "Tap to Pay on iPhone" / "Tap to Pay" |
 | 5.5 | `wave.3.right.circle[.fill]` if using an icon | Done — no icon, and 5.5 is conditional on using one |
-| 5.6 | Tap to Pay UI within 1 s, 90% of the time | Done — the warm-up is what makes this true |
+| 5.6 | Tap to Pay UI within 1 s, 90% of the time | Done — the warm-up is what makes this true, and reading the reader list is what lets the app notice (see the 12 s note below) |
 | 5.7 | "Initializing" screen mid-configuration | Done |
 | 5.8 | "Processing" screen after the read | Done |
 | 5.9 | Outcome clearly stated | Done |
@@ -115,13 +115,27 @@ Both are conditional on Tap to Pay being the app's *primary* payment method. It 
 
 **Every part of this needs the entitlement, education included** — established on hardware 2026-08-30. `ProximityReaderDiscovery` presents education rather than a reader and Apple's docs never mention an entitlement, but in a TestFlight build `content(for:)` fails with `ContentError.unknown` while the identical development-signed build presents the sheet. So **none of the entitlement-review videos is recordable from a distribution build.**
 
-**Resetting between takes**: Troubleshooting on `/tap-to-pay` → **Reset for re-recording** (`TapToPayService.resetForRecording()`) clears the once-per-install awareness marker and releases the Square authorization, then re-opens the Apple Account sheet via `relinkAppleAccount()` — the SDK has no unlink, so that is the only way *in the app* to see the linking step again.
+**Resetting between takes**: Troubleshooting on `/tap-to-pay` (**developer builds only** — see below) → **Reset for re-recording** re-opens the Apple Account sheet via `relinkAppleAccount()`, then (`TapToPayService.resetForRecording()`) clears the once-per-install awareness marker and releases the Square authorization. The SDK has no unlink, so the relink is the only way *in the app* to see the linking step again.
+
+**The sheet must come before the reset, not after.** `relinkAppleAccount()` requires an authorized SDK — it answers `notAuthorized`, *"This device must be authorized with a Square account in order to use Tap To Pay"* — and the reset's own second step is releasing that authorization. Called in the other order it failed every single time, invisibly: the plugin reports a cancelled sheet and a sheet that never opened through the same error path, the screen treated both as "the user dismissed it", and the reason went to `debugPrint` on a phone with no debugger attached. So the button showed its "Reset." snackbar, no sheet appeared, and nothing about the app said why. `SquarePaymentService.relinkAppleAccount()` now returns the SDK's error name (null on success *or* a real dismissal) and the screen puts it in the snackbar.
 
 **There is a real unlink, and it isn't an API.** Apple's own page removes every Tap to Pay merchant id from an Apple Account:
 
 > <https://businessconnect.apple.com/taptopay/removeall> → sign in → **Remove all merchant IDs**
 
-After that the next `linkAppleAccount()` is a genuine first-time acceptance, not a relink, which is what video 2 wants. Two caveats: it is **account-wide**, so every device and every Tap to Pay app linked to that Apple Account is unlinked together; and it **does not work if the Apple Account has an Apple Business Connect account** — there the merchant id has to be removed from inside Business Connect (Tap to Pay on iPhone → the merchant id → Remove), which disables it on all devices. `isAppleAccountLinked()` is asked of Apple every call (1.6), so the app needs no reset of its own to notice.
+After that the next `linkAppleAccount()` is a genuine first-time acceptance, not a relink, which is what video 2 wants. Note that the app only offers that call when `isAppleAccountLinked()` says the device is *not* linked, so an unlink done on the website shows up in the app whenever the SDK next answers honestly — the reset button now re-reads it (and re-warms) instead of leaving the screen on the state it was built with. Two caveats: it is **account-wide**, so every device and every Tap to Pay app linked to that Apple Account is unlinked together; and it **does not work if the Apple Account has an Apple Business Connect account** — there the merchant id has to be removed from inside Business Connect (Tap to Pay on iPhone → the merchant id → Remove), which disables it on all devices. `isAppleAccountLinked()` is asked of Apple every call (1.6), so the app needs no reset of its own to notice.
+
+### Solved: every charge waited the full 12 s "initializing" (2026-09-03)
+
+Reported as *"I always need to wait the 15 seconds for Tap to Pay to initialize, I thought once it warmed up it would stay ready."* It was warm. The app just never found out.
+
+`TapToPayService.status` was fed by exactly one thing: Square's reader-**changed** callback. That callback is a change feed — it fires when a reader's status changes, not when you start listening — and nothing can subscribe to it until the SDK is initialized *and* authorized (asking earlier ends the Android process, see below). Authorizing is also precisely what makes the Tap to Pay reader exist and start arming. So on every cold start the sequence is: authorize → reader arms → we subscribe → silence. `status` stays `unknown` for the life of the process.
+
+Nothing looks broken from there. `unknown` renders as "Checking Tap to Pay…" on the settings screen, and `_awaitReaderReady` treats it — correctly — as "still configuring", so it waits its full `_readerReadyTimeout` (12 s, plus the `create`/config round trips: the reported 15) on an "initializing" screen, before **every single charge**, on a reader that has been ready the whole time. Requirement 5.6 asks for the Tap to Pay UI within one second; the warm-up was delivering that and the app was throwing it away.
+
+The reader **list** is the state; the callback is only the change feed. `TapToPayService.syncStatusFromReaders()` reads `getReaders()` and sets `status` from it, and is now called after every subscribe, at the end of every `prepare()` (so a resume re-reads a reader that armed while the app was away), inside `diagnose()`, and — before the wait and then once a second during it — in `_awaitReaderReady`. Assigning an unchanged value notifies nobody, so a poll that finds no news costs one SDK call and wakes no listener.
+
+`blockingReaderReason()` already carried this reasoning in its doc comment for the *unavailable* case. The same sentence was true of `ready` and nobody joined the two up. That is the second time on this feature that the fact which settled everything was one `getReaders()` call away.
 
 ### Solved: the palette's Tap to Pay row crashed Android (2026-09-03)
 
@@ -163,6 +177,10 @@ The entitlements are correct **in the signed binary**, not just the profile; App
 ### Reading the failure without a rebuild
 
 `TapToPayService.diagnose()` collects the reader list, `unavailableReason`, the authorized location, SDK environment, device capability, Apple-account linkage and the backend's eligibility answer into one copyable block under **Troubleshooting** on `/tap-to-pay`, also `debugPrint`ed. The checkout sheet pre-flights the same reason and fails with it by name.
+
+**Troubleshooting is built only when `EnvironmentConfig.enableDeveloperTools` is set: any debug build, plus the dev and staging flavors — never a release prod build.** A merchant has no use for an SDK reader dump, "release this device's Square authorization" is a bad button to hand someone mid-auction, and Apple reviews Tap to Pay by working the merchant flows. The flag is a compile-time `const`, so the whole subtree is dropped from the App Store build rather than merely hidden; the same flag drops the raw `Square reported: <reason>` line from the status card, leaving `describeUnavailableReason`'s merchant-facing sentence.
+
+**`--dart-define=DEV_TOOLS=true` forces it on, whatever the flavor.** The flavor alone gets this wrong here: Square issues live seller credentials on production only, so hands-on Tap to Pay work happens on a *prod*-pointing build — exactly the one the flavor rule would strip the diagnostics from. `DEV_TOOLS=false` forces it off, which is how to see what a reviewer sees. Failing that, `--dart-define=FLAVOR=staging` also brings it back, which is what `ios-release.yml`'s `development` export should use whenever the backend can serve the test — that export is also the only one that can present education (above) and therefore the only one the review videos can be recorded from.
 
 Two fields read `—` on iOS and always will: the plugin's iOS `Location.toMap()` omits `merchantId` and `cardProcessingActivated`, which also makes the payment sheet's `cardProcessingActivated == false` gate dead code there.
 

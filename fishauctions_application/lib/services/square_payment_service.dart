@@ -152,11 +152,30 @@ class SquarePaymentService {
   ///
   /// The SDK offers no unlink, so this is the only way to see the linking step
   /// again — which is what re-recording Apple's onboarding video needs.
-  Future<void> relinkAppleAccount() async {
+  ///
+  /// Returns null when the sheet ran (or the merchant dismissed it, which is
+  /// the ordinary way out of it) and the SDK's own error name otherwise —
+  /// `notAuthorized`, `linkingFailed`, `noNetwork`… A sheet that never
+  /// appears looks exactly like one that was dismissed, so the caller has no
+  /// other way to tell the difference, and the difference is the whole story
+  /// when the reset button appears to do nothing. In particular
+  /// **`notAuthorized` means the SDK holds no Square authorization**: Square's
+  /// own message is "This device must be authorized with a Square account in
+  /// order to use Tap To Pay", so anything that releases the authorization has
+  /// to happen *after* this, not before.
+  Future<String?> relinkAppleAccount() async {
     if (!Platform.isIOS) {
-      return;
+      return null;
     }
-    await _sdk.tapToPaySettings.relinkAppleAccount();
+    try {
+      await _sdk.tapToPaySettings.relinkAppleAccount();
+      return null;
+    } on TapToPayError catch (e) {
+      return e.code == TapToPayErrorCode.linkingCanceled ? null : e.code.name;
+    } on Object catch (e) {
+      _log.e('Apple account relink failed: $e');
+      return e.toString();
+    }
   }
 
   /// Whether this device is linked to an Apple account for Tap to Pay — i.e.

@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../config/environment.dart';
 import '../models/tap_to_pay_diagnostics.dart';
 import '../models/tap_to_pay_status.dart';
 import '../providers/config_provider.dart';
@@ -180,35 +181,56 @@ class _TapToPayScreenState extends ConsumerState<TapToPayScreen> {
   }
 
   /// Puts this device back to its pre-setup state so Apple's onboarding and
-  /// education flows can be recorded again, then offers the Apple Account
-  /// sheet — the one step no *in-app* reset can clear, since the SDK has no
-  /// unlink. Apple's own web page can: see the note under the button.
+  /// education flows can be recorded again: Apple's Account sheet — the one
+  /// step no *in-app* reset can clear, since the SDK has no unlink — then the
+  /// awareness marker and the Square authorization. Apple's own web page can
+  /// do the real unlink: see the note under the button.
+  ///
+  /// **The sheet has to come first.** `relinkAppleAccount()` needs the SDK
+  /// authorized (Square: *"This device must be authorized with a Square
+  /// account in order to use Tap To Pay"*) and the reset releases exactly that
+  /// authorization. Run the other way round it answered `notAuthorized` every
+  /// time, and because a sheet that never appears is indistinguishable from one
+  /// the merchant dismissed, the whole button looked like it did nothing: the
+  /// snackbar said "Reset", no sheet came up, and the reason went to
+  /// `debugPrint` on a device with no debugger attached.
   Future<void> _resetForRecording() async {
+    // Only when Apple already considers this device linked. When it doesn't,
+    // there is nothing to re-link and the ordinary "Set up" button gives the
+    // genuine first-time acceptance, which is the better thing to film anyway.
+    final relinkError = _enabled
+        ? await SquarePaymentService.instance.relinkAppleAccount()
+        : null;
     final failures = await _service.resetForRecording();
     if (!mounted) {
       return;
     }
     setState(() => _diagnostics = null);
+    // Re-read the SDK rather than trusting the state this screen was built
+    // with. An Apple Account unlinked on Apple's website surfaces here, and
+    // until it does the screen goes on showing the ready card for a device
+    // that can no longer take a payment. Also re-warms, so "arms from cold"
+    // is something the merchant can watch happen.
+    unawaited(_refresh());
+    final notes = [
+      ...failures,
+      if (relinkError == 'notAuthorized')
+        'the Apple Account sheet needs the Square authorization — pull to '
+            'refresh, then reset again'
+      else if (relinkError != null)
+        'the Apple Account sheet failed: $relinkError',
+    ];
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
-          failures.isEmpty
+          notes.isEmpty
               ? 'Reset. The awareness moment fires again on the next auction '
                     'page, and the reader arms from cold.'
-              : 'Partly reset — ${failures.join('; ')}',
+              : 'Partly reset — ${notes.join('; ')}',
         ),
         duration: const Duration(seconds: 8),
       ),
     );
-    if (!_service.isApplePlatform) {
-      return;
-    }
-    try {
-      await SquarePaymentService.instance.relinkAppleAccount();
-    } on Object catch (e) {
-      // Cancelling the sheet lands here and is the normal way out of it.
-      debugPrint('Apple account relink not completed: $e');
-    }
   }
 
   /// Apple's education sheet, with a text fallback for iOS 17 and earlier.
@@ -258,13 +280,16 @@ class _TapToPayScreenState extends ConsumerState<TapToPayScreen> {
                     ),
                   ),
                 ],
-                const SizedBox(height: 24),
-                _TroubleshootingSection(
-                  diagnostics: _diagnostics,
-                  running: _diagnosing,
-                  onRun: _runDiagnostics,
-                  onReset: _resetForRecording,
-                ),
+                // Developer builds only — see `_TroubleshootingSection`.
+                if (EnvironmentConfig.enableDeveloperTools) ...[
+                  const SizedBox(height: 24),
+                  _TroubleshootingSection(
+                    diagnostics: _diagnostics,
+                    running: _diagnosing,
+                    onRun: _runDiagnostics,
+                    onReset: _resetForRecording,
+                  ),
+                ],
               ],
             ),
           ),
@@ -352,13 +377,22 @@ class _TapToPayScreenState extends ConsumerState<TapToPayScreen> {
               'Open an invoice from a checkout page and tap the '
               '$tapToPayName button to take a payment.';
         } else if (blocked && reason != null) {
-          body =
-              '${describeUnavailableReason(reason)}\n\n'
-              'Square reported: $reason';
+          // The raw enum is Square's word, not a merchant's: useful next to a
+          // diagnostics dump, noise on a settings screen without one.
+          body = EnvironmentConfig.enableDeveloperTools
+              ? '${describeUnavailableReason(reason)}\n\n'
+                    'Square reported: $reason'
+              : describeUnavailableReason(reason);
         } else if (blocked) {
-          body =
-              'Square could not get the reader ready and did not say why. '
-              'Open Troubleshooting below for the full picture.';
+          // Square gave no reason, so neither can we. The merchant-facing
+          // version names the two things they can actually act on; the
+          // developer builds have the diagnostics block underneath.
+          body = EnvironmentConfig.enableDeveloperTools
+              ? 'Square could not get the reader ready and did not say why. '
+                    'Open Troubleshooting below for the full picture.'
+              : 'Square could not get the reader ready. Check that this '
+                    'iPhone is online and signed in to an Apple Account, '
+                    'then pull down to try again.';
         } else {
           body =
               'Your iPhone is finishing setup. This usually takes a few '
@@ -494,11 +528,22 @@ class _StatusCard extends StatelessWidget {
 /// Everything the app can find out about whether a tap would work, collapsed
 /// by default and copyable.
 ///
-/// Collapsed because this is a merchant settings screen, not a debug console.
-/// Present, because the failure it explains has no other witness: Square shows
-/// one opaque "connect hardware to take card payments" prompt for every cause,
-/// so without this the only way to tell them apart is a signed rebuild per
-/// hypothesis — which is exactly how this feature lost several days.
+/// **Built only when [EnvironmentConfig.enableDeveloperTools] is set — that is,
+/// in the dev and staging flavors, never in the prod build that goes to
+/// TestFlight and the App Store.** This is a debug console wearing a settings
+/// screen's clothes: a merchant has nothing to do with an SDK reader dump, and
+/// "release this device's Square authorization" is an actively bad button to
+/// hand someone mid-auction. Apple reviews Tap to Pay by working the merchant
+/// flows, and this is the kind of surface a review reads as an unfinished
+/// build.
+///
+/// Present at all, because the failure it explains has no other witness: Square
+/// shows one opaque "connect hardware to take card payments" prompt for every
+/// cause, so without this the only way to tell them apart is a signed rebuild
+/// per hypothesis — which is exactly how this feature lost several days. Build
+/// with `--dart-define=FLAVOR=staging` to get it back; the `development` export
+/// in `ios-release.yml` takes that flavor, which is also the build to record
+/// Apple's onboarding video from, since **Reset for re-recording** lives here.
 class _TroubleshootingSection extends StatelessWidget {
   const _TroubleshootingSection({
     required this.diagnostics,
@@ -598,10 +643,10 @@ class _TroubleshootingSection extends StatelessWidget {
             label: const Text('Reset for re-recording'),
           ),
           Text(
-            'Clears the one-time awareness moment and releases this device\'s '
-            'Square authorization, then re-opens the Apple Account sheet, so '
-            'the setup flow can be recorded again. Does not affect payments '
-            'already taken.\n\n'
+            'Re-opens the Apple Account sheet, then clears the one-time '
+            'awareness moment and releases this device\'s Square '
+            'authorization, so the setup flow can be recorded again. Does not '
+            'affect payments already taken.\n\n'
             'To record a genuine first-time acceptance, unlink the Apple '
             'Account first at businessconnect.apple.com/taptopay/removeall '
             '(sign in, then "Remove all merchant IDs"), which the SDK cannot '

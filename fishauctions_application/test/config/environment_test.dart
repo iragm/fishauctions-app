@@ -18,6 +18,17 @@ void main() {
       expect(url.endsWith('/'), isFalse);
     });
 
+    test('developer tools are on for a debug build outside prod', () {
+      // Compile-time const, so a single run can only ever see one build's
+      // answer — this one, which `flutter test` builds as debug on the dev
+      // flavor, i.e. both halves of the default true. What the const buys is
+      // the App Store build: a release prod build with no `DEV_TOOLS` define
+      // resolves this to false and drops the guarded widgets outright, so the
+      // Tap to Pay troubleshooting block cannot reach a reviewer.
+      expect(EnvironmentConfig.enableDeveloperTools, isTrue);
+      expect(EnvironmentConfig.currentEnvironment, isNot(Environment.prod));
+    });
+
     test('exposes the custom URL scheme the WebView intercepts', () {
       expect(EnvironmentConfig.urlScheme, 'fishauctions');
     });
