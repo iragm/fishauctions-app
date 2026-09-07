@@ -138,7 +138,7 @@ flutter {
 dependencies {
     // Keep in sync with the version flutter_local_notifications' own module
     // pulls (android/build.gradle) — a lower one here loses the resolution.
-    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
     // MainActivity initializes the Square SDK just-in-time (from the app id the
     // backend returns per invoice), so the app module needs the SDK on its
     // compile classpath. The square_mobile_payments_sdk plugin pulls the same
@@ -154,6 +154,6 @@ dependencies {
     // detection — the same detection engine the mobile_scanner package used
     // for this screen, so detection quality is unchanged. See
     // ar/ArSessionManager.kt for why these two must share one camera client.
-    implementation("com.google.ar:core:1.54.0")
+    implementation("com.google.ar:core:1.56.0")
     implementation("com.google.mlkit:barcode-scanning:17.3.0")
 }
