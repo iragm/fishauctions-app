@@ -190,17 +190,22 @@ class BiasedSpeechBackend extends RestartingSpeechBackend {
   void _armPause(Duration window) {
     _pauseWindow = window;
     _pauseTimer?.cancel();
-    _pauseTimer = Timer(window, () {
-      // Close the utterance and let the *platform's* answer end it, rather
-      // than ending it here as well. Asking a recognizer to stop is asking it
-      // for its final result, and that result is the best transcript of the
-      // phrase — declaring the phrase over first means the base class flushes
-      // a partial, re-arms, and then the real final lands inside the next
-      // utterance.
-      unawaited(closeUtterance());
-      _armWatchdog();
-    });
+    _pauseTimer = Timer(window, _endPhrase);
   }
+
+  /// Close the utterance and let the *platform's* answer end it, rather than
+  /// ending it here as well. Asking a recognizer to stop is asking it for its
+  /// final result, and that result is the best transcript of the phrase —
+  /// declaring the phrase over first means the base class flushes a partial,
+  /// re-arms, and then the real final lands inside the next utterance.
+  void _endPhrase() {
+    unawaited(closeUtterance());
+    _armWatchdog();
+  }
+
+  /// The silence clock running out early: same close, same watchdog.
+  @override
+  void endUtteranceNow() => _endPhrase();
 
   /// The one case the platform can't be trusted to answer: a recognizer that
   /// was asked to stop and says nothing at all. Without this the session would

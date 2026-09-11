@@ -1932,11 +1932,12 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
         await _offerPrinterSetup();
       case LabelPrintStatus.failed:
         // Retry the labels that *didn't* print, not the whole batch — the
-        // printed ones are already stuck on boxes. They go out in order, so
-        // the remainder is everything past the printed count.
-        final remaining = lotPks.sublist(
-          result.printed.clamp(0, lotPks.length),
-        );
+        // printed ones are already stuck on boxes. The job says which those
+        // are when it got far enough to know; before that, they go out in
+        // order, so the remainder is everything past the printed count.
+        final remaining =
+            result.retryLots ??
+            lotPks.sublist(result.printed.clamp(0, lotPks.length));
         _showSnack(
           _failureText(result),
           actionLabel: result.fixInSettings ? 'Settings' : 'Retry',

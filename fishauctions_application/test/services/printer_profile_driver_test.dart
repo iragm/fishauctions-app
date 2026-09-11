@@ -12,12 +12,15 @@ import 'package:flutter_test/flutter_test.dart';
 /// Records writes and scripts notify replies so profile programs are testable
 /// without a real printer.
 class _FakeTransport implements PrinterTransport {
-  _FakeTransport({this.statusByte = 0x00});
+  _FakeTransport({this.statusByte = 0x00, this.silent = false});
 
   final List<List<int>> writes = [];
   final _controller = StreamController<Uint8List>.broadcast();
 
   int statusByte;
+
+  /// Answers nothing at all, like a printer with no status channel.
+  bool silent;
 
   @override
   bool get isConnected => true;
@@ -28,6 +31,9 @@ class _FakeTransport implements PrinterTransport {
   @override
   Future<void> write(List<int> bytes) async {
     writes.add(List<int>.from(bytes));
+    if (silent) {
+      return;
+    }
     if (_eq(bytes, const [0x10, 0xff, 0x40]) ||
         _eq(bytes, const [0x1b, 0x21, 0x3f])) {
       // D11s `10 ff 40` and TSPL `<ESC>!?` both answer with one status byte.
@@ -294,6 +300,52 @@ void main() {
 
       expect(status.coverOpen, isTrue);
       expect(status.blocker?.message, contains('cover is open'));
+    });
+
+    // Silence is "ready" to a caller deciding whether to start, and nothing
+    // at all to one deciding what came out of the printer.
+    test('a printer that says nothing is reported as saying nothing', () async {
+      final t = _FakeTransport(silent: true);
+      addTearDown(t.dispose);
+      final driver = PrinterProfileDriver(t, _profile('tspl-raster'));
+      const quick = Duration(milliseconds: 20);
+
+      expect(await driver.queryStatus(timeout: quick), isNull);
+      expect((await driver.readStatus(timeout: quick)).blocker, isNull);
+    });
+
+    test('a profile with no status program is never asked', () async {
+      final t = _FakeTransport();
+      addTearDown(t.dispose);
+      final driver = PrinterProfileDriver(t, _profile('escpos-raster'));
+
+      expect(driver.canReadStatus, isFalse);
+      expect(await driver.queryStatus(), isNull);
+      expect(t.writes, isEmpty);
+    });
+
+    // The print loop reads the status itself between labels; asking again
+    // inside printLabel would double the round trip on every label.
+    test('printLabel skips its own status read when told to', () async {
+      final t = _FakeTransport();
+      addTearDown(t.dispose);
+      await PrinterProfileDriver(
+        t,
+        _profile('tspl-raster'),
+      ).printLabel(_bitmap(bytesPerRow: 4, rows: 1), preflight: false);
+
+      expect(t.writes, isNot(contains(equals([0x1b, 0x21, 0x3f]))));
+    });
+
+    // labels/printed/ answers an unknown condition with a 400 that loses the
+    // whole report.
+    test("only the backend's condition names are reported", () {
+      const status = ProfilePrinterStatus({
+        'paper_jam',
+        'printing',
+        'lid_wobble',
+      });
+      expect(status.reportableConditions, {'paper_jam'});
     });
   });
 

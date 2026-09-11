@@ -224,6 +224,27 @@ abstract class RestartingSpeechBackend implements SpeechBackend {
     await _events.close();
   }
 
+  @override
+  void finishUtterance() {
+    if (!_wantListening || !isUtteranceOpen) {
+      return;
+    }
+    endUtteranceNow();
+  }
+
+  /// [finishUtterance]'s platform half: end the phrase the way the silence
+  /// window would have. Stopping is what asks a recognizer for its final
+  /// result, and the ordinary end-of-utterance path re-arms from there. A
+  /// backend that runs its own silence clock ends the phrase the way that
+  /// clock does.
+  @protected
+  void endUtteranceNow() => unawaited(
+    closeUtterance().then(
+      (_) {},
+      onError: (Object e) => _log.w('Could not end the phrase early: $e'),
+    ),
+  );
+
   Future<void> _listen() async {
     if (!_wantListening || isUtteranceOpen) {
       return;

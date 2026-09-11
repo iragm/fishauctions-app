@@ -1,7 +1,7 @@
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 import 'package:logger/logger.dart';
 
 import 'api_service.dart';
@@ -69,6 +69,101 @@ class LabelService {
     );
     return Uint8List.fromList(res.data ?? const []);
   }
+
+  /// Part of a print run's label PNGs in one request
+  /// (`POST labels/batch/`), in [lotPks] order.
+  ///
+  /// **The answer is deliberately not all of them.** The server renders until
+  /// it hits 25 labels or a 3-second budget and leaves the rest, so the
+  /// caller's loop is "post what is left, print what comes back" — a run of
+  /// three hundred starts printing after the first chunk, and a slow server
+  /// hands back a smaller one instead of a minute-long response. What a run
+  /// costs is round trips over an auction hall's wifi, not rendering (about
+  /// 110 ms a label, cached), and that is what this collapses.
+  ///
+  /// Same raster parameters as [fetchLabelPng]. A 404 means a deployment
+  /// without the endpoint; the caller falls back to one GET per label.
+  Future<LabelBatch> fetchLabelBatch(
+    List<int> lotPks, {
+    int? widthPx,
+    int? heightPx,
+    int? dpi,
+  }) async {
+    final sized = widthPx != null && heightPx != null && dpi != null;
+    final res = await ApiService.instance.dio.post<Object?>(
+      'labels/batch/',
+      data: {
+        'lots': lotPks,
+        if (sized) 'resolution': '${widthPx}x$heightPx',
+        if (sized) 'dpi': dpi,
+      },
+    );
+    return parseLabelBatch(res.data);
+  }
+}
+
+/// One `labels/batch/` answer.
+@immutable
+class LabelBatch {
+  const LabelBatch({
+    required this.labels,
+    this.remaining = const [],
+    this.skipped = const [],
+  });
+
+  /// The labels the server got to, in the order it returned them.
+  final List<({int lot, Uint8List png})> labels;
+
+  /// The lots it didn't get to this time, to ask for again.
+  final List<int> remaining;
+
+  /// Lots it will never render for this caller (deleted, not theirs), with
+  /// the server's reason. Per-lot, and never a reason to stop the run.
+  final List<({int lot, String detail})> skipped;
+}
+
+/// Reads a `labels/batch/` body. Throws [FormatException] for anything that
+/// isn't one, so the caller can fall back to one request per label rather
+/// than print from a shape it doesn't understand.
+LabelBatch parseLabelBatch(Object? body) {
+  final json = body is String ? jsonDecode(body) : body;
+  if (json is! Map) {
+    throw const FormatException('labels/batch/ did not answer with an object');
+  }
+  final rawLabels = json['labels'];
+  if (rawLabels is! List) {
+    throw const FormatException('labels/batch/ answered without a labels list');
+  }
+  final labels = <({int lot, Uint8List png})>[];
+  for (final entry in rawLabels) {
+    final lot = entry is Map ? entry['lot'] : null;
+    final png = entry is Map ? entry['png'] : null;
+    if (lot is! int || png is! String) {
+      throw const FormatException('labels/batch/ sent a malformed label');
+    }
+    labels.add((lot: lot, png: base64Decode(png)));
+  }
+  final rawRemaining = json['remaining'];
+  final rawSkipped = json['skipped'];
+  return LabelBatch(
+    labels: labels,
+    remaining: [
+      if (rawRemaining is List)
+        for (final lot in rawRemaining)
+          if (lot is int) lot,
+    ],
+    skipped: [
+      if (rawSkipped is List)
+        for (final entry in rawSkipped)
+          if (entry is Map && entry['lot'] is int)
+            (
+              lot: entry['lot'] as int,
+              detail: entry['detail'] is String
+                  ? entry['detail'] as String
+                  : 'This label could not be printed.',
+            ),
+    ],
+  );
 }
 
 /// Maps a failed label fetch to a message the user can act on. Shared by every

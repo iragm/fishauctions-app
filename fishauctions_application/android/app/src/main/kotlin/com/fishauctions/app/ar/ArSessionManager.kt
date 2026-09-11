@@ -2,9 +2,10 @@ package com.fishauctions.app.ar
 
 import android.app.Activity
 import android.content.Context
-import android.content.pm.PackageManager
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
+import android.media.Image
+import android.os.Build
 import android.util.Log
 import android.view.Surface
 import com.google.ar.core.ArCoreApk
@@ -35,6 +36,12 @@ import com.google.mlkit.vision.common.InputImage
  * camera concurrently, and CameraX has no supported path into ARCore's own "shared camera"
  * mechanism. QR detection moves to ML Kit fed by ARCore's frames — the same underlying engine
  * mobile_scanner already used, so detection quality shouldn't regress.
+ *
+ * **Two threads.** [ensureSession], [resume], [pause] and [close] run on the UI thread;
+ * [update], [setCameraTextureName] and [setDisplayGeometry] on the GL render thread. The view
+ * pauses the GL thread before any UI-thread call that replaces or closes the session, so the
+ * two never touch one session at once. Anything thrown on the GL thread ends the process, so
+ * nothing there may escape.
  */
 class ArSessionManager(private val activity: Activity) {
     interface PoseListener {
@@ -63,8 +70,29 @@ class ArSessionManager(private val activity: Activity) {
     var detectionListener: DetectionListener? = null
     var statusListener: StatusListener? = null
 
-    private var session: Session? = null
+    @Volatile private var session: Session? = null
     private var installRequested = false
+
+    /** True while ARCore is still working out whether this device is supported — the usual
+     * answer to the first check of a process. The view asks again shortly. */
+    var availabilityPending = false
+        private set
+
+    // GL-thread state. The camera texture and display geometry belong to the GL surface, not to
+    // a session, and a session can be created after the surface exists: the availability check
+    // or the ARCore installer finishing on a later resume. So they're recorded here and handed
+    // to whichever session [update] finds. They used to be handed over once, at surface
+    // creation — to a session that might not exist yet — and ARCore's update() throws for a
+    // session that was never given a texture, on the GL thread, which kills the app.
+    private var cameraTextureId = -1
+    private var textureAppliedTo: Session? = null
+    private var geometryRotation = Surface.ROTATION_0
+    private var geometryWidth = 0
+    private var geometryHeight = 0
+    private var geometryAppliedTo: Session? = null
+    private var lastUpdateError: String? = null
+    private var reportedCameraLoss = false
+
     private val barcodeScanner = BarcodeScanning.getClient(
         BarcodeScannerOptions.Builder()
             .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
@@ -74,9 +102,13 @@ class ArSessionManager(private val activity: Activity) {
     private var lastDetectionAttemptMs = 0L
     private val detectionIntervalMs = 100L // ~10 Hz — plenty for a hand-held scan sweep
 
+    /** The back camera's mounting angle. Asked once: it was a CameraManager IPC ten times a
+     * second, for a value that can't change. */
+    private val sensorOrientation: Int by lazy { backCameraSensorOrientation(activity) }
+
     /** Creates and configures the session if needed. Returns true when a session is ready to
-     * [resume]. False (with [statusListener] told why) means AR mode can't proceed on this
-     * device/build — the Dart side shows an explainer instead of the camera view. */
+     * [resume]. False (with [statusListener] told why) means AR mode can't proceed yet — or, with
+     * [availabilityPending], can't tell yet. */
     fun ensureSession(): Boolean {
         if (session != null) {
             return true
@@ -84,10 +116,10 @@ class ArSessionManager(private val activity: Activity) {
         statusListener?.onStatus("checking", null)
         try {
             val availability = ArCoreApk.getInstance().checkAvailability(activity)
+            availabilityPending = availability.isTransient
             if (availability.isTransient) {
-                // Rare (network check in flight) — the view retries ensureSession() on its next
-                // lifecycle callback rather than blocking here.
-                statusListener?.onStatus("checking", null)
+                // The network check is still in flight. The view retries shortly rather than
+                // blocking here (ArCameraPlatformView.startSession).
                 return false
             }
             if (!availability.isSupported) {
@@ -126,6 +158,7 @@ class ArSessionManager(private val activity: Activity) {
             newSession.configure(config)
             selectCpuImageCameraConfig(newSession)
             session = newSession
+            reportedCameraLoss = false
             statusListener?.onStatus("ready", null)
             true
         } catch (e: UnavailableException) {
@@ -155,44 +188,102 @@ class ArSessionManager(private val activity: Activity) {
         }
     }
 
+    /** UI thread, with the GL thread paused. Runs from Activity.onResume, so an exception here
+     * would crash the app on the way back into it — every failure becomes an explainer instead. */
     fun resume() {
         val s = session ?: return
         try {
             s.resume()
         } catch (e: CameraNotAvailableException) {
-            statusListener?.onStatus("error", "Camera is in use by another app.")
-            session = null
+            discard(s, "Camera is in use by another app. Go back and try again.")
+        } catch (e: Exception) {
+            Log.w(TAG, "AR session failed to resume", e)
+            discard(s, "Lot scanning couldn't start the camera. Go back and try again.")
         }
     }
 
+    /** Closes a session that can't run. It used to be dropped without closing, which leaked its
+     * native memory and left a second session to contend with it on the next resume. */
+    private fun discard(s: Session, message: String) {
+        session = null
+        try {
+            s.close()
+        } catch (e: Exception) {
+            Log.w(TAG, "AR session close failed", e)
+        }
+        statusListener?.onStatus("error", message)
+    }
+
     fun pause() {
-        session?.pause()
+        try {
+            session?.pause()
+        } catch (e: Exception) {
+            Log.w(TAG, "AR session pause failed", e)
+        }
     }
 
     fun close() {
-        session?.close()
+        val s = session
         session = null
+        try {
+            s?.close()
+        } catch (e: Exception) {
+            Log.w(TAG, "AR session close failed", e)
+        }
         barcodeScanner.close()
     }
 
+    /** GL thread. Applied to the session on the next [update]. */
     fun setDisplayGeometry(rotation: Int, width: Int, height: Int) {
-        session?.setDisplayGeometry(rotation, width, height)
+        geometryRotation = rotation
+        geometryWidth = width
+        geometryHeight = height
+        geometryAppliedTo = null
     }
 
+    /** GL thread. Applied to the session on the next [update]; a new GL context brings a new
+     * texture, so it's re-applied even to a session that already had one. */
     fun setCameraTextureName(textureId: Int) {
-        session?.setCameraTextureName(textureId)
+        cameraTextureId = textureId
+        textureAppliedTo = null
     }
 
     /** Called from the GL render thread on every `onDrawFrame`. Returns the updated [Frame] (for
      * the background renderer to re-map its UVs), or null if no session/frame is available yet. */
     fun update(): Frame? {
         val s = session ?: return null
-        val frame = try {
-            s.update()
-        } catch (e: CameraNotAvailableException) {
-            statusListener?.onStatus("error", "Camera became unavailable.")
+        if (cameraTextureId < 0) {
+            // No GL surface yet. ARCore's update() without a texture throws.
             return null
         }
+        val frame = try {
+            if (textureAppliedTo !== s) {
+                s.setCameraTextureName(cameraTextureId)
+                textureAppliedTo = s
+            }
+            if (geometryWidth > 0 && geometryAppliedTo !== s) {
+                s.setDisplayGeometry(geometryRotation, geometryWidth, geometryHeight)
+                geometryAppliedTo = s
+            }
+            s.update()
+        } catch (e: CameraNotAvailableException) {
+            if (!reportedCameraLoss) {
+                reportedCameraLoss = true
+                statusListener?.onStatus("error", "Camera became unavailable. Go back and try again.")
+            }
+            return null
+        } catch (e: Exception) {
+            // SessionPausedException in the instant between a pause and the GL thread stopping, or
+            // anything else ARCore throws for one frame: skip it, and the next frame asks again.
+            // Logged once per kind, so a persistent one shows up without flooding the log at 30 fps.
+            val kind = e.javaClass.simpleName
+            if (kind != lastUpdateError) {
+                lastUpdateError = kind
+                Log.w(TAG, "AR frame update failed", e)
+            }
+            return null
+        }
+        lastUpdateError = null
 
         val camera = frame.camera
         val tracking = camera.trackingState == TrackingState.TRACKING
@@ -227,17 +318,27 @@ class ArSessionManager(private val activity: Activity) {
             return
         }
         lastDetectionAttemptMs = now
-        detectionInFlight = true
-        val rotation = rotationDegreesForBackCamera(activity)
-        val inputImage = try {
-            InputImage.fromMediaImage(image, rotation)
+        // Copied out and closed *before* ML Kit sees it. An ARCore camera image lives in the
+        // session's own buffers, and ML Kit used to read it on a background thread for as long as
+        // detection took — across an Activity pause, when the session stops the camera, or a
+        // close, when it frees them. Reading those buffers then, and closing the image into a
+        // destroyed session afterwards, is a use-after-free in native code that no catch can
+        // stop. The luma plane is all a QR decoder reads, so the copy is ~300 KB at 10 Hz.
+        val copy = try {
+            Triple(image.width, image.height, lumaAsNv21(image))
         } catch (e: Exception) {
+            null
+        } finally {
             image.close()
-            detectionInFlight = false
+        }
+        val (width, height, nv21) = copy ?: return
+        val rotation = rotationDegreesForBackCamera()
+        val inputImage = try {
+            InputImage.fromByteArray(nv21, width, height, rotation, InputImage.IMAGE_FORMAT_NV21)
+        } catch (e: Exception) {
             return
         }
-        val width = image.width
-        val height = image.height
+        detectionInFlight = true
         barcodeScanner.process(inputImage)
             .addOnSuccessListener { barcodes ->
                 val detected = barcodes.mapNotNull { barcode ->
@@ -258,39 +359,77 @@ class ArSessionManager(private val activity: Activity) {
                 detectionListener?.onDetections(reportedWidth, reportedHeight, detected)
             }
             .addOnCompleteListener {
-                image.close()
                 detectionInFlight = false
             }
+    }
+
+    /** Standard ML Kit rotation-compensation formula for a back-facing camera: the sensor's
+     * fixed mounting angle minus how far the device has turned from its natural orientation. */
+    private fun rotationDegreesForBackCamera(): Int {
+        val deviceDegrees = when (currentDisplayRotation(activity)) {
+            Surface.ROTATION_0 -> 0
+            Surface.ROTATION_90 -> 90
+            Surface.ROTATION_180 -> 180
+            Surface.ROTATION_270 -> 270
+            else -> 0
+        }
+        return (sensorOrientation - deviceDegrees + 360) % 360
     }
 
     companion object {
         private const val TAG = "ArSessionManager"
 
-        /** Standard ML Kit rotation-compensation formula for a back-facing camera: the sensor's
-         * fixed mounting angle minus how far the device has turned from its natural orientation. */
-        private fun rotationDegreesForBackCamera(activity: Activity): Int {
-            val sensorOrientation = try {
-                val manager = activity.getSystemService(Context.CAMERA_SERVICE) as CameraManager
-                manager.cameraIdList.asSequence()
-                    .map { manager.getCameraCharacteristics(it) }
-                    .filter {
-                        it.get(CameraCharacteristics.LENS_FACING) ==
-                            CameraCharacteristics.LENS_FACING_BACK
+        private fun backCameraSensorOrientation(activity: Activity): Int = try {
+            val manager = activity.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            manager.cameraIdList.asSequence()
+                .map { manager.getCameraCharacteristics(it) }
+                .filter {
+                    it.get(CameraCharacteristics.LENS_FACING) ==
+                        CameraCharacteristics.LENS_FACING_BACK
+                }
+                .mapNotNull { it.get(CameraCharacteristics.SENSOR_ORIENTATION) }
+                .firstOrNull() ?: 90
+        } catch (e: Exception) {
+            90 // typical back-camera mounting angle; a wrong value just skews QR corners,
+               // never crashes — ML Kit still attempts detection.
+        }
+
+        /** An NV21 frame carrying [image]'s luma and neutral chroma, so the image can be closed
+         * at once. A QR decoder reads luminance only. */
+        private fun lumaAsNv21(image: Image): ByteArray {
+            val width = image.width
+            val height = image.height
+            val plane = image.planes[0]
+            val rowStride = plane.rowStride
+            val pixelStride = plane.pixelStride
+            val luma = plane.buffer
+            val lumaSize = width * height
+            val out = ByteArray(lumaSize + 2 * ((width + 1) / 2) * ((height + 1) / 2))
+            if (pixelStride == 1) {
+                for (row in 0 until height) {
+                    luma.position(row * rowStride)
+                    luma.get(out, row * width, width)
+                }
+            } else {
+                for (row in 0 until height) {
+                    val base = row * rowStride
+                    for (col in 0 until width) {
+                        out[row * width + col] = luma.get(base + col * pixelStride)
                     }
-                    .mapNotNull { it.get(CameraCharacteristics.SENSOR_ORIENTATION) }
-                    .firstOrNull() ?: 90
-            } catch (e: Exception) {
-                90 // typical back-camera mounting angle; a wrong value just skews QR corners,
-                   // never crashes — ML Kit still attempts detection.
+                }
             }
-            val deviceDegrees = when (activity.display?.rotation ?: Surface.ROTATION_0) {
-                Surface.ROTATION_0 -> 0
-                Surface.ROTATION_90 -> 90
-                Surface.ROTATION_180 -> 180
-                Surface.ROTATION_270 -> 270
-                else -> 0
-            }
-            return (sensorOrientation - deviceDegrees + 360) % 360
+            java.util.Arrays.fill(out, lumaSize, out.size, 128.toByte())
+            return out
         }
     }
 }
+
+/** The display's rotation, asked in a way every supported API level has: `Activity.getDisplay()`
+ * only exists from API 30, and this app's floor is 28. */
+@Suppress("DEPRECATION")
+internal fun currentDisplayRotation(activity: Activity): Int =
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        activity.display?.rotation ?: Surface.ROTATION_0
+    } else {
+        activity.windowManager.defaultDisplay.rotation
+    }

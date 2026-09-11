@@ -63,6 +63,11 @@ class FakeSpeechBackend implements SpeechBackend {
   @override
   Future<void> stop() async => stopCalls++;
 
+  int finishCalls = 0;
+
+  @override
+  void finishUtterance() => finishCalls++;
+
   @override
   Future<void> dispose() async => _events.close();
 }

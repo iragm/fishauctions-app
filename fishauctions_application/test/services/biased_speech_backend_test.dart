@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:fishauctions_application/services/biased_speech_backend.dart';
+import 'package:fishauctions_application/services/restarting_speech_backend.dart';
 import 'package:fishauctions_application/services/speech_backend.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -81,6 +82,9 @@ void main() {
   });
 
   tearDown(() async {
+    // Every backend shares one channel name, so a session left running here
+    // lets its silence timers stop and re-arm on the next test's mock.
+    await backend.stop();
     await subscription.cancel();
     platform.dispose();
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
@@ -282,6 +286,48 @@ void main() {
       await settle();
 
       expect(events.where((e) => e.type == SpeechEventType.error), isEmpty);
+    });
+  });
+
+  // Voice set-winners hearing "sold" in a transcript that has stopped
+  // changing: the phrase is over, and three more seconds of silence buy
+  // nothing but a late save.
+  group('finishing a phrase early', () {
+    Iterable<MethodCall> callsTo(String method) =>
+        platform.calls.where((c) => c.method == method);
+
+    test('asks the platform for its final and keeps listening', () async {
+      await backend.start(listening);
+      await settle();
+      backend.finishUtterance();
+      await settle();
+      expect(callsTo('stop'), hasLength(1));
+
+      await platform.emit({
+        'type': 'result',
+        'final': true,
+        'alternates': [
+          {'text': 'sold'},
+        ],
+      });
+      await platform.emit({'type': 'status', 'listening': false});
+      await Future<void>.delayed(
+        RestartingSpeechBackend.restartDelay +
+            const Duration(milliseconds: 100),
+      );
+
+      expect(
+        events.singleWhere((e) => e.type == SpeechEventType.result).bestText,
+        'sold',
+      );
+      expect(callsTo('start'), hasLength(2), reason: 'the session re-arms');
+      await backend.stop();
+    });
+
+    test('does nothing with no phrase open', () async {
+      backend.finishUtterance();
+      await settle();
+      expect(callsTo('stop'), isEmpty);
     });
   });
 }

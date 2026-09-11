@@ -269,5 +269,13 @@ abstract class SpeechBackend {
 
   Future<void> stop();
 
+  /// Ask for the current phrase's final result now rather than at the end of
+  /// the silence window, and keep the session listening afterwards.
+  ///
+  /// For a caller that already knows the phrase is over: voice set-winners
+  /// hearing "sold" in a transcript that has stopped changing has nothing to
+  /// gain from three more seconds of silence. A no-op when nothing is open.
+  void finishUtterance();
+
   Future<void> dispose();
 }

@@ -53,6 +53,17 @@ class VoiceCommandService {
   final Map<VoiceSlot, ({String value, double confidence})> _slots = {};
   final Map<VoiceSlot, ({String value, DateTime at})> _lastEmitted = {};
 
+  /// The newest partial transcript, and the clock that decides it has
+  /// settled. See [_onPartial].
+  List<SpeechHypothesis> _partial = const [];
+  Timer? _partialTimer;
+
+  /// What the utterance in progress has already written from a settled
+  /// partial, per slot — so its final result doesn't write the same thing
+  /// again — and whether it has already asked the recognizer to finish.
+  final Map<VoiceSlot, String> _committed = {};
+  bool _finishRequested = false;
+
   bool get isListening => _listening;
   bool _listening = false;
 
@@ -148,6 +159,7 @@ class VoiceCommandService {
     _sink = sink;
     _slots.clear();
     _lastEmitted.clear();
+    _forgetUtterance();
     // Before `grammar` is read for anything: the getter is synchronous, so an
     // unloaded store would silently run the session on the deployment's
     // defaults and make the panel look like it had done nothing.
@@ -190,6 +202,10 @@ class VoiceCommandService {
 
   Future<void> stop() async {
     _listening = false;
+    // Switching the microphone off is cancelling: a partial still settling
+    // was never finished, and writing it now would be the app typing on its
+    // own after the operator stopped it.
+    _forgetUtterance();
     VoiceVocabularyService.instance.end();
     Microphone.instance.release('voice');
     await _backend?.stop();
@@ -210,14 +226,16 @@ class VoiceCommandService {
       case SpeechEventType.level:
         _emit({'type': 'level', 'level': event.level});
       case SpeechEventType.partial:
-        // Partials drive the transcript line only. Nothing is written from
-        // them: a half-recognized number lands in the field and is then
-        // corrected, which reads as the app typing nonsense.
+        // A partial still changing writes nothing: a half-recognized number
+        // lands in the field and is then corrected, which reads as the app
+        // typing nonsense. One that has stopped changing is another matter —
+        // see [_onPartial].
         _emit({'type': 'transcript', 'text': event.bestText, 'partial': true});
+        _onPartial(event);
       case SpeechEventType.result:
-        _emit({'type': 'transcript', 'text': event.bestText, 'partial': false});
         _handleResult(event);
       case SpeechEventType.error:
+        _forgetUtterance();
         _listening = false;
         _emit({
           'type': 'error',
@@ -227,12 +245,90 @@ class VoiceCommandService {
     }
   }
 
+  /// Write the values in a partial that has stopped changing, instead of
+  /// waiting for the final result.
+  ///
+  /// **The final is what made voice feel broken.** A recognizer only
+  /// produces one when the silence window runs out, and that window is kept
+  /// long (three seconds) because every utterance that ends costs a
+  /// restart's worth of deafness — the next anchor keyword, spoken into it,
+  /// is lost. So "lot one" sat on the transcript line for five or six seconds
+  /// before the field filled. A partial that hasn't changed for
+  /// [VoiceGrammar.commitAfter] is a speaker who has stopped talking, and the
+  /// same parser reads it the same way.
+  ///
+  /// Only values are written from a partial. A value written early and then
+  /// corrected by the final is a field that changes once; a "sold" acted on
+  /// early is a sale. So an action in a settled partial only asks the
+  /// recognizer for its final now — the save still waits on the real
+  /// transcript, it just stops waiting for three seconds of silence first.
+  void _onPartial(SpeechEvent event) {
+    final wait = grammar.commitAfter;
+    if (wait == null) {
+      return;
+    }
+    _partial = event.alternates;
+    _partialTimer?.cancel();
+    _partialTimer = Timer(wait, _commitPartial);
+  }
+
+  void _commitPartial() {
+    _partialTimer = null;
+    if (!_listening || _partial.isEmpty) {
+      return;
+    }
+    final commands = _parse(_partial);
+    var heardAction = false;
+    final written = <VoiceCommand>[];
+    for (final command in commands) {
+      if (!command.slot.isValueSlot) {
+        heardAction = true;
+        continue;
+      }
+      if (_committed[command.slot] == command.value) {
+        continue;
+      }
+      _committed[command.slot] = command.value;
+      if (_isDuplicate(command)) {
+        continue;
+      }
+      _remember(command);
+      _emit(command.toJson());
+      written.add(command);
+    }
+    if (written.isNotEmpty) {
+      _log.i(
+        'Voice settled on "${_partial.first.text}" → ${written.join(', ')}',
+      );
+    }
+    if (heardAction && !_finishRequested) {
+      _finishRequested = true;
+      _backend?.finishUtterance();
+    }
+  }
+
+  /// Drop the utterance in progress: its settling clock, what it has written
+  /// early, and its request to finish.
+  void _forgetUtterance() {
+    _partialTimer?.cancel();
+    _partialTimer = null;
+    _partial = const [];
+    _committed.clear();
+    _finishRequested = false;
+  }
+
+  List<VoiceCommand> _parse(List<SpeechHypothesis> alternates) => VoiceParser(
+    grammar: grammar,
+    vocabulary: VoiceVocabularyService.instance.current,
+  ).parse(alternates);
+
   void _handleResult(SpeechEvent event) {
-    final parser = VoiceParser(
-      grammar: grammar,
-      vocabulary: VoiceVocabularyService.instance.current,
-    );
-    final commands = parser.parse(event.alternates);
+    // The final supersedes anything still settling. Whatever this utterance
+    // wrote early is read before it's forgotten, so the final doesn't write
+    // it a second time.
+    final committed = Map<VoiceSlot, String>.of(_committed);
+    _forgetUtterance();
+    final commands = _parse(event.alternates);
     // Logged on both branches, and deliberately at the same level. From the
     // outside "the app misheard me" and "the app never got a final result at
     // all" look identical — the page shows a transcript either way — and the
@@ -250,14 +346,24 @@ class VoiceCommandService {
                 '${vocabulary.bidderNumbers.length} bidders in the vocabulary)'
           : 'Voice heard $heard → ${commands.join(', ')}',
     );
-    if (commands.isEmpty) {
-      return;
-    }
-    for (final command in commands) {
+    final fresh = [
+      for (final command in commands)
+        if (committed[command.slot] != command.value && !_isDuplicate(command))
+          command,
+    ];
+    // The page matches a final transcript itself when no command follows it
+    // (its fallback for a build that can't match). One whose every command
+    // already reached the page — written from the settled partial, or sent
+    // moments ago — must not be matched again: that fallback would fill the
+    // same fields twice, and a "sold" in it would be a second save. Reported
+    // as a partial, which the page shows and never acts on.
+    _emit({
+      'type': 'transcript',
+      'text': event.bestText,
+      'partial': commands.isNotEmpty && fresh.isEmpty,
+    });
+    for (final command in fresh) {
       final resolved = _withBlockers(command);
-      if (_isDuplicate(resolved)) {
-        continue;
-      }
       _remember(resolved);
       _emit(resolved.toJson());
     }
@@ -409,6 +515,7 @@ class VoiceCommandService {
   void resetForTesting() {
     _slots.clear();
     _lastEmitted.clear();
+    _forgetUtterance();
     _served = bundledVoiceGrammar();
     _listening = false;
     _backend = null;

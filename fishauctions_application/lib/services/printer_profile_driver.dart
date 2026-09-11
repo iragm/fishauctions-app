@@ -27,6 +27,29 @@ class ProfilePrinterStatus {
 
   final Set<String> flags;
 
+  /// The backend's vocabulary for printer conditions
+  /// (`auctions.printer_programs.STATUS_CONDITIONS`). `labels/printed/`
+  /// validates against it and answers an unknown name with a 400 that loses
+  /// the whole report, so anything else a profile decodes stays on the phone.
+  static const reportable = {
+    'cover_open',
+    'out_of_paper',
+    'paper_jam',
+    'no_ribbon',
+    'overheated',
+    'low_battery',
+    'printing',
+    'paused',
+    'error',
+  };
+
+  /// The conditions worth telling the server about a label that didn't come
+  /// out — what's wrong with the printer, not that it was busy.
+  Set<String> get reportableConditions => {
+    for (final flag in flags)
+      if (flag != 'printing' && reportable.contains(flag)) flag,
+  };
+
   bool get printing => flags.contains('printing');
   bool get coverOpen => flags.contains('cover_open');
   bool get outOfPaper => flags.contains('out_of_paper');
@@ -119,6 +142,10 @@ class PrinterProfileDriver {
   /// pre-flight and throws a [PrinterException] with a clear next step when
   /// the printer can't print (out of paper, cover open, overheated).
   ///
+  /// [preflight] false skips that status read, for a caller that has just
+  /// made it itself — `LabelPrintService` reads the status between labels to
+  /// decide what came out, and asking twice would double the round trip.
+  ///
   /// [labelWidthMm]/[labelHeightMm] feed the `{width_mm}`/`{height_mm}`
   /// placeholders (TSPL-style `SIZE` commands); when absent they're derived
   /// from the bitmap and the profile's dpi. Returns a user-facing warning
@@ -131,6 +158,7 @@ class PrinterProfileDriver {
     int paperType = 0,
     double? labelWidthMm,
     double? labelHeightMm,
+    bool preflight = true,
     void Function(double progress)? onProgress,
   }) async {
     if (!_transport.isConnected) {
@@ -138,9 +166,11 @@ class PrinterProfileDriver {
         'The printer connection dropped. Reconnect the printer and try again.',
       );
     }
-    final blocker = (await readStatus()).blocker;
-    if (blocker != null) {
-      throw blocker;
+    if (preflight) {
+      final blocker = (await readStatus()).blocker;
+      if (blocker != null) {
+        throw blocker;
+      }
     }
 
     final ctx = _ProgramContext(
@@ -164,18 +194,39 @@ class PrinterProfileDriver {
   /// surface on the print itself.
   Future<ProfilePrinterStatus> readStatus({
     Duration timeout = _statusTimeout,
+  }) async => await queryStatus(timeout: timeout) ?? ProfilePrinterStatus.ready;
+
+  /// Whether this profile can ask the printer anything at all.
+  bool get canReadStatus =>
+      profile.statusProgram.isNotEmpty && profile.statusFlags.isNotEmpty;
+
+  /// [readStatus] without the benefit of the doubt: null when the profile has
+  /// no status program or the printer didn't answer.
+  ///
+  /// "Treat silence as ready" is right for deciding whether to *start*
+  /// printing, and wrong for deciding what *came out* — a caller reporting
+  /// labels as printed or failed has to know it learned nothing.
+  Future<ProfilePrinterStatus?> queryStatus({
+    Duration timeout = _statusTimeout,
   }) async {
-    if (profile.statusProgram.isEmpty || profile.statusFlags.isEmpty) {
-      return ProfilePrinterStatus.ready;
+    if (!canReadStatus) {
+      return null;
     }
     // Arm the listener before sending the query so the reply can't be missed.
     final reply = _transport.notifications.first;
-    await _runProgram(profile.statusProgram, _ProgramContext.commandsOnly());
+    try {
+      await _runProgram(profile.statusProgram, _ProgramContext.commandsOnly());
+    } on Object {
+      // Nobody will await the reply now; don't let it surface as an
+      // unhandled error if the stream closes without one.
+      unawaited(reply.then((_) {}, onError: (Object _) {}));
+      rethrow;
+    }
     try {
       final frame = await reply.timeout(timeout);
       return _decodeStatus(frame);
     } on TimeoutException {
-      return ProfilePrinterStatus.ready;
+      return null;
     }
   }
 

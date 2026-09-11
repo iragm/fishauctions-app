@@ -22,6 +22,7 @@ class VoiceGrammar {
     this.blockAutoSubmitWhenUnsure = true,
     this.maxAlternates = 3,
     this.biasLowPrices = false,
+    this.commitAfter = defaultCommitAfter,
   });
 
   /// Parse the `voice` block, falling back to [fallback] field by field so a
@@ -75,6 +76,7 @@ class VoiceGrammar {
       biasLowPrices: json['bias_low_prices'] is bool
           ? json['bias_low_prices'] as bool
           : fallback.biasLowPrices,
+      commitAfter: _commitAfter(json['commit_after_ms'], fallback.commitAfter),
     );
   }
 
@@ -135,6 +137,24 @@ class VoiceGrammar {
   /// rule and must stay one.
   final bool biasLowPrices;
 
+  /// How long a partial transcript has to stop changing before the values in
+  /// it are written — the gap between the operator finishing "lot forty two"
+  /// and the field filling. Served as `commit_after_ms`; `0` turns it off.
+  ///
+  /// Without it a value waited for the *final* result, which the recognizer
+  /// only produces once the silence window (three seconds, kept long so a
+  /// continuous chant doesn't keep closing and re-opening the microphone) has
+  /// run out — five or six seconds from "lot one" to a filled field. Actions
+  /// ("sold") still wait for a final; seeing one in a settled partial only
+  /// asks the recognizer for it early. A final that disagrees with what a
+  /// partial wrote writes the correction.
+  ///
+  /// Null acts on final results only, which is the behaviour before this
+  /// existed and the kill switch if early values misbehave in a hall.
+  final Duration? commitAfter;
+
+  static const defaultCommitAfter = Duration(milliseconds: 700);
+
   /// This grammar with a few fields replaced. Only the fields the operator's
   /// device-local settings can override are here — everything else about a
   /// grammar is the deployment's business, and a device that could quietly
@@ -156,6 +176,7 @@ class VoiceGrammar {
     blockAutoSubmitWhenUnsure: blockAutoSubmitWhenUnsure,
     maxAlternates: maxAlternates,
     biasLowPrices: biasLowPrices ?? this.biasLowPrices,
+    commitAfter: commitAfter,
   );
 
   /// The slot an anchor word belongs to, with how good the match was — 1.0 for
@@ -197,6 +218,19 @@ class VoiceGrammar {
 
   static String? _str(Object? raw) =>
       raw is String && raw.trim().isNotEmpty ? raw.trim() : null;
+
+  /// `commit_after_ms`: absent or malformed keeps [fallback], `0` or less is
+  /// off. Clamped so a typo can't commit mid-word or outwait the silence
+  /// window it exists to beat.
+  static Duration? _commitAfter(Object? raw, Duration? fallback) {
+    if (raw is! num) {
+      return fallback;
+    }
+    if (raw <= 0) {
+      return null;
+    }
+    return Duration(milliseconds: raw.round().clamp(200, 2500));
+  }
 
   static double? _threshold(Map<String, dynamic> json, String key) {
     final thresholds = json['thresholds'];

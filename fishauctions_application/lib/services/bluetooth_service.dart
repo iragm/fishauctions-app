@@ -525,9 +525,39 @@ class BluetoothService implements PrinterTransport {
     }
     _device = device;
     _writeChar = write;
+    _linkId++;
     _watchConnection(device);
     await _subscribeNotify(device, profile: profile);
+    await _requestFastLink(device);
     return write;
+  }
+
+  /// Identifies the current link: bumped on every successful connect, so a
+  /// caller can remember something about *this* connection (a printer that
+  /// never answers status queries, say) and have it forgotten on reconnect.
+  int get linkId => _linkId;
+  int _linkId = 0;
+
+  /// Asks Android for its shortest connection interval.
+  ///
+  /// Print profiles default to acknowledged writes, and an acknowledged write
+  /// waits for the printer's response inside a connection event — so the
+  /// interval, not the radio, sets the pace: at Android's default 30–50 ms a
+  /// 3×2″ label (~31 KB, ~170 writes at a 185-byte MTU) spends five seconds
+  /// or more just waiting for turns. "High" is 11.25–15 ms. Best-effort: the
+  /// printer may refuse, and iOS offers no such control (it negotiates on its
+  /// own, and `requestConnectionPriority` throws there).
+  Future<void> _requestFastLink(BluetoothDevice device) async {
+    if (!Platform.isAndroid) {
+      return;
+    }
+    try {
+      await device.requestConnectionPriority(
+        connectionPriorityRequest: ConnectionPriority.high,
+      );
+    } on Object catch (e) {
+      _log.i('Printer kept its default connection interval: $e');
+    }
   }
 
   /// Widens the ATT MTU so a raster chunk can actually be written.

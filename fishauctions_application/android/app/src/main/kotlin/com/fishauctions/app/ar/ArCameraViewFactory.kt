@@ -19,9 +19,16 @@ class ArCameraViewFactory(
         private set
 
     override fun create(context: Context, viewId: Int, args: Any?): PlatformView {
+        var created: ArCameraPlatformView? = null
         val view = ArCameraPlatformView(context, activity, events) {
-            activeView = null
+            // Only forget the view if it is still the live one. A replacement created before
+            // this one was disposed has to keep getting lifecycle callbacks, or its session never
+            // pauses when the app goes to the background and never resumes when it comes back.
+            if (activeView === created) {
+                activeView = null
+            }
         }
+        created = view
         activeView = view
         return view
     }
