@@ -2187,7 +2187,14 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   /// device-changes-hands moment, and it guarantees the account screens'
   /// WebView can't carry a stale session into the next user's signup. The
   /// location cookies are re-seeded on the next mount.
-  Future<void> _signOut() async {
+  ///
+  /// Single-flight: the website's sign-out button can fire both the
+  /// `webLogout` handler and the native POST fallback, and two overlapping
+  /// runs would release Square and wipe storage twice, concurrently.
+  Future<void> _signOut() => _signingOut ??= _runSignOut();
+  Future<void>? _signingOut;
+
+  Future<void> _runSignOut() async {
     await _postWebLogout();
     await CookieManager.instance().deleteAllCookies();
     await ref.read(authProvider.notifier).logout();

@@ -375,12 +375,13 @@ class SquarePaymentService {
   /// The plugin's own channel. Only [_startPaymentIOS] uses it.
   static const _channel = MethodChannel('square_mobile_payments_sdk');
 
-  /// Releases the current authorization (e.g. on logout).
-  /// Releases the SDK's authorization. A no-op before initialization — which
-  /// is what sign-out on a Square-less deployment does, and used to be a
-  /// process-killing SDK call on Android.
+  /// Releases the SDK's authorization (e.g. on logout). A no-op before
+  /// initialization — which is what sign-out on a Square-less deployment does,
+  /// and used to be a process-killing SDK call on Android — and when nothing
+  /// is authorized, so a sign-out that has nothing to release never reaches
+  /// Square's teardown at all.
   Future<void> deauthorize() async {
-    if (!isInitialized) {
+    if (!await isAuthorized) {
       return;
     }
     await _sdk.authManager.deauthorize();

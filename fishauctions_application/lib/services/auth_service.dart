@@ -122,6 +122,19 @@ class AuthService {
   /// state, and the Square authorization. The WebView cookie session is
   /// cleared separately by the WebView screen.
   Future<void> logout() async {
+    // Drop the reader subscription and the previous user's Tap to Pay
+    // eligibility, so the next account doesn't inherit a drawer entry (or a
+    // pre-authorized reader) that belongs to someone else. Apple's terms
+    // acceptance is deliberately *not* touched: it's a property of the device
+    // and the Apple Account, not of our login, and it's read from Apple every
+    // time anyway (requirement 1.6).
+    //
+    // *Before* deauthorizing: releasing the authorization tears the reader
+    // down, and on Android the plugin forwards that change from inside
+    // Square's own callback on the main thread, where nothing catches a
+    // failure — a sign-out crash on Android is suspected to be exactly that.
+    // Unsubscribed first, nothing is listening when the reader goes.
+    TapToPayService.instance.reset();
     // Best-effort: a device left authorized for a seller after sign-out is a
     // security risk, but a deauthorize failure must not block logout.
     try {
@@ -129,13 +142,6 @@ class AuthService {
     } on Object catch (e) {
       _log.w('Square deauthorize on logout failed: $e');
     }
-    // Drop the reader subscription and the previous user's Tap to Pay
-    // eligibility, so the next account doesn't inherit a drawer entry (or a
-    // pre-authorized reader) that belongs to someone else. Apple's terms
-    // acceptance is deliberately *not* touched: it's a property of the device
-    // and the Apple Account, not of our login, and it's read from Apple every
-    // time anyway (requirement 1.6).
-    TapToPayService.instance.reset();
     // So the next Google sign-in shows the account picker instead of silently
     // reusing the signed-out account. Never throws.
     await SocialAuthService.instance.signOut();
