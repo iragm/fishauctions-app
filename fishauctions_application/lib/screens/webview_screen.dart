@@ -56,6 +56,7 @@ import '../utils/bi_icons.dart';
 import '../utils/connect_flows.dart';
 import '../utils/external_links.dart';
 import '../utils/platform_bridge.dart';
+import '../utils/web_microphone.dart';
 import '../widgets/payment_sheet.dart';
 import '../widgets/printer_connect_sheet.dart';
 import '../widgets/tap_to_pay_awareness.dart';
@@ -582,10 +583,11 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
           return _pushState();
         },
       )
-      // Voice-driven set winners (VOICE.md). The microphone is native because
-      // iOS WKWebView has no Web Speech API and _onPermissionRequest denies
-      // the page's own mic request; everything else — the button, the field
-      // writes, the submit — stays on the page.
+      // Voice-driven set winners (VOICE.md). The app's recognizer is native
+      // because iOS WKWebView has no Web Speech API; everything else — the
+      // button, the field writes, the submit — stays on the page. The page can
+      // instead listen through OpenAI on its own microphone, which
+      // _onPermissionRequest lets through on that page alone.
       //   voiceGetState()   → {supported, listening, permission, backend, …}
       //   voiceStart({auction}) → begins; events arrive on the receiver below
       //   voiceStop()       → {listening: false}
@@ -1307,7 +1309,14 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   Future<Map<String, dynamic>> _voiceState({String? error}) async {
     try {
       final state = await VoiceCommandService.instance.state();
-      return {...state, 'error': ?error};
+      return {
+        ...state,
+        // The page's own getUserMedia will be granted here, so it can listen
+        // through OpenAI instead of the app's recognizer. The shell's answer,
+        // not the recognizer's, which is why it isn't in the service's state.
+        'web_microphone': true,
+        'error': ?error,
+      };
     } on Object catch (e) {
       debugPrint('voiceGetState failed: $e');
       // Supported, because the failure was ours rather than the device's, and
@@ -2678,13 +2687,21 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   /// The web check-in screen scans barcodes through the browser camera
   /// (`getUserMedia`). Bridge the WebView's permission request to a native
   /// runtime prompt: grant the lone-camera request iff Android's CAMERA
-  /// permission is granted, and deny anything else (e.g. the microphone, which
-  /// the app declares no permission for) so the page fails fast rather than
-  /// hanging on a request that could never succeed.
+  /// permission is granted, the lone-microphone request on set lot winners
+  /// ([_onWebMicrophoneRequest]), and deny anything else so the page fails
+  /// fast rather than hanging on a request that could never succeed.
   Future<PermissionResponse?> _onPermissionRequest(
     InAppWebViewController controller,
     PermissionRequest request,
   ) async {
+    final wantsOnlyMicrophone =
+        request.resources.isNotEmpty &&
+        request.resources.every(
+          (resource) => resource == PermissionResourceType.MICROPHONE,
+        );
+    if (wantsOnlyMicrophone) {
+      return _onWebMicrophoneRequest(controller, request);
+    }
     final wantsOnlyCamera =
         request.resources.length == 1 &&
         request.resources.contains(PermissionResourceType.CAMERA);
@@ -2718,6 +2735,65 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       action: status.isGranted
           ? PermissionResponseAction.GRANT
           : PermissionResponseAction.DENY,
+    );
+  }
+
+  /// Set lot winners listening through OpenAI: the page streams its own
+  /// microphone over WebRTC, so it needs `getUserMedia({audio: true})` to
+  /// succeed. Granted on that page of our own site only
+  /// ([allowsWebMicrophone]), and only with the OS permission behind it.
+  ///
+  /// Asked from the page's Listen tap — `getUserMedia` is what raises this —
+  /// so the OS dialog lands on a gesture, the same rule the app's own
+  /// recognizer keeps.
+  Future<PermissionResponse> _onWebMicrophoneRequest(
+    InAppWebViewController controller,
+    PermissionRequest request,
+  ) async {
+    final deny = PermissionResponse(
+      resources: request.resources,
+      action: PermissionResponseAction.DENY,
+    );
+    WebUri? page;
+    try {
+      page = await controller.getUrl();
+    } on Object catch (e) {
+      debugPrint('WebView microphone request: no page URL ($e)');
+    }
+    final site = Uri.parse(EnvironmentConfig.webBaseUrl);
+    if (request.origin.host != site.host || !allowsWebMicrophone(page)) {
+      return deny;
+    }
+    PermissionStatus status;
+    try {
+      status = await Permission.microphone.status;
+      // A permanent refusal isn't asked again: the OS answers without showing
+      // anything, and the snack below is the only useful thing left to say.
+      if (!status.isGranted &&
+          !status.isPermanentlyDenied &&
+          !status.isRestricted) {
+        status = await Permission.microphone.request();
+      }
+    } on Object catch (e) {
+      debugPrint('WebView microphone permission request failed: $e');
+      status = PermissionStatus.denied;
+    }
+    if (!status.isGranted) {
+      _showSnack(
+        'Microphone access is off for this app, so voice can\'t listen.',
+        actionLabel: status.isPermanentlyDenied ? 'Settings' : null,
+        onAction: status.isPermanentlyDenied
+            ? () => unawaited(openAppSettings())
+            : null,
+      );
+      return deny;
+    }
+    // One microphone: the page taking it is the operator choosing it, so the
+    // app's own recognizer (or palette dictation) lets go — last tap wins.
+    _stopVoiceOnNavigation();
+    return PermissionResponse(
+      resources: request.resources,
+      action: PermissionResponseAction.GRANT,
     );
   }
 

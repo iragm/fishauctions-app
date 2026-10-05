@@ -330,4 +330,139 @@ void main() {
       expect(callsTo('stop'), isEmpty);
     });
   });
+
+  // Android 13+: one recognizer session carries many phrases, each a final
+  // `segment`, so the recognizer isn't restarted — and deaf — between them.
+  group('segmented sessions', () {
+    Iterable<MethodCall> callsTo(String method) =>
+        platform.calls.where((c) => c.method == method);
+
+    const quick = SpeechSessionOptions(
+      preferOnDevice: false,
+      pauseFor: Duration(milliseconds: 150),
+      waitForSpeech: Duration(milliseconds: 150),
+    );
+
+    Future<void> segment(String text) => platform.emit({
+      'type': 'result',
+      'final': true,
+      'segment': true,
+      'alternates': [
+        {'text': text},
+      ],
+    });
+
+    test('asked for on a continuous session only', () async {
+      await backend.start(listening);
+      await settle();
+      expect(platform.startArgs['segmented'], isTrue);
+      expect(
+        platform.startArgs['sessionSilenceMillis'],
+        BiasedSpeechBackend.segmentedSessionSilence.inMilliseconds,
+      );
+      await backend.stop();
+
+      await backend.start(
+        const SpeechSessionOptions(preferOnDevice: false, continuous: false),
+      );
+      await settle();
+      expect(
+        platform.startArgs['segmented'],
+        isFalse,
+        reason: 'dictation is one phrase and should end with it',
+      );
+    });
+
+    test('a segment ends the phrase, not the session', () async {
+      await backend.start(listening);
+      await settle();
+      await platform.emit({
+        'type': 'status',
+        'listening': true,
+        'segmented': true,
+      });
+      await segment('lot forty two');
+      await segment('bidder seventeen');
+      await settle();
+
+      expect(
+        [
+          for (final e in events)
+            if (e.type == SpeechEventType.result) e.bestText,
+        ],
+        ['lot forty two', 'bidder seventeen'],
+      );
+      // Each phrase is followed by the "listening for the next" state the
+      // page ends a phrase on…
+      final afterFirst = events.indexWhere(
+        (e) => e.type == SpeechEventType.result,
+      );
+      expect(events[afterFirst + 1].type, SpeechEventType.state);
+      expect(events[afterFirst + 1].listening, isTrue);
+      // …without the recognizer being stopped or restarted.
+      expect(callsTo('stop'), isEmpty);
+      expect(callsTo('start'), hasLength(1));
+    });
+
+    test('words after the last segment are flushed when it ends', () async {
+      await backend.start(listening);
+      await settle();
+      await segment('lot forty two');
+      await platform.emit({
+        'type': 'result',
+        'final': false,
+        'alternates': [
+          {'text': 'sold'},
+        ],
+      });
+      await platform.emit({'type': 'status', 'listening': false});
+      await settle();
+
+      expect(
+        [
+          for (final e in events)
+            if (e.type == SpeechEventType.result) e.bestText,
+        ],
+        ['lot forty two', 'sold'],
+      );
+    });
+
+    test('once segments arrive, the Dart clock stops ending phrases', () async {
+      await backend.start(quick);
+      await settle();
+      await platform.emit({
+        'type': 'status',
+        'listening': true,
+        'segmented': true,
+      });
+      await segment('lot forty two');
+      await Future<void>.delayed(const Duration(milliseconds: 400));
+
+      expect(
+        callsTo('stop'),
+        isEmpty,
+        reason: 'stopping is the restart segments exist to avoid',
+      );
+      backend.finishUtterance();
+      await settle();
+      expect(callsTo('stop'), isEmpty);
+    });
+
+    test('a recognizer that ignores the request keeps the old clock', () async {
+      await backend.start(quick);
+      await settle();
+      await platform.emit({
+        'type': 'status',
+        'listening': true,
+        'segmented': true,
+      });
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+
+      expect(
+        callsTo('stop'),
+        hasLength(1),
+        reason: 'no segment has arrived, so nothing says it segments',
+      );
+    });
+  });
 }

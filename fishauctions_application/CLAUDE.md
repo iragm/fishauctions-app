@@ -88,6 +88,7 @@ Only three signals: a completed **POST** `/logout/`, account deletion, and `auth
 - **Downloads are refetched with the WebView's cookies** (`DownloadService` — these are Django session endpoints). `.pkpass` → PassKit's Add-to-Wallet sheet, `.ics` → OS calendar, PDF → OS print dialog on the System-printer method, else the share sheet.
 - **`mailto:`/`tel:`/`sms:` go to the OS; every other non-http scheme is blocked** (`external_links.dart`). The allow-list is closed on purpose — this shell renders user-authored HTML, and `intent:`/`market:` can launch arbitrary apps.
 - **Web Speech is deleted at document start** (`_hideWebSpeechApi`). Android's WebView *defines* `webkitSpeechRecognition` without wiring it to a service, so feature detection finds it, believes it, and silently does nothing.
+- **The WebView's own microphone is denied everywhere but set lot winners** (`allowsWebMicrophone`: our host, that path, OS permission behind it). That page can listen through OpenAI over WebRTC; this shell renders user-authored HTML, so no other page gets it. Granting stops native voice/dictation — last tap wins.
 - **Config is re-fetched on resume if it never loaded** — Riverpod caches a `FutureProvider` failure for the process, so a cold start with no connectivity otherwise leaves Square uninitialized all session.
 
 ### Drawer menu
@@ -177,7 +178,8 @@ Native mirrors of the users / bulk-add / set-winners pages for the operator's **
 
 Hands-free selling on the set-winners page. Design and v1 post-mortem: `VOICE.md`. Both halves live; **the first real session is still unproven on hardware.**
 
-- **The app owns only the microphone** — iOS WKWebView has no Web Speech API and the shell denies the WebView's mic. The page keeps the form.
+- **The server reads the words now** (iragm/fishauctions#987): the page posts transcripts to `VoiceInterpretView` and **ignores the app's `command` events**. The parser below still runs (and still bias-builds the recognizer), but what matters to the page is `transcript` with `final` + `phrase_id`, and `state` re-arms as phrase ends.
+- **The app owns only the microphone** — iOS WKWebView has no Web Speech API. The page keeps the form. It may instead use **its own microphone through OpenAI** (`web_microphone: true` in `voiceGetState`); which one is the page's choice (BACKEND_SPEC Part VOICE-APP).
 - **Capability and permission are different questions.** `voiceGetState` runs on page load and must not prompt; it used to call `initialize()`, which requests `RECORD_AUDIO` and reports the permission as the capability — so the mic dialog fired on page render and the button hid itself on every phone that hadn't already granted it.
 - **One microphone, arbitrated by `Microphone`**; two `SpeechToText` objects contend for one platform service. Last thing tapped wins, and swapping backends stops the current holder first.
 - **Values are matched against a closed vocabulary, not parsed from free text.** `bidder_number` is a `CharField` and routinely text, which spills into lot numbers (`BOB-1`). The auction's real identifiers are expanded into spoken forms and looked up.
@@ -188,6 +190,7 @@ Hands-free selling on the set-winners page. Design and v1 post-mortem: `VOICE.md
 - **Three device-local settings** (confidence, on-device, low-price bias). **Every field is nullable and null means "whatever the deployment served"** — stamping today's defaults would freeze the device out of future retunes.
 - **Prices can be biased separately, because both APIs bias *phrases***: `"seventeen dollars"` is a different string from `"lot seventeen"`. `VoiceBiasPhrases` spends Apple's ~100-phrase budget by expected value — non-numeric bidder ids first, plain numeric lot numbers last.
 - **`speech_to_text` cannot do phrase biasing at all**, hence `BiasedSpeechBackend` + native bridges owning `SpeechRecognizer`/`SFSpeechRecognizer` directly. `biased` is the default; `"backend": "platform"` in served config is the kill switch.
+- **Android 13+ asks for a segmented session** (`EXTRA_SEGMENTED_SESSION`): phrases arrive as final `segment`s of one recognizer session, so there's no restart gap between them. Asked for, never assumed — Dart keeps its 3 s clock until a segment actually arrives. Details in `VOICE.md`. **Unverified on hardware.**
 - **The native halves handle one utterance and know nothing about sessions.** Re-arming, both silence windows, on-device fallback, three-strikes and promoting a last partial all live in `RestartingSpeechBackend` — that logic has been wrong three times already.
 - **`supportsPhraseBias` is a runtime question on Android** (`EXTRA_BIASING_STRINGS` is API 33, `minSdk` 28); unconditionally true on iOS.
 - **Two races**: Android tags each utterance so a predecessor's callbacks can't tear down its successor; and Dart's pause timer waits for the *platform's* answer rather than declaring the phrase over, or the real final lands inside the next utterance. A 1.5 s watchdog covers a recognizer that answers a stop with nothing.

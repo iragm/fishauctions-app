@@ -41,7 +41,7 @@ lib/services/microphone.dart             arbitration with palette dictation
 ## Bridge contract
 
 ```
-voiceGetState()               → {supported, listening, permission, backend, on_device}
+voiceGetState()               → {supported, listening, permission, backend, on_device, web_microphone}
 voiceStart({auction, locale}) → {listening, error}
 voiceStop()                   → {listening: false}
 voiceGetSettings() / voiceSetSettings({...})
@@ -57,13 +57,22 @@ App → page is a push, not a poll — `evaluateJavascript` into a receiver the 
 ```jsonc
 {"type": "state",      "listening": true, "on_device": true}
 {"type": "level",      "level": 0.34}                        // ~10 Hz, 0..1
-{"type": "transcript", "text": "bidder seventeen", "partial": true}   // partial is not actionable
+{"type": "transcript", "text": "bidder seventeen", "partial": true,   // partial is not actionable
+                       "final": false, "phrase_id": 12}
 {"type": "command",    "slot": "bidder", "value": "17", "confidence": 0.93,
                        "heard": "bidder seventeen", "candidates": ["17", "70"], "blocked_by": []}
 {"type": "error",      "code": "permission_denied", "message": "…"}
 ```
 
 `slot` ∈ `lot` · `bidder` · `price` · `sold` · `unsold` · `undo` · `clear` · `confirm`. **Unknown slots must be ignored by the page**, so either side can add one without the other shipping.
+
+Since the server reads the words (iragm/fishauctions#987), the page ignores `command` and reads transcripts:
+
+- **`final` is the phrase's last word**; `partial` is kept as it was for older pages, which act on a non-partial final themselves. A final whose commands the app had already sent still says `partial: true` (so an older page doesn't save twice) but `final: true`.
+- **`phrase_id` is shared by a phrase's partials and its final**, and the next phrase gets the next. Never reset in a process, and a phrase cut off by a stop or an error is never continued, so a late event can't pass for the current phrase.
+- **A `state` with `listening: true` while listening ends a phrase.** It's sent on every re-arm, and after every segment of an Android segmented session, where nothing re-arms.
+
+**`web_microphone: true`** means the shell will grant the page's own `getUserMedia({audio: true})` on set-winners, so the page may listen through OpenAI instead of calling `voiceStart`. Choosing between them is the page's (BACKEND_SPEC Part VOICE-APP).
 
 ## The native halves, and the three rules both must obey
 
@@ -90,6 +99,15 @@ means the same three hazards exist twice, and the iOS half was missing two of th
    iOS's recognition handler runs on an arbitrary queue and is hopped explicitly. The audio tap
    can't be — it's the render thread — so it captures its own request instead of reading
    `self.request`, and the level meter's identity check happens inside the emit hop.
+
+## Android segmented sessions (13+)
+
+A recognizer that ends after each phrase is deaf while it restarts, and the next phrase's first word — the anchor — is what falls in. On API 33+ a continuous session asks for `EXTRA_SEGMENTED_SESSION` (mode `EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS`, 10 s): each phrase arrives through `onSegmentResults` as a final `segment`, and the session ends only after 10 s of silence (`onEndOfSegmentedSession`), when there's nobody to miss.
+
+- **Asked for, never assumed.** A recognizer may ignore the extra. Dart keeps its 3 s clock until a segment actually arrives, then (for the process) only backstops at 15 s, and `finishUtterance()` stops closing the session — closing it is the restart segments exist to avoid.
+- **A segment's final doesn't settle the utterance**: words after it are flushed as before if the session ends without their own final.
+- Dictation (`continuous: false`) never asks.
+- **Unverified on hardware**: which recognizers honour it (Google's on-device one is the likely one), and whether partials still arrive between segments.
 
 ## Not done, deliberately
 
