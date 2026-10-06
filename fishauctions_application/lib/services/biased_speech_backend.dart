@@ -44,6 +44,23 @@ class BiasedSpeechBackend extends RestartingSpeechBackend {
   /// The parser still only looks at the top few.
   static const int _maxAlternates = 5;
 
+  /// How much silence ends a *segmented* session (Android 13+), as opposed to
+  /// one phrase inside it.
+  ///
+  /// A recognizer that stops after every phrase is deaf while it restarts, and
+  /// what falls into that gap is the next phrase's first word — "lot", usually.
+  /// Segmented, the phrases arrive as segments of one long session, and the
+  /// restart only happens after this much silence, when nobody is talking to
+  /// lose. Long enough to outlast the pause between two lots; not so long that
+  /// a platform told "use judiciously" is asked for something strange.
+  static const Duration segmentedSessionSilence = Duration(seconds: 10);
+
+  /// The Dart clock's job once the recognizer is segmenting: not to end
+  /// phrases (the recognizer does that) but to catch one that never ends the
+  /// session at all. Later than [segmentedSessionSilence], so it never cuts in
+  /// on a recognizer doing its job.
+  static const Duration _segmentedBackstop = Duration(seconds: 15);
+
   final MethodChannel _channel;
   final EventChannel _eventChannel;
 
@@ -57,6 +74,20 @@ class BiasedSpeechBackend extends RestartingSpeechBackend {
   Duration _pauseWindow = const Duration(seconds: 3);
   bool _open = false;
   bool? _biasSupported;
+
+  /// The native side asked the recognizer for a segmented session this
+  /// utterance (it says so on its `status`). Asking is not getting: a
+  /// recognizer that doesn't implement segments ignores the extra.
+  bool _askedForSegments = false;
+
+  /// A segment has actually arrived, so this phone's recognizer segments.
+  /// Learned once per process, like the on-device fallback: until then the
+  /// Dart clock runs as before, so a recognizer that ignores the extra loses
+  /// nothing.
+  bool _segmentsWork = false;
+
+  /// The utterance is a segmented session we can rely on.
+  bool get _segmenting => _askedForSegments && _segmentsWork;
 
   @override
   String get id => 'biased';
@@ -141,6 +172,7 @@ class BiasedSpeechBackend extends RestartingSpeechBackend {
     required Duration pauseFor,
   }) async {
     _open = true;
+    _askedForSegments = false;
     _armPause(pauseFor);
     _armSilenceWatchdog();
     try {
@@ -157,6 +189,11 @@ class BiasedSpeechBackend extends RestartingSpeechBackend {
         // biasing, and on some Android builds an empty list is worse than
         // absent.
         'biasPhrases': options.biasPhrases,
+        // Continuous sessions only: dictation is one phrase and should end
+        // when it does. Native applies it on Android 13+ and ignores it
+        // elsewhere (iOS has no such mode).
+        'segmented': options.continuous,
+        'sessionSilenceMillis': segmentedSessionSilence.inMilliseconds,
       });
     } on Object {
       _open = false;
@@ -187,10 +224,14 @@ class BiasedSpeechBackend extends RestartingSpeechBackend {
   /// behave the same is for Dart to hold the stopwatch and ask the platform to
   /// finish. Re-armed on every result, so the effective rule is "this long
   /// since the last words", which is what a browser does.
+  ///
+  /// Segmenting, the recognizer ends each phrase itself without stopping, and
+  /// stopping it here is exactly the restart segments exist to avoid; the
+  /// clock only backstops a session that never ends.
   void _armPause(Duration window) {
     _pauseWindow = window;
     _pauseTimer?.cancel();
-    _pauseTimer = Timer(window, _endPhrase);
+    _pauseTimer = Timer(_segmenting ? _segmentedBackstop : window, _endPhrase);
   }
 
   /// Close the utterance and let the *platform's* answer end it, rather than
@@ -204,8 +245,17 @@ class BiasedSpeechBackend extends RestartingSpeechBackend {
   }
 
   /// The silence clock running out early: same close, same watchdog.
+  ///
+  /// Not while segmenting: the recognizer will end the phrase at its own next
+  /// pause, about as soon, and closing the session would cost the restart's
+  /// deafness that segments exist to avoid.
   @override
-  void endUtteranceNow() => _endPhrase();
+  void endUtteranceNow() {
+    if (_segmenting) {
+      return;
+    }
+    _endPhrase();
+  }
 
   /// The one case the platform can't be trusted to answer: a recognizer that
   /// was asked to stop and says nothing at all. Without this the session would
@@ -272,6 +322,23 @@ class BiasedSpeechBackend extends RestartingSpeechBackend {
     switch (event['type']) {
       case 'result':
         final isFinal = event['final'] == true;
+        if (isFinal && event['segment'] == true) {
+          // One phrase of a segmented session: final for the phrase, while
+          // the recognizer keeps listening for the next.
+          _segmentsWork = true;
+          // Only while open: after a stop was asked for, the timer running is
+          // the stop watchdog, which a segment must not push out to the
+          // backstop.
+          if (_open) {
+            _armPause(_pauseWindow);
+          }
+          reportResult(
+            _hypotheses(event['alternates']),
+            isFinal: true,
+            stillListening: true,
+          );
+          return;
+        }
         if (isFinal) {
           _open = false;
           _pauseTimer?.cancel();
@@ -287,6 +354,14 @@ class BiasedSpeechBackend extends RestartingSpeechBackend {
         }
       case 'status':
         if (event['listening'] == true) {
+          if (event['segmented'] == true) {
+            _askedForSegments = true;
+            // Re-armed so a phone already known to segment drops to the
+            // backstop from the first word, not after the first phrase.
+            if (_segmentsWork) {
+              _armPause(_pauseWindow);
+            }
+          }
           return;
         }
         _open = false;

@@ -28,7 +28,8 @@ import io.flutter.plugin.common.MethodChannel
  * promoting a last partial all live in Dart (`RestartingSpeechBackend`), because that logic is
  * identical on both platforms and has already been wrong three times. This side starts a
  * recognizer, forwards what it says, and stops. Keeping it that small is what makes two native
- * implementations reviewable.
+ * implementations reviewable. On Android 13+ a continuous session asks for a *segmented* one, so
+ * an "utterance" can carry several phrases, each a final `segment` result; it still ends once.
  *
  * **Error codes are `speech_to_text`'s strings on purpose** — `error_no_match`,
  * `error_speech_timeout`, and so on. Dart classifies errors in exactly one place for both
@@ -105,6 +106,13 @@ class BiasedSpeechBridge(
      */
     private fun supportsBias(): Boolean = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
 
+    /**
+     * `EXTRA_SEGMENTED_SESSION` is API 33 too. Asked for, not promised: a recognizer that doesn't
+     * implement it ignores the extra and ends after one phrase as before, which is why Dart only
+     * trusts it once a segment has actually arrived.
+     */
+    private fun supportsSegments(): Boolean = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+
     private fun start(call: MethodCall) {
         stop()
         val onDevice = call.argument<Boolean>("onDevice") == true
@@ -112,6 +120,8 @@ class BiasedSpeechBridge(
         val pauseMillis = call.argument<Int>("pauseMillis") ?: 3000
         val maxAlternates = call.argument<Int>("maxAlternates") ?: 5
         val bias = call.argument<List<String>>("biasPhrases").orEmpty()
+        val segmented = call.argument<Boolean>("segmented") == true && supportsSegments()
+        val sessionSilenceMillis = call.argument<Int>("sessionSilenceMillis") ?: 10000
 
         main.post {
             // Whatever was running is no longer current, so its callbacks stop counting from
@@ -128,8 +138,12 @@ class BiasedSpeechBridge(
                 speech.setRecognitionListener(utterance)
                 utterance.speech = speech
                 current = utterance
-                speech.startListening(intentFor(locale, onDevice, pauseMillis, maxAlternates, bias))
-                emit(mapOf("type" to "status", "listening" to true))
+                speech.startListening(
+                    intentFor(locale, onDevice, pauseMillis, maxAlternates, bias, segmented, sessionSilenceMillis),
+                )
+                // `segmented` says what was asked for, so Dart knows a segment may follow; whether
+                // the recognizer honours it, only a segment arriving can say.
+                emit(mapOf("type" to "status", "listening" to true, "segmented" to segmented))
             } catch (e: Throwable) {
                 current = null
                 utterance.release()
@@ -144,6 +158,8 @@ class BiasedSpeechBridge(
         pauseMillis: Int,
         maxAlternates: Int,
         bias: List<String>,
+        segmented: Boolean,
+        sessionSilenceMillis: Int,
     ): Intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
         // FREE_FORM, not WEB_SEARCH: the utterance is a sentence ("lot forty two bidder
         // seventeen twenty five dollars sold"), not a query, and web-search mode returns
@@ -156,7 +172,23 @@ class BiasedSpeechBridge(
         // Generous on purpose: Dart holds the real silence clock, because Android's endpointer
         // and iOS's (which has no such control at all) cannot be made to agree. This only needs
         // to be long enough that the platform doesn't cut in first.
-        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, pauseMillis)
+        //
+        // Segmented, it means something else: how much silence ends the whole *session*, with
+        // each phrase inside it delivered as a segment. That is the point of segmenting — a
+        // recognizer that stops after every phrase is deaf while it restarts, and the next
+        // phrase's first word ("lot …") is what falls into that gap. Ending only after a long
+        // silence moves the restart to where nobody is talking.
+        putExtra(
+            RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS,
+            if (segmented) sessionSilenceMillis else pauseMillis,
+        )
+        // The SDK check repeats supportsSegments() where lint can see it.
+        if (segmented && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            putExtra(
+                RecognizerIntent.EXTRA_SEGMENTED_SESSION,
+                RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS,
+            )
+        }
         putExtra(
             RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS,
             pauseMillis,
@@ -250,6 +282,26 @@ class BiasedSpeechBridge(
         override fun onPartialResults(partialResults: Bundle?) {
             if (!isCurrent) return
             emit(resultPayload(partialResults, isFinal = false))
+        }
+
+        /**
+         * One phrase of a segmented session (API 33+): final for that phrase, while the
+         * recognizer keeps listening. `segment` tells Dart not to treat it as the utterance
+         * ending, which is what a final means everywhere else.
+         */
+        override fun onSegmentResults(segmentResults: Bundle) {
+            if (!isCurrent) return
+            emit(resultPayload(segmentResults, isFinal = true) + ("segment" to true))
+        }
+
+        /** A segmented session's end, which stands where `onResults` would otherwise. */
+        override fun onEndOfSegmentedSession() {
+            if (!isCurrent) {
+                release()
+                return
+            }
+            finish()
+            emit(mapOf("type" to "status", "listening" to false))
         }
 
         override fun onEvent(eventType: Int, params: Bundle?) = Unit

@@ -64,6 +64,33 @@ class VoiceCommandService {
   final Map<VoiceSlot, String> _committed = {};
   bool _finishRequested = false;
 
+  /// The phrase the transcripts now arriving belong to, sent as `phrase_id`.
+  ///
+  /// Every partial of a phrase and its final share one id, and the next phrase
+  /// gets the next — so the page can tell "the same phrase, revised" from "a
+  /// new phrase", which the text alone can't say. Never reset: ids stay unique
+  /// across sessions, so a late event from the last one can't pass for the
+  /// current phrase.
+  int _phraseId = 1;
+
+  /// Whether anything has been sent under [_phraseId] yet.
+  bool _phraseStarted = false;
+
+  /// The id for a transcript of the current phrase.
+  int _phraseIdForTranscript() {
+    _phraseStarted = true;
+    return _phraseId;
+  }
+
+  /// The current phrase is over — finalized, cancelled or failed — so nothing
+  /// later may share its id.
+  void _endPhrase() {
+    if (_phraseStarted) {
+      _phraseId++;
+      _phraseStarted = false;
+    }
+  }
+
   bool get isListening => _listening;
   bool _listening = false;
 
@@ -206,6 +233,7 @@ class VoiceCommandService {
     // was never finished, and writing it now would be the app typing on its
     // own after the operator stopped it.
     _forgetUtterance();
+    _endPhrase();
     VoiceVocabularyService.instance.end();
     Microphone.instance.release('voice');
     await _backend?.stop();
@@ -230,12 +258,19 @@ class VoiceCommandService {
         // lands in the field and is then corrected, which reads as the app
         // typing nonsense. One that has stopped changing is another matter —
         // see [_onPartial].
-        _emit({'type': 'transcript', 'text': event.bestText, 'partial': true});
+        _emit({
+          'type': 'transcript',
+          'text': event.bestText,
+          'partial': true,
+          'final': false,
+          'phrase_id': _phraseIdForTranscript(),
+        });
         _onPartial(event);
       case SpeechEventType.result:
         _handleResult(event);
       case SpeechEventType.error:
         _forgetUtterance();
+        _endPhrase();
         _listening = false;
         _emit({
           'type': 'error',
@@ -357,11 +392,18 @@ class VoiceCommandService {
     // moments ago — must not be matched again: that fallback would fill the
     // same fields twice, and a "sold" in it would be a second save. Reported
     // as a partial, which the page shows and never acts on.
+    //
+    // `final` is the truth `partial` can no longer tell, for a page that reads
+    // the words itself rather than the commands: this is the phrase's last
+    // word, whatever became of its commands.
     _emit({
       'type': 'transcript',
       'text': event.bestText,
       'partial': commands.isNotEmpty && fresh.isEmpty,
+      'final': true,
+      'phrase_id': _phraseIdForTranscript(),
     });
+    _endPhrase();
     for (final command in fresh) {
       final resolved = _withBlockers(command);
       _remember(resolved);
@@ -513,6 +555,8 @@ class VoiceCommandService {
 
   @visibleForTesting
   void resetForTesting() {
+    _phraseId = 1;
+    _phraseStarted = false;
     _slots.clear();
     _lastEmitted.clear();
     _forgetUtterance();

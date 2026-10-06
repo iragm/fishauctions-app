@@ -291,10 +291,16 @@ abstract class RestartingSpeechBackend implements SpeechBackend {
       : _options.waitForSpeech;
 
   /// A transcript from the platform, partial or final.
+  ///
+  /// [stillListening] marks a final that ends a *phrase* but not the
+  /// utterance — one segment of an Android segmented session. The phrase is
+  /// over, so the session says so the way a re-arm would (a `state` event,
+  /// which is what the page ends a phrase on), without actually re-arming.
   @protected
   void reportResult(
     List<SpeechHypothesis> alternates, {
     required bool isFinal,
+    bool stillListening = false,
   }) {
     // Words came back, so whatever went wrong before is behind us.
     _consecutiveFailures = 0;
@@ -307,9 +313,15 @@ abstract class RestartingSpeechBackend implements SpeechBackend {
       return;
     }
     if (isFinal) {
-      _sawFinal = true;
+      // A segment's final settles only its own phrase: words after it are
+      // the next phrase, and still need flushing if the session ends before
+      // their own final arrives.
+      _sawFinal = !stillListening;
       _pending = const [];
       _events.add(SpeechEvent.result(cleaned));
+      if (stillListening && _wantListening) {
+        _events.add(const SpeechEvent.state(listening: true));
+      }
       return;
     }
     _pending = cleaned;

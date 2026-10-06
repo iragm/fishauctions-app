@@ -80,6 +80,9 @@ void main() {
     await hear('lot forty two', isFinal: true);
     expect(commands(), hasLength(1));
     expect(lastTranscript()['partial'], isTrue);
+    // A page that reads the words itself still needs to know the phrase is
+    // over, which `partial` can no longer say.
+    expect(lastTranscript()['final'], isTrue);
   });
 
   test('a final that disagrees writes the correction', () async {
@@ -138,5 +141,40 @@ void main() {
     expect(served(60000).commitAfter, const Duration(milliseconds: 2500));
     expect(served(0).commitAfter, isNull);
     expect(served('soon').commitAfter, VoiceGrammar.defaultCommitAfter);
+  });
+
+  // The page needs to tell "the same phrase, revised" from "a new phrase",
+  // which the text alone can't: "lot four" then "lot forty" is one phrase,
+  // "lot four" then "lot four" may be two.
+  group('phrase ids', () {
+    List<Map<String, dynamic>> transcripts() => [
+      for (final event in events)
+        if (event['type'] == 'transcript') event,
+    ];
+
+    test('a phrase\'s partials and its final share one id', () async {
+      await hear('lot four');
+      await hear('lot forty');
+      await hear('lot forty', isFinal: true);
+      await hear('bidder nine');
+      await hear('bidder nine', isFinal: true);
+
+      expect(
+        [for (final t in transcripts()) (t['phrase_id'], t['final'])],
+        [(1, false), (1, false), (1, true), (2, false), (2, true)],
+      );
+    });
+
+    test('a phrase cut off by a stop is not continued', () async {
+      await hear('lot four');
+      await VoiceCommandService.instance.stop();
+      await VoiceCommandService.instance.start(
+        auctionSlug: 'spring-auction',
+        sink: events.add,
+      );
+      await hear('lot four');
+
+      expect([for (final t in transcripts()) t['phrase_id']], [1, 2]);
+    });
   });
 }

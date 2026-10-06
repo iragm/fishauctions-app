@@ -47,13 +47,17 @@
     <uses-permission android:name="android.permission.CAMERA"/>
 
     <!-- Microphone — voice-driven set winners (VOICE.md). Speech recognition
-         runs natively because iOS WKWebView has no Web Speech API and the shell
-         denies the WebView's own microphone request; the page drives it over
-         the voice* JS bridge. Optional feature so the app still installs on
-         devices without a mic; the permission is asked when the operator taps
-         the page's microphone button, never at launch. -->
+         runs natively because iOS WKWebView has no Web Speech API; the page
+         drives it over the voice* JS bridge. That page may instead listen
+         through OpenAI on the WebView's own microphone (getUserMedia +
+         WebRTC), which the shell grants on that page only. Optional feature so
+         the app still installs on devices without a mic; the permission is
+         asked when the operator taps the page's microphone button, never at
+         launch. MODIFY_AUDIO_SETTINGS is what WebView's WebRTC needs to route
+         that audio; install-time, no prompt. -->
     <uses-feature android:name="android.hardware.microphone" android:required="false"/>
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
 
     <!-- Photo library — the web's image uploads (add-image-to-lot, club icon)
          are plain <input type="file" accept="image/*">. The file chooser the
