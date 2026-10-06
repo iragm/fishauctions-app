@@ -106,7 +106,7 @@ dependencies:
   # no app-side override to rescue it the way android/app/build.gradle.kts does
   # on Android), android/settings.gradle.kts is held on AGP 8.13.2. See the note
   # there.
-  square_mobile_payments_sdk: ^2026.8.1
+  square_mobile_payments_sdk: ^2026.10.1
   # Open external / target=_blank links (connect banners, map directions, Google
   # Wallet) in the system browser instead of the in-app WebView.
   url_launcher: ^6.3.2

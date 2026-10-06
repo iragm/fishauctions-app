@@ -247,9 +247,9 @@ The app must tap with the backend's `reference_id` verbatim; `confirm` verifies 
 
 #### iOS: Tap to Pay is an *additional* payment method
 
-**This dead-ended every iOS charge on Square's "connect hardware to take card payments" screen for a day.** On iOS, `AdditionalPaymentMethods` includes `.tapToPay` alongside `.keyed` and `.cash` — it is not the prompt's implicit primary method — and plugin 2026.8.1's iOS mapper stopped falling back to `.all`. So `additionalPaymentMethods: []` built a prompt with **no methods at all**, whose empty state is that screen. Android's mapper ignores the list entirely, which is why Android always worked.
+**This dead-ended every iOS charge on Square's "connect hardware to take card payments" screen for a day.** On iOS, `AdditionalPaymentMethods` includes `.tapToPay` alongside `.keyed` and `.cash` — it is not the prompt's implicit primary method — and plugin 2026.8.1's iOS mapper stopped falling back to `.all`. So `additionalPaymentMethods: []` built a prompt with **no methods at all**, whose empty state is that screen. Android's mapper ignored the list entirely, which is why Android always worked.
 
-`SquarePaymentService._startPaymentIOS` goes around the plugin's typed API to pass `tapToPay`, because the Dart `AdditionalPaymentMethodType` enum only has `keyed` and `cash` while the iOS mapper accepts the string. Remove it when the enum catches up.
+`SquarePaymentService.charge` passes `[AdditionalPaymentMethodType.tapToPay]` on both platforms. Until plugin 2026.10.1 the Dart enum couldn't spell `tapToPay`, so iOS went around the typed API with a hand-built channel call (`_startPaymentIOS`, now deleted). Android's mapper now reads the list but only knows `keyed`/`cash` and drops anything else, so there it is still an empty list. Don't "simplify" it back to `[]`.
 
 Two lessons: **the comment that hid this was accurate when written** and went wrong on a dependency bump; and **`getReaders()` had never been called** — the fact that reframed everything (the reader reporting `ready`) was one SDK call away the whole time.
 

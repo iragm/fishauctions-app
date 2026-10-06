@@ -166,7 +166,7 @@ taken the app down too.
 
 Symptom: every iOS charge dead-ended on Square's "Connect hardware to take card payments" screen. That string is `MobilePaymentsSDKUIPaymentPromptScreenConnectHardwarePromptTitle` — the **payment prompt's empty state**, not a reader error.
 
-On iOS, Tap to Pay is a member of `AdditionalPaymentMethods` alongside `.keyed` and `.cash` (the shipped SDK 2.6.0 binary exports `AdditionalPaymentMethods.tapToPay`), *not* the prompt's implicit primary method — and plugin 2026.8.1's iOS mapper stopped falling back to `.all`. So `additionalPaymentMethods: []` built a prompt with nothing in it. Android's mapper ignores the list entirely, which is why Android always worked. Fix: `SquarePaymentService._startPaymentIOS`, which calls the plugin's channel directly because the Dart enum can't spell `tapToPay`.
+On iOS, Tap to Pay is a member of `AdditionalPaymentMethods` alongside `.keyed` and `.cash` (the shipped SDK 2.6.0 binary exports `AdditionalPaymentMethods.tapToPay`), *not* the prompt's implicit primary method — and plugin 2026.8.1's iOS mapper stopped falling back to `.all`. So `additionalPaymentMethods: []` built a prompt with nothing in it. Android's mapper ignores the list entirely, which is why Android always worked. Fix: pass `tapToPay` in `additionalPaymentMethods`. At first that meant `SquarePaymentService._startPaymentIOS`, a direct channel call, because the Dart enum couldn't spell `tapToPay`; plugin 2026.10.1's enum can, so `charge` now uses the typed API on both platforms.
 
 ### Ruled out while chasing it — don't re-test these
 
