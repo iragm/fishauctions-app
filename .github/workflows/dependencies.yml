@@ -53,8 +53,8 @@ env:
   # workflow from rewriting that pin back into a caret range.
 
   # flutter_inappwebview — pinned to the 6.2.0-beta line: the 6.1.5 stable
-  #   Android module uses proguard-android.txt, which AGP 9 rejected outright.
-  #   Worth retesting now that AGP is back on 8.x — that pin may be removable.
+  #   Android module uses proguard-android.txt, which AGP 9 rejects outright.
+  #   Lift it once 6.2.0 stable ships.
   # freezed_annotation — has a dependency_overrides entry (Square's plugin pins
   #   ^2.4.4). Bumping the dependency without the override just makes the two
   #   disagree, and pub keeps the override's version regardless.
@@ -71,20 +71,10 @@ env:
   # flowing, the boundary can't be crossed, and the PR body reports every bump a
   # ceiling withheld so the reason can't quietly go stale.
   #
-  # com.android.application<9 — AGP 9.0 removed `targetSdk` from the library
-  #   DSL and square_mobile_payments_sdk's Android module still sets it, so
-  #   every AGP 9 build fails while configuring the payments plugin. Square
-  #   documents "AGP 8.4.2 or later" and doesn't mention AGP 9. Lift this when
-  #   Square ships a build.gradle.kts without that line; see
-  #   android/settings.gradle.kts.
-  # gradle<9.6 — the other half of the same hold, and the reason a ceiling is
-  #   written down rather than remembered: Gradle 9.6 removed
-  #   `org.gradle.api.problems.internal.InternalProblems`, which AGP 8.x calls,
-  #   so an 8.x plugin on a 9.6+ wrapper fails to apply at all. Rolling AGP back
-  #   to 8.13.2 on 2026-08-16 left the wrapper at 9.7.0, which broke every
-  #   Android build until this cap was added. Lifts with the AGP ceiling, not
-  #   before.
-  GRADLE_CEILING: com.android.application<9,gradle<9.6
+  # Empty since AGP returned to 9.x (Square 2026.8.4 dropped the library
+  #   `targetSdk` that held it on 8.x, along with the gradle<9.6 cap that 8.x
+  #   needed). See android/settings.gradle.kts for that history.
+  GRADLE_CEILING: ""
 
   ACTIONS_HOLD: ""
 
@@ -192,6 +182,13 @@ jobs:
       # and patch" group would have produced, so the week still ends with
       # something mergeable; the PR body names the tier so nobody assumes the
       # majors landed.
+      #
+      # Except calendar-versioned packages, which stay at their locked version:
+      # a caret range over 2026.x.y promises nothing, and square_mobile_payments_sdk
+      # broke its Dart API inside one (2026.8.3). Taking it here made both tiers
+      # fail on the same two errors on 2026-10-05, so a week with 70 harmless
+      # bumps produced only a draft. Calver bumps still land via tier 1, which
+      # is where a breaking change belongs.
       - name: Fall back to non-breaking updates
         if: steps.verify-all.outcome == 'failure'
         env:
@@ -205,7 +202,12 @@ jobs:
           git checkout -- .
           git clean -fd
           cd fishauctions_application
-          flutter pub upgrade
+          # A targeted upgrade leaves every package it isn't given at its
+          # locked version — the only "upgrade everything except X" pub has.
+          # -r: an empty list must not turn into a bare, unrestricted upgrade.
+          python3 "$GITHUB_WORKSPACE/.github/scripts/pub_updates.py" safe-set \
+            --lock pubspec.lock --out "$RUNNER_TEMP/safe-set.txt"
+          xargs -r flutter pub upgrade < "$RUNNER_TEMP/safe-set.txt"
           cd "$GITHUB_WORKSPACE"
           python3 .github/scripts/bump_versions.py \
             --only gradle,wrapper,actions \
@@ -526,10 +528,10 @@ jobs:
               fail=1
               ;;
             failed)
-              # Both tiers failed, which usually means the breakage is not in
-              # the bumps at all — the non-breaking tier verifies a tree that is
-              # nearly what is already on the default branch.
-              echo "::error::Neither the full update nor the non-breaking subset passed verification. The checks are failing on this repository's current dependencies, not only on the new ones: $RUN_URL"
+              # Both tiers failed. Either the default branch itself is broken,
+              # or an in-range bump the non-breaking tier treats as safe broke
+              # the build — the 'Verify (non-breaking updates)' step says which.
+              echo "::error::Neither the full update nor the non-breaking subset passed verification. Either the default branch is already failing, or an in-range update broke it — see the 'Verify (non-breaking updates)' step: $RUN_URL"
               fail=1
               ;;
             *)

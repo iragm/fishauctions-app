@@ -247,9 +247,9 @@ The app must tap with the backend's `reference_id` verbatim; `confirm` verifies 
 
 #### iOS: Tap to Pay is an *additional* payment method
 
-**This dead-ended every iOS charge on Square's "connect hardware to take card payments" screen for a day.** On iOS, `AdditionalPaymentMethods` includes `.tapToPay` alongside `.keyed` and `.cash` — it is not the prompt's implicit primary method — and plugin 2026.8.1's iOS mapper stopped falling back to `.all`. So `additionalPaymentMethods: []` built a prompt with **no methods at all**, whose empty state is that screen. Android's mapper ignores the list entirely, which is why Android always worked.
+**This dead-ended every iOS charge on Square's "connect hardware to take card payments" screen for a day.** On iOS, `AdditionalPaymentMethods` includes `.tapToPay` alongside `.keyed` and `.cash` — it is not the prompt's implicit primary method — and plugin 2026.8.1's iOS mapper stopped falling back to `.all`. So `additionalPaymentMethods: []` built a prompt with **no methods at all**, whose empty state is that screen. Android's mapper ignored the list entirely, which is why Android always worked.
 
-`SquarePaymentService._startPaymentIOS` goes around the plugin's typed API to pass `tapToPay`, because the Dart `AdditionalPaymentMethodType` enum only has `keyed` and `cash` while the iOS mapper accepts the string. Remove it when the enum catches up.
+`SquarePaymentService.charge` passes `[AdditionalPaymentMethodType.tapToPay]` on both platforms. Until plugin 2026.10.1 the Dart enum couldn't spell `tapToPay`, so iOS went around the typed API with a hand-built channel call (`_startPaymentIOS`, now deleted). Android's mapper now reads the list but only knows `keyed`/`cash` and drops anything else, so there it is still an empty list. Don't "simplify" it back to `[]`.
 
 Two lessons: **the comment that hid this was accurate when written** and went wrong on a dependency bump; and **`getReaders()` had never been called** — the fact that reframed everything (the reader reporting `ready`) was one SDK call away the whole time.
 
@@ -292,7 +292,7 @@ Also iOS-only: the plugin's `Location.toMap()` omits `merchantId` and `cardProce
 
 Workflows in `.github/workflows/` (repo root, above `fishauctions_application/`).
 
-- **ci.yml** — PRs + main: pub get, codegen freshness, format, analyze, test. No Gradle, deliberately. Steps live in the composite action `flutter-verify` so `dependencies.yml` runs the same checks (a `GITHUB_TOKEN` push never triggers `ci.yml`).
+- **ci.yml** — PRs + main: pub get, codegen freshness, format, analyze, test, and a debug APK build (the only Gradle run, back on 2026-10-06 with AGP 9; a plugin's Android module is invisible to everything else). Steps live in the composite action `flutter-verify` so `dependencies.yml` runs the same checks (a `GITHUB_TOKEN` push never triggers `ci.yml`).
 - **android-release.yml** — manual; CI gate, keystore from secrets (fails fast if missing), signed prod `.aab` to Play plus a sideloadable APK.
 - **ios-release.yml** — manual, macOS. Default is unsigned `flutter build ios --no-codesign`. `distribute: true` signs; `export_method` picks `app-store` (TestFlight) or `development` (sideloadable, and the only way to get the Tap to Pay dev entitlement onto a phone without a Mac — needs a registered device). The development path copies `RunnerDebug.entitlements` over `Runner.entitlements`, which is why a Release archive legitimately carries the Tap to Pay key, `get-task-allow`, and `aps-environment=development`.
 - **dependencies.yml** — weekly, and the reason there's no `dependabot.yml`. Dependabot's problem wasn't PR count: **nothing it opened had been shown to work together**. This updates pub, AGP/Kotlin/Gradle/`uses:` pins (via `bump_versions.py`, which *discovers* pins rather than listing them), verifies with `flutter-verify` **plus a real debug APK and an unsigned iOS build**, then opens one PR on one rolling branch.
@@ -312,9 +312,10 @@ Workflows in `.github/workflows/` (repo root, above `fishauctions_application/`)
 
 ### Android build gotchas
 
-- **AGP is held below 9.x, and that keeps the payments SDK current.** AGP 9.0 removed `targetSdk` from the *library* DSL, which `square_mobile_payments_sdk` still sets, so every AGP 9 build dies configuring the payments plugin. Pinning the plugin back instead would drag the iOS pod to `~> 2.5.0` (Android has an app-side override, iOS has nothing).
-- **Holding AGP on 8.x also caps the Gradle wrapper at 9.5.x.** Gradle 9.6 removed an internal API AGP 8.x calls, so 8.13.2 + wrapper 9.7.0 couldn't even *apply* `com.android.application`. Usable window 8.13 … 9.5.x; both ceilings lift together.
-- Flutter 3.44.1 only knows AGP ≤ 9.1 and KGP ≤ 2.3.20.
+- **AGP is back on 9.x (9.3.1, wrapper 9.7.1) since 2026-10-06.** It was held on 8.13.2 from 2026-08-16 because AGP 9.0 removed `targetSdk` from the *library* DSL and `square_mobile_payments_sdk` set it; Square 2026.8.4 dropped the line, and pubspec's `^2026.10.1` floor keeps it out. The hold's twin — the wrapper capped at 9.5.x because Gradle 9.6 broke AGP 8.x — went with it, and `GRADLE_CEILING` is empty.
+- **A plugin's own Android module is what breaks an AGP bump**, and only Gradle sees it. `flutter_inappwebview` stays on 6.2.0-beta.3 because 6.1.5 uses `proguard-android.txt`, which AGP 9 rejects.
+- **`compileSdk` is at least 37** (`maxOf(flutter.compileSdkVersion, 37)`): `permission_handler_android` 14.x requires it and AGP's AAR metadata check fails the build otherwise. `targetSdk` stays Flutter's.
+- Flutter 3.44.1 only knows AGP ≤ 9.1 and KGP ≤ 2.3.20; newer AGP is accepted on Gradle ≥ 9.1 but untested by that SDK.
 - Bytecode target is Java 17; `android-release.yml` runs Gradle under **JDK 21** (AGP 9's lint crashes under 17 on a JDK-21-only default method). `minSdk` is **28** (Square floor).
 - **No CI job runs R8, so a release-only failure is invisible until the manual release.** The Square 2.5.0 → 2.6.0 bump sat green three weeks then failed `minifyProdReleaseWithR8`: `mobile-payments-sdk-internals` declares SQLDelight's **JVM** driver at compile scope, putting `java.sql.JDBCType` and `org.slf4j` on an Android classpath, and **R8 treats a missing class as an error**. Hence the `-dontwarn` block; none of it is reachable at runtime. That jar also ships desktop JNI binaries as java resources and AGP drops `.so` but not `.dll`/`.dylib` — hence `excludes += "org/sqlite/native/**"`.
 - **Release artifacts are retained for 1 day** — this is a public repo, so any run's artifacts are downloadable by anyone.

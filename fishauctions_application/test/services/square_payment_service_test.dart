@@ -1,6 +1,8 @@
 import 'package:fishauctions_application/services/square_payment_service.dart';
 import 'package:fishauctions_application/utils/platform_bridge.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 /// Guards on `SquarePaymentService` that exist to stop the app calling Square
 /// before `MobilePaymentsSdk.initialize()`.
@@ -58,5 +60,61 @@ void main() {
   test('the mock reader overlay is not driven before initialization', () async {
     await expectLater(square.showMockReaderUI(), completes);
     await expectLater(square.hideMockReaderUI(), completes);
+  });
+
+  // permission_handler 14.1.0: on Android a status read never answers
+  // permanentlyDenied (Android can't tell it from "never asked"); only a
+  // request can. The checkout's "open Settings" message used to read the
+  // status, so it told a cashier who'd chosen "Don't ask again" to try again.
+  group('a permanent location denial', () {
+    const permissions = MethodChannel(
+      'flutter.baseflow.com/permissions/methods',
+    );
+    final location = Permission.locationWhenInUse.value;
+
+    void platformAnswers({required int status, required int request}) {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(permissions, (call) async {
+            switch (call.method) {
+              case 'checkPermissionStatus':
+                return status;
+              case 'requestPermissions':
+                return {location: request};
+            }
+            return null;
+          });
+    }
+
+    tearDown(
+      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(permissions, null),
+    );
+
+    test('is read from the request when the status cannot say', () async {
+      platformAnswers(
+        status: PermissionStatus.denied.index,
+        request: PermissionStatus.permanentlyDenied.index,
+      );
+      expect(await square.ensureLocationPermission(), isFalse);
+      expect(await square.isLocationPermanentlyDenied(), isTrue);
+    });
+
+    test('a plain denial still offers another try', () async {
+      platformAnswers(
+        status: PermissionStatus.denied.index,
+        request: PermissionStatus.denied.index,
+      );
+      expect(await square.ensureLocationPermission(), isFalse);
+      expect(await square.isLocationPermanentlyDenied(), isFalse);
+    });
+
+    test('a status that does say so is still believed (iOS)', () async {
+      platformAnswers(
+        status: PermissionStatus.permanentlyDenied.index,
+        request: PermissionStatus.granted.index,
+      );
+      expect(await square.ensureLocationPermission(), isTrue);
+      expect(await square.isLocationPermanentlyDenied(), isTrue);
+    });
   });
 }

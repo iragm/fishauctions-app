@@ -13,6 +13,10 @@ re-implements version solving:
              Reading the lock rather than trusting the plan means the PR reports
              what actually resolved, transitive moves included.
 
+  safe-set   a pubspec.lock -> the packages the non-breaking tier may move
+             (the arguments for a targeted `pub upgrade`): everything except
+             calendar-versioned packages, whose caret range promises nothing.
+
 Stdlib only: this runs on a bare GitHub runner with no pip install step.
 """
 
@@ -44,8 +48,22 @@ def parse_version(text: str) -> tuple:
     return tuple(parts[:3])
 
 
+# A calendar version (2026.10.1) looks like semver to pub, so `^2026.8.1`
+# admits 2026.10.1 — but the publisher made no compatibility promise. Square's
+# plugin broke its Dart API in 2026.8.3, a patch-sized step inside that range,
+# and the non-breaking tier took it because the caret said it was safe. No real
+# semver package has a four-digit major, so that is the test.
+CALVER_MIN_MAJOR = 1000
+
+
+def is_calver(text: str) -> bool:
+    return parse_version(text)[0] >= CALVER_MIN_MAJOR
+
+
 def is_breaking(old: str, new: str) -> bool:
     a, b = parse_version(old), parse_version(new)
+    if is_calver(old) or is_calver(new):
+        return a != b
     if a[0] != b[0]:
         return True
     return a[0] == 0 and a[1] != b[1]
@@ -203,6 +221,24 @@ def cmd_lock_diff(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_safe_set(args: argparse.Namespace) -> int:
+    lock = parse_lock(Path(args.lock))
+    movable: list[str] = []
+    pinned: list[str] = []
+    for name, fields in sorted(lock.items()):
+        version = fields.get("version")
+        # SDK packages (flutter, flutter_test, …) move with the SDK pin, never
+        # with `pub upgrade`.
+        if not version or fields.get("source") == "sdk":
+            continue
+        (pinned if is_calver(version) else movable).append(name)
+
+    Path(args.out).write_text("\n".join(movable) + ("\n" if movable else ""))
+    print(f"{len(movable)} package(s) may move; held at their locked version: "
+          f"{', '.join(pinned) or 'none'}")
+    return 0
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -219,6 +255,11 @@ def main(argv: list[str]) -> int:
     diff.add_argument("--after", required=True)
     diff.add_argument("--out", required=True)
     diff.set_defaults(func=cmd_lock_diff)
+
+    safe = sub.add_parser("safe-set", help="packages the non-breaking tier may upgrade")
+    safe.add_argument("--lock", required=True)
+    safe.add_argument("--out", required=True)
+    safe.set_defaults(func=cmd_safe_set)
 
     args = parser.parse_args(argv)
     return args.func(args)

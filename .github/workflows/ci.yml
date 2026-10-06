@@ -30,3 +30,9 @@ jobs:
       - uses: ./.github/actions/flutter-verify
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
+          # The only check that runs Gradle, and so the only one that sees a
+          # plugin's own Android module. A pub bump reaches Gradle that way:
+          # square_mobile_payments_sdk 2026.8.0 set an API AGP 9 had removed and
+          # sat on main for days because nothing here ran Gradle. Costs a few
+          # minutes a push.
+          android-build: "true"
