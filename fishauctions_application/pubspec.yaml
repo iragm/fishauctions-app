@@ -99,13 +99,9 @@ dependencies:
   # only through SpeechBackend: phrase biasing and cloud streaming are the
   # named upgrade paths, and neither is expressible through this package.
   speech_to_text: ^7.4.0
-  # Stays current on purpose — the *toolchain* moved instead. 2026.8.0 rewrote
-  # this plugin's Android module into Kotlin DSL, where its `targetSdk = 36` on
-  # a library module needs an API AGP 9 removed; rather than sit on 2026.7.2
-  # (which would also hold the iOS pod at SquareMobilePaymentsSDK ~> 2.5.0, with
-  # no app-side override to rescue it the way android/app/build.gradle.kts does
-  # on Android), android/settings.gradle.kts is held on AGP 8.13.2. See the note
-  # there.
+  # Must not drop below 2026.8.4: 2026.8.0–8.3's Android module set `targetSdk`
+  # on a library module, an API AGP 9 removed, which held this project on AGP
+  # 8.x until 8.4 dropped the line. See android/settings.gradle.kts.
   square_mobile_payments_sdk: ^2026.10.1
   # Open external / target=_blank links (connect banners, map directions, Google
   # Wallet) in the system browser instead of the in-app WebView.

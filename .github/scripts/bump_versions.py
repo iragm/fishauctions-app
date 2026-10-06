@@ -76,9 +76,9 @@ def pick_latest(
     """Newest stable candidate strictly above `current`, or None.
 
     `ceiling` is an exclusive upper bound: it is how a version that must not
-    move past a line — AGP, held on 8.x because AGP 9 removed an API a
-    dependency still calls — keeps receiving patch releases instead of being
-    frozen outright by the hold list.
+    move past a line — as AGP was held on 8.x in 2026-08..10, while AGP 9 lacked
+    an API a dependency still called — keeps receiving patch releases instead
+    of being frozen outright by the hold list.
     """
     current_parts = parse_version(current)
     best: tuple | None = None
@@ -246,7 +246,7 @@ def gradle_releases() -> list[str]:
     """Every final Gradle release, newest first.
 
     The full list rather than `versions/current`, because the wrapper takes a
-    ceiling too (Gradle 9.6 removed an internal API AGP 8.x calls) and a ceiling
+    ceiling too (it did while AGP sat on 8.x, which Gradle 9.6 broke) and a ceiling
     is only worth having if patch releases under it still flow — with one
     version to choose from, a capped wrapper would freeze at whatever it
     happened to be pinned to.
