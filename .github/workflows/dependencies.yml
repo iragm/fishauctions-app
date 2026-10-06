@@ -192,6 +192,13 @@ jobs:
       # and patch" group would have produced, so the week still ends with
       # something mergeable; the PR body names the tier so nobody assumes the
       # majors landed.
+      #
+      # Except calendar-versioned packages, which stay at their locked version:
+      # a caret range over 2026.x.y promises nothing, and square_mobile_payments_sdk
+      # broke its Dart API inside one (2026.8.3). Taking it here made both tiers
+      # fail on the same two errors on 2026-10-05, so a week with 70 harmless
+      # bumps produced only a draft. Calver bumps still land via tier 1, which
+      # is where a breaking change belongs.
       - name: Fall back to non-breaking updates
         if: steps.verify-all.outcome == 'failure'
         env:
@@ -205,7 +212,12 @@ jobs:
           git checkout -- .
           git clean -fd
           cd fishauctions_application
-          flutter pub upgrade
+          # A targeted upgrade leaves every package it isn't given at its
+          # locked version — the only "upgrade everything except X" pub has.
+          # -r: an empty list must not turn into a bare, unrestricted upgrade.
+          python3 "$GITHUB_WORKSPACE/.github/scripts/pub_updates.py" safe-set \
+            --lock pubspec.lock --out "$RUNNER_TEMP/safe-set.txt"
+          xargs -r flutter pub upgrade < "$RUNNER_TEMP/safe-set.txt"
           cd "$GITHUB_WORKSPACE"
           python3 .github/scripts/bump_versions.py \
             --only gradle,wrapper,actions \
@@ -526,10 +538,10 @@ jobs:
               fail=1
               ;;
             failed)
-              # Both tiers failed, which usually means the breakage is not in
-              # the bumps at all — the non-breaking tier verifies a tree that is
-              # nearly what is already on the default branch.
-              echo "::error::Neither the full update nor the non-breaking subset passed verification. The checks are failing on this repository's current dependencies, not only on the new ones: $RUN_URL"
+              # Both tiers failed. Either the default branch itself is broken,
+              # or an in-range bump the non-breaking tier treats as safe broke
+              # the build — the 'Verify (non-breaking updates)' step says which.
+              echo "::error::Neither the full update nor the non-breaking subset passed verification. Either the default branch is already failing, or an in-range update broke it — see the 'Verify (non-breaking updates)' step: $RUN_URL"
               fail=1
               ;;
             *)
