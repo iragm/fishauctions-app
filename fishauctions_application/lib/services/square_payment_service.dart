@@ -216,14 +216,25 @@ class SquarePaymentService {
   /// [isLocationPermanentlyDenied]).
   Future<bool> ensureLocationPermission() async {
     final status = await Permission.locationWhenInUse.request();
+    _lastLocationRequest = status;
     return status.isGranted;
   }
+
+  /// What the last [ensureLocationPermission] request answered.
+  PermissionStatus? _lastLocationRequest;
 
   /// True once location permission is permanently denied ("Don't ask again"):
   /// [ensureLocationPermission] can no longer prompt, so the only fix is the OS
   /// settings screen ([openSettings]).
-  Future<bool> isLocationPermanentlyDenied() =>
-      Permission.locationWhenInUse.isPermanentlyDenied;
+  ///
+  /// **On Android only a request can say so.** permission_handler 14.1.0
+  /// stopped reporting `permanentlyDenied` from a status read there (Android
+  /// can't tell it from "never asked" or "Ask every time"), so the answer comes
+  /// from the last request; the status read still covers iOS and a permission
+  /// revoked since that request.
+  Future<bool> isLocationPermanentlyDenied() async =>
+      (_lastLocationRequest?.isPermanentlyDenied ?? false) ||
+      await Permission.locationWhenInUse.isPermanentlyDenied;
 
   /// Opens this app's OS settings so the cashier can grant a permission they
   /// previously denied permanently.

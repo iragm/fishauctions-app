@@ -128,8 +128,13 @@ class BluetoothService implements PrinterTransport {
     if (permission == null) {
       return true;
     }
-    return (await permission.request()).isGranted;
+    final status = await permission.request();
+    _lastConnectRequest = status;
+    return status.isGranted;
   }
+
+  /// What the last [requestConnectPermissions] request answered.
+  PermissionStatus? _lastConnectRequest;
 
   /// Extra permission to *discover* new printers. Android 12+ uses
   /// BLUETOOTH_SCAN (declared neverForLocation, so no location prompt); Android
@@ -148,8 +153,16 @@ class BluetoothService implements PrinterTransport {
 
   /// True once the user has permanently denied the connect permission ("Don't
   /// ask again"): the prompt can't reappear, so the only fix is OS settings.
-  Future<bool> isPermissionPermanentlyDenied() async =>
-      await (await _connectPermission())?.isPermanentlyDenied ?? false;
+  ///
+  /// From the last request first: permission_handler 14.1.0 stopped reporting
+  /// `permanentlyDenied` from an Android status read, which Android can't tell
+  /// apart from "never asked". The status read is kept for anything newer.
+  Future<bool> isPermissionPermanentlyDenied() async {
+    if (_lastConnectRequest?.isPermanentlyDenied ?? false) {
+      return true;
+    }
+    return await (await _connectPermission())?.isPermanentlyDenied ?? false;
+  }
 
   /// Opens this app's OS settings page so the user can grant a permission they
   /// previously denied permanently.
