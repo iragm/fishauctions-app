@@ -22,7 +22,12 @@ val keystoreProperties = Properties().apply {
 
 android {
     namespace = "com.fishauctions.app"
-    compileSdk = flutter.compileSdkVersion
+    // At least 37, not Flutter's default (36 on 3.44.1): permission_handler_android
+    // 14.x requires apps that depend on it to compile against API 37, and AGP's AAR
+    // metadata check fails the build otherwise. Compile SDK only — targetSdk below,
+    // which changes runtime behaviour, stays Flutter's. maxOf, so a newer Flutter
+    // default still wins.
+    compileSdk = maxOf(flutter.compileSdkVersion, 37)
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
