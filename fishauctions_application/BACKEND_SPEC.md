@@ -43,7 +43,8 @@ but a final marked `partial: true` otherwise sits 4 s on the settle timer.
 `getUserMedia({audio: true})` (on this page only, after the OS permission). So in the app,
 `voiceCloudStart()` works the same as in a browser.
 
-- When `voiceConfig.cloud` is on and the state says `web_microphone`, add a **Listen with** choice
+- When `voiceConfig.cloud` is on (which already folds in `UserData.voice_cloud_enabled`, so only
+  accounts it's on for see this) and the state says `web_microphone`, add a **Listen with** choice
   to the voice settings panel: *This phone* (the app's recognizer, free) or *OpenAI* (charged to the
   site per minute). Store it in `localStorage` (per device, like the panel's other values); default
   *This phone*.
@@ -53,5 +54,6 @@ but a final marked `partial: true` otherwise sits 4 s on the settle timer.
 - If `getUserMedia` is refused in the app, the app has already shown a snackbar pointing at the
   phone's settings; the page's "Allow it for this site" wording doesn't apply there (no site
   permission to allow), so say "Allow the microphone for the app" when the bridge exists.
-- `VoiceGrammar.cloud_model`'s help text ("Off leaves only the app") should say the app can use it
-  too.
+- The help texts on `VoiceGrammar.cloud_model` ("Off leaves only the app") and
+  `UserData.voice_cloud_enabled` ("The app listens without it") should say the flag gates OpenAI in
+  the app too; the app's own recognizer is what needs neither.
