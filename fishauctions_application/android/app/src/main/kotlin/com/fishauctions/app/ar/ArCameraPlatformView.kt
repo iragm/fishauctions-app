@@ -117,10 +117,18 @@ class ArCameraPlatformView(
         }
         if (sessionManager.ensureSession()) {
             sessionManager.resume()
-        } else if (sessionManager.availabilityPending &&
-            availabilityRetries++ < MAX_AVAILABILITY_RETRIES
-        ) {
-            main.postDelayed({ startSession() }, AVAILABILITY_RETRY_MS)
+        } else if (sessionManager.availabilityPending) {
+            if (availabilityRetries++ < MAX_AVAILABILITY_RETRIES) {
+                main.postDelayed({ startSession() }, AVAILABILITY_RETRY_MS)
+            } else {
+                // ARCore's availability check needs Google's servers, and an auction hall's wifi
+                // routinely can't reach them; this used to leave the spinner up until the app was
+                // backgrounded. The plain camera scans fine without AR, so hand over to it.
+                events.emitStatus(
+                    "unsupported",
+                    "Couldn't check whether this phone supports AR.",
+                )
+            }
         }
     }
 

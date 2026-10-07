@@ -65,7 +65,12 @@ class ArSessionManager(private val activity: Activity) {
     }
 
     interface StatusListener {
-        /** One of "checking", "unsupported", "installing", "ready", "error". */
+        /** One of "checking", "unsupported", "installing", "ready", "error".
+         *
+         * "unsupported" means AR can't run on this phone at all — not certified for ARCore (the
+         * Galaxy A15/A16 among them), Play Services for AR declined or out of date — and the Dart
+         * screen answers it by scanning with the plain camera instead. "error" is reserved for a
+         * camera that failed, which the plain camera couldn't fix either. */
         fun onStatus(status: String, message: String?)
     }
 
@@ -145,7 +150,7 @@ class ArSessionManager(private val activity: Activity) {
                 ArCoreApk.InstallStatus.INSTALLED -> Unit
             }
         } catch (e: UnavailableException) {
-            statusListener?.onStatus("error", unavailableMessage(e))
+            statusListener?.onStatus("unsupported", unavailableMessage(e))
             return false
         }
 
@@ -167,7 +172,7 @@ class ArSessionManager(private val activity: Activity) {
             statusListener?.onStatus("ready", null)
             true
         } catch (e: UnavailableException) {
-            statusListener?.onStatus("error", unavailableMessage(e))
+            statusListener?.onStatus("unsupported", unavailableMessage(e))
             false
         } catch (e: Exception) {
             Log.w(TAG, "AR session creation failed", e)

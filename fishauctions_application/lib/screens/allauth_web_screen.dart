@@ -119,6 +119,9 @@ class _AllauthWebScreenState extends ConsumerState<AllauthWebScreen> {
   /// replace it with something that says what happened and offers a retry.
   String? _loadError;
 
+  /// The path the page last settled on, for [_nextStepsFor].
+  String? _settledPath;
+
   Future<NavigationActionPolicy> _shouldOverrideUrlLoading(
     InAppWebViewController controller,
     NavigationAction action,
@@ -297,12 +300,16 @@ class _AllauthWebScreenState extends ConsumerState<AllauthWebScreen> {
                     setState(() {
                       _loading = true;
                       _loadError = null;
+                      _settledPath = null;
                     });
                   }
                 },
                 onLoadStop: (c, url) {
                   if (mounted) {
-                    setState(() => _loading = false);
+                    setState(() {
+                      _loading = false;
+                      _settledPath = url?.path;
+                    });
                   }
                 },
                 onReceivedError: _onLoadError,
@@ -310,6 +317,14 @@ class _AllauthWebScreenState extends ConsumerState<AllauthWebScreen> {
                 onCreateWindow: _onCreateWindow,
               ),
               if (_loadError case final message?) _errorPanel(message),
+              if (_loadError == null)
+                if (_nextStepsFor(_settledPath) case final steps?)
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    child: _nextStepsPanel(steps),
+                  ),
               if (_loading) const LinearProgressIndicator(minHeight: 3),
             ],
           ),
@@ -319,6 +334,95 @@ class _AllauthWebScreenState extends ConsumerState<AllauthWebScreen> {
       ],
     ),
   );
+
+  /// What to do next on the two pages where allauth's flow ends by sending
+  /// an email — the page itself says the email went out, and nothing about
+  /// the app, so a new user was left on "Verify your e-mail address" with no
+  /// way forward but guessing at the back button. The confirmation link opens
+  /// in the phone's browser and signs in *there*, never here, so the step that
+  /// actually finishes the job — coming back to sign in — has to be said.
+  ///
+  /// Null on every other page.
+  ({String title, String body, String action})? _nextStepsFor(String? path) =>
+      switch (path) {
+        '/confirm-email/' when widget.completionPath != null => (
+          title: 'Confirm your email to finish',
+          body:
+              'We sent a link to your email address. Open it to confirm the '
+              'address, then come back to the app and sign in the same way '
+              'you just did. No email after a few minutes? Check your spam '
+              'folder.',
+          action: 'Done — back to sign in',
+        ),
+        '/confirm-email/' => (
+          title: 'Check your email',
+          body:
+              'Your account is almost ready. We sent a link to your email '
+              'address — open it to confirm the address, then come back to '
+              'the app and sign in with your username or email and password. '
+              'No email after a few minutes? Check your spam folder.',
+          action: 'Back to sign in',
+        ),
+        '/password/reset/done/' => (
+          title: 'Check your email',
+          body:
+              'If that address has an account, we sent it a link to choose a '
+              'new password. Open it, set the new password, then come back '
+              'to the app and sign in with it. No email after a few minutes? '
+              'Check your spam folder.',
+          action: 'Back to sign in',
+        ),
+        _ => null,
+      };
+
+  /// Leaves the flow for the sign-in screen. A social sign-in finishing its
+  /// email step returns `true` instead, so the login screen tries the pending
+  /// sign-in — which, until the address is confirmed, answers with its own
+  /// "finish confirming your email, then sign in again".
+  void _backToSignIn() {
+    if (widget.completionPath != null) {
+      Navigator.of(context).pop(true);
+    } else {
+      context.go('/login');
+    }
+  }
+
+  Widget _nextStepsPanel(({String title, String body, String action}) steps) =>
+      Material(
+        color: Theme.of(context).colorScheme.surfaceContainerHigh,
+        elevation: 8,
+        child: SafeArea(
+          top: false,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(24, 20, 24, 16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  children: [
+                    const Icon(Icons.mark_email_unread_outlined),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                        steps.title,
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Text(steps.body),
+                const SizedBox(height: 16),
+                FilledButton(
+                  onPressed: _backToSignIn,
+                  child: Text(steps.action),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
 
   Widget _errorPanel(String message) => ColoredBox(
     color: AppTheme.scaffoldBackground,

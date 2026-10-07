@@ -61,6 +61,11 @@ dependencies:
   json_annotation: ^4.12.0
   # Logging
   logger: ^2.1.0
+  # Lot scanning's plain-camera fallback (CameraX + ML Kit on Android) for
+  # phones ARCore doesn't certify — current budget models among them, e.g. the
+  # Galaxy A15/A16. Never used while ARCore/ARKit runs: they own the camera.
+  # Same ML Kit artifact (barcode-scanning 17.3.0) the app already ships.
+  mobile_scanner: ^7.4.2
   # Open a downloaded file with the OS default handler — .ics into the calendar
   # importer, .pkpass into Wallet (iOS). See DownloadService.
   open_filex: ^4.7.0
