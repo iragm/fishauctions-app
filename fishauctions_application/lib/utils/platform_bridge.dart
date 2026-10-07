@@ -302,6 +302,44 @@ class PlatformBridge {
     }
   }
 
+  /// Barcodes in an encoded image (JPEG/PNG), read by the platform's own
+  /// detector: Vision on iOS, ML Kit on Android. Backs the WebView's
+  /// `BarcodeDetector` (see `NativeBarcodeDetector`).
+  ///
+  /// [formats] uses the Shape Detection API's names (`qr_code`, `code_128`…);
+  /// empty means every supported format. Each result is
+  /// `{rawValue, format, corners}` with `corners` as four `[x, y]` pairs
+  /// normalized to 0..1 from the image's top-left, so the caller can map them
+  /// onto whatever size it captured at. Empty on any platform without a
+  /// reader (no platform gate: an unimplemented channel answers that itself);
+  /// a [PlatformException] from the reader is rethrown.
+  static Future<List<Map<String, Object?>>> detectBarcodes(
+    Uint8List image,
+    List<String> formats,
+  ) async {
+    try {
+      final raw = await _channel.invokeMethod<List<Object?>>('detectBarcodes', {
+        'bytes': image,
+        'formats': formats,
+      });
+      return [
+        for (final item in raw ?? const <Object?>[])
+          if (item is Map)
+            {
+              'rawValue': item['rawValue'] is String ? item['rawValue'] : null,
+              'format': item['format'] is String ? item['format'] : 'unknown',
+              'corners': [
+                for (final p in (item['corners'] as List? ?? const []))
+                  if (p is List && p.length == 2 && p[0] is num && p[1] is num)
+                    [(p[0] as num).toDouble(), (p[1] as num).toDouble()],
+              ],
+            },
+      ];
+    } on MissingPluginException {
+      return const [];
+    }
+  }
+
   /// Initializes the Square Mobile Payments SDK with [applicationId] (the
   /// deployment's Square Application ID, from `/api/mobile/config/`). Must run
   /// once before any authorize()/charge() call — the Square Flutter plugin

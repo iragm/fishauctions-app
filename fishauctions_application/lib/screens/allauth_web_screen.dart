@@ -12,6 +12,7 @@ import '../constants/app_constants.dart';
 import '../models/app_config.dart';
 import '../providers/config_provider.dart';
 import '../utils/external_links.dart';
+import '../utils/load_errors.dart';
 import '../widgets/legal_links.dart';
 
 /// Hosts a single django-allauth account flow (signup or password reset) in a
@@ -231,6 +232,18 @@ class _AllauthWebScreenState extends ConsumerState<AllauthWebScreen> {
   ) {
     if (!(request.isForMainFrame ?? true) || !mounted) {
       return;
+    }
+    // Not a connection failure: a superseded load, or one this screen's own
+    // policy cancelled mid-redirect (every off-flow link is sent to the
+    // browser that way). See classifyLoadError.
+    switch (classifyLoadError(error)) {
+      case LoadErrorKind.superseded:
+        return;
+      case LoadErrorKind.interrupted:
+        setState(() => _loading = false);
+        return;
+      case LoadErrorKind.failed:
+        break;
     }
     setState(() {
       _loading = false;

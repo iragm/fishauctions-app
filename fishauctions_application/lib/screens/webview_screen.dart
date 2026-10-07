@@ -55,6 +55,8 @@ import '../services/voice_command_service.dart';
 import '../utils/bi_icons.dart';
 import '../utils/connect_flows.dart';
 import '../utils/external_links.dart';
+import '../utils/load_errors.dart';
+import '../utils/native_barcode_detector.dart';
 import '../utils/platform_bridge.dart';
 import '../utils/web_microphone.dart';
 import '../widgets/payment_sheet.dart';
@@ -333,9 +335,6 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       // this simply tries again on the next auction page — by which time those
       // two are spent for the session.
       skip('lost the banner slot for this page load');
-      return;
-    }
-    if (!mounted) {
       return;
     }
     if (!mounted) {
@@ -637,6 +636,13 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       ..addJavaScriptHandler(
         handlerName: 'dictateStart',
         callback: (_) => _startDictation(),
+      )
+      // The native barcode reader behind the page's `BarcodeDetector` on
+      // engines without one (every iPhone) — the lot queue, quick check-in and
+      // quick checkout camera scanners. See NativeBarcodeDetector.
+      ..addJavaScriptHandler(
+        handlerName: NativeBarcodeDetector.handlerName,
+        callback: NativeBarcodeDetector.handle,
       )
       ..addJavaScriptHandler(
         handlerName: 'dictateStop',
@@ -1653,6 +1659,20 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   ) async {
     if (!(request.isForMainFrame ?? true) || !mounted) {
       return;
+    }
+    // A load that was replaced or deliberately stopped isn't a lost
+    // connection — on iOS every link tapped mid-load, and every off-site
+    // redirect this shell hands to the browser, lands here. See
+    // classifyLoadError.
+    switch (classifyLoadError(error)) {
+      case LoadErrorKind.superseded:
+        return;
+      case LoadErrorKind.interrupted:
+        setState(() => _loading = false);
+        unawaited(_refreshCanGoBack());
+        return;
+      case LoadErrorKind.failed:
+        break;
     }
     setState(() => _loading = false);
     _loadFailed = true;
@@ -3233,6 +3253,7 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
                 initialUserScripts: UnmodifiableListView([
                   _hideWebSpeechApi,
                   _webLogoutHook,
+                  NativeBarcodeDetector.userScript,
                 ]),
                 onWebViewCreated: (c) => unawaited(_onWebViewCreated(c)),
                 onLoadStart: _onLoadStart,
