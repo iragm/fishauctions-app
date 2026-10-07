@@ -57,3 +57,67 @@ but a final marked `partial: true` otherwise sits 4 s on the settle timer.
 - The help texts on `VoiceGrammar.cloud_model` ("Off leaves only the app") and
   `UserData.voice_cloud_enabled` ("The app listens without it") should say the flag gates OpenAI in
   the app too; the app's own recognizer is what needs neither.
+
+---
+
+## Part SCAN — faster camera scanning on the lot queue (and check-in / checkout)
+
+All in `auctions/static/js/camera_scanner.js`, `barcode_scanner.js` and `lot_queue.html`. The app
+half has shipped: in the app on iOS, `window.BarcodeDetector` now exists and is backed by Apple's
+Vision (an Android WebView that lacks one gets ML Kit), so `camera_scanner.js` takes its native
+path there with no page change. What remains is page-side, and SCAN-1 is the biggest single win on
+every device, browser or app.
+
+### SCAN-1: don't stop the camera for the network
+
+Today a decoded lot QR runs `scanFrame → await handleCode → await onCode →
+auctionBarcodeScanner.handleCode → await postLotScan (fetch POST)`, and only then is the next frame
+decoded. Then `auction-lot-queued` triggers a full `?partial=list` GET. On venue wifi that is
+0.3–3 s per label during which the camera reads nothing, so building a queue goes at the speed of
+the network, not of the operator's hand.
+
+- On the lot queue, acknowledge the read the moment it decodes (the existing `"scan"` beep), start
+  the POST **without awaiting it**, and return `true` to the scanner at once. Report the POST's
+  outcome when it lands (the success/error toast and beep as now).
+- Keep a `Set` of lot pks already sent this session (or in flight) and skip them, so the camera
+  re-seeing a label doesn't re-post it. Forget a pk when the POST fails, so a retry works.
+- Coalesce the list refresh: one `?partial=list` GET at most every ~500 ms however many adds landed,
+  or have the add POST return the list partial (the manual form already gets one).
+- Check-in/checkout can stay serial — a member scan is one-at-a-time by nature.
+
+### SCAN-2: every code in the frame, not just the first
+
+`startNativeScanner` reads `barcodes[0]` only. With several labels in view the first can be the
+same label every frame and the others are never read. Loop over all results.
+
+### SCAN-3: per-value duplicate suppression
+
+`handleCode` remembers one `lastValue`. Labels A and B alternately in frame defeat it (A, B, A —
+each is "new"), and the 2.5 s window then blocks the label the operator deliberately re-presents.
+Keep a `Map` of value → last time instead; the SCAN-1 set covers the lot queue regardless.
+
+### SCAN-4: a native detector that fails on every frame
+
+Chrome/WebView on a phone without Google Play services constructs a `BarcodeDetector` but rejects
+every `detect()` (`NotSupportedError`). The loop logs and retries forever while the preview looks
+alive. After a handful of consecutive rejections, stop the native loop and switch to
+`startFallbackScanner()` (keep the stream).
+
+### SCAN-5: cheaper ZXing for browsers that still need it (iOS Safari)
+
+The app no longer uses ZXing, but iPhone users of the website still do.
+
+- Let a page narrow `FORMATS` (`createCameraScanner({formats: ["qr_code"]})`); the lot queue only
+  ever wants QR, and ZXing's cost grows with every format it tries.
+- Decode only what the operator can see. The lot queue's preview is a 3:1 box with
+  `object-fit: cover`, so most of each frame is cropped off screen — yet ZXing decodes all of it,
+  and reads labels the operator never aimed at. Draw the visible rectangle to a canvas and decode
+  that.
+- `TRY_HARDER` roughly doubles the per-frame cost; try without it first and only add it on alternate
+  frames.
+
+### SCAN-6: a preview you can aim with
+
+The lot queue's camera box is `aspect-ratio: 3 / 1`, at most 480 px wide — on a phone a strip
+about 120 px tall, into which a square QR has to fit, so operators hold the phone farther away and
+the code shrinks. Use 4:3 (or 1:1) on narrow screens.

@@ -3,6 +3,7 @@ import Flutter
 import Speech
 import SquareMobilePaymentsSDK
 import UIKit
+import Vision
 
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
@@ -60,6 +61,16 @@ import UIKit
         Self.handleSpeechRecognitionAvailable(result: result)
       case "getCameraFov":
         Self.handleGetCameraFov(result: result)
+      case "detectBarcodes":
+        // The WebView's BarcodeDetector (lib/utils/native_barcode_detector.dart):
+        // WKWebView has none, so the site's camera scanners (lot queue, quick
+        // check-in) otherwise decode with ZXing in JavaScript.
+        let arguments = call.arguments as? [String: Any]
+        ImageBarcodeReader.detect(
+          data: (arguments?["bytes"] as? FlutterStandardTypedData)?.data,
+          formats: arguments?["formats"] as? [String] ?? [],
+          result: result
+        )
       case "tapToPayEducationAvailable":
         // iOS-only: Apple's merchant-education sheet is iOS 18+. Android has
         // no equivalent (Tap to Pay on Android education is Google's/Square's).
@@ -163,6 +174,11 @@ import UIKit
       if current == applicationId {
         result(nil)  // idempotent for the same id
       } else {
+        // The early init in didFinishLaunching ran from the cached id, which the deployment has
+        // since changed (a sandbox id replaced by production, say). The SDK can't re-initialize,
+        // but the cache must follow the server, or the restart this error asks for would just
+        // initialize from the stale id again — forever.
+        UserDefaults.standard.set(applicationId, forKey: cachedSquareAppIdKey)
         result(
           FlutterError(
             code: "already_initialized_other",
@@ -185,5 +201,74 @@ import UIKit
     squareInitializedAppId = applicationId
     // Cache so the next launch can initialize early, where Square wants it.
     UserDefaults.standard.set(applicationId, forKey: cachedSquareAppIdKey)
+  }
+}
+
+/// Reads barcodes out of one encoded still (a JPEG of a camera frame the page snapshotted) with
+/// Vision — the same reader the lot-scanning screen uses on ARKit's frames. Answers in the
+/// Shape Detection API's format names, with corners normalized to 0...1 from the image's top-left
+/// (Vision's own are bottom-left), so the page can scale them onto whatever it captured.
+private enum ImageBarcodeReader {
+  /// One at a time, off the main thread: the page awaits each answer before sending the next
+  /// frame, so a queue never builds.
+  private static let queue = DispatchQueue(
+    label: "com.fishauctions.app.barcodes", qos: .userInitiated)
+
+  private static let symbologies: [String: [VNBarcodeSymbology]] = [
+    "aztec": [.aztec],
+    "codabar": [.codabar],
+    "code_128": [.code128],
+    "code_39": [.code39, .code39Checksum, .code39FullASCII, .code39FullASCIIChecksum],
+    "code_93": [.code93, .code93i],
+    "data_matrix": [.dataMatrix],
+    // Vision reads UPC-A as the EAN-13 it is a subset of.
+    "ean_13": [.ean13],
+    "upc_a": [.ean13],
+    "ean_8": [.ean8],
+    "itf": [.itf14, .i2of5, .i2of5Checksum],
+    "pdf417": [.pdf417],
+    "qr_code": [.qr],
+    "upc_e": [.upce],
+  ]
+
+  private static func formatName(_ symbology: VNBarcodeSymbology) -> String {
+    for (name, values) in symbologies where name != "upc_a" && values.contains(symbology) {
+      return name
+    }
+    return "unknown"
+  }
+
+  static func detect(data: Data?, formats: [String], result: @escaping FlutterResult) {
+    guard let data, !data.isEmpty else {
+      result([])
+      return
+    }
+    let wanted = formats.flatMap { symbologies[$0] ?? [] }
+    queue.async {
+      let request = VNDetectBarcodesRequest()
+      if !wanted.isEmpty {
+        request.symbologies = Array(Set(wanted))
+      }
+      let handler = VNImageRequestHandler(data: data, orientation: .up, options: [:])
+      do {
+        try handler.perform([request])
+      } catch {
+        DispatchQueue.main.async {
+          result(
+            FlutterError(
+              code: "detect_failed", message: error.localizedDescription, details: nil))
+        }
+        return
+      }
+      let observations = (request.results as? [VNBarcodeObservation]) ?? []
+      let found: [[String: Any]] = observations.compactMap { obs in
+        guard let value = obs.payloadStringValue, !value.isEmpty else { return nil }
+        let corners = [obs.topLeft, obs.topRight, obs.bottomRight, obs.bottomLeft].map {
+          [Double($0.x), 1.0 - Double($0.y)]
+        }
+        return ["rawValue": value, "format": formatName(obs.symbology), "corners": corners]
+      }
+      DispatchQueue.main.async { result(found) }
+    }
   }
 }

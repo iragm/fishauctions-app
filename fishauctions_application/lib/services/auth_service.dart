@@ -8,6 +8,7 @@ import '../models/social_provider.dart';
 import '../utils/device_identity.dart';
 import '../utils/secure_storage.dart';
 import 'api_service.dart';
+import 'label_prefs_service.dart';
 import 'last_page_service.dart';
 import 'menu_store.dart';
 import 'offline_sync_service.dart';
@@ -162,6 +163,8 @@ class AuthService {
     // "This phone already declined notifications" was an answer for the
     // previous account, not the next one.
     await PushPromptService.instance.clear();
+    // Print method and label size are this account's settings.
+    await LabelPrefsService.instance.clear();
     await _api.clearTokens();
     await _storage.delete(key: _keyCachedUser);
   }

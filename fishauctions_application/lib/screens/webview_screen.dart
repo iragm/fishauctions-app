@@ -55,6 +55,8 @@ import '../services/voice_command_service.dart';
 import '../utils/bi_icons.dart';
 import '../utils/connect_flows.dart';
 import '../utils/external_links.dart';
+import '../utils/load_errors.dart';
+import '../utils/native_barcode_detector.dart';
 import '../utils/platform_bridge.dart';
 import '../utils/web_microphone.dart';
 import '../widgets/payment_sheet.dart';
@@ -89,6 +91,16 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     // Let the dark ColoredBox backstop show through until the page paints, so
     // there's no white flash over the otherwise-dark UI.
     transparentBackground: true,
+    // The bridge — sign-out, printer pairing, the microphone, Tap to Pay — is
+    // for our own pages, and the main frame can only ever be our host
+    // (_shouldOverrideUrlLoading sends every other main-frame navigation to
+    // the browser). Frames are a different matter: lot pages embed YouTube and
+    // base.html embeds Google Tag Manager, and by default the plugin injects
+    // `window.flutter_inappwebview` into every frame and answers handler calls
+    // from any of them, so a third-party frame could sign the user out or
+    // start the microphone. No page of ours calls the bridge from a frame.
+    javaScriptBridgeForMainFrameOnly: true,
+    javaScriptHandlersForMainFrameOnly: true,
   );
 
   // Set once the InAppWebView is created (onWebViewCreated). Null before then;
@@ -161,6 +173,10 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   // link) opening overlapping sheets.
   int? _activePaymentPk;
 
+  /// Whether the page showing is `/printing/`, where the print method is set.
+  /// See LabelPrefsService.markStale.
+  bool _onPrintingPage = false;
+
   // When a lot page was opened *from* AR mode (the card's "open lot page"),
   // this remembers the AR origin so the next back press returns to AR and
   // re-beacons the lot — the same intent as the page's "Back to AR" bar. It's
@@ -218,6 +234,9 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     // the data-message channel is how a job actually arrives.
     PushService.instance.dataMessage.addListener(_onPushData);
     RemotePrintService.instance.start(ref);
+    // So the first print tap answers from memory rather than waiting on a
+    // network round trip — see LabelPrefsService.
+    LabelPrefsService.instance.warm();
   }
 
   /// Loads `/api/mobile/config/` and initializes the Square SDK with the
@@ -333,9 +352,6 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       // this simply tries again on the next auction page — by which time those
       // two are spent for the session.
       skip('lost the banner slot for this page load');
-      return;
-    }
-    if (!mounted) {
       return;
     }
     if (!mounted) {
@@ -637,6 +653,13 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       ..addJavaScriptHandler(
         handlerName: 'dictateStart',
         callback: (_) => _startDictation(),
+      )
+      // The native barcode reader behind the page's `BarcodeDetector` on
+      // engines without one (every iPhone) — the lot queue, quick check-in and
+      // quick checkout camera scanners. See NativeBarcodeDetector.
+      ..addJavaScriptHandler(
+        handlerName: NativeBarcodeDetector.handlerName,
+        callback: NativeBarcodeDetector.handle,
       )
       ..addJavaScriptHandler(
         handlerName: 'dictateStop',
@@ -1100,6 +1123,10 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       // Tell the backend this phone is awake again, so the website's "print
       // from my computer" state is right the moment the user looks at it.
       RemotePrintService.instance.onAppResumed(ref);
+      // The print method may have been changed on the website from a
+      // computer while this phone was away.
+      LabelPrefsService.instance.markStale();
+      LabelPrefsService.instance.warm();
       unawaited(_rewarmConfigIfFailed());
       // A page that failed while the user was away is almost always a page
       // that failed because the network was down — and fixing the network
@@ -1630,6 +1657,11 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   }
 
   void _onLoadStart(InAppWebViewController controller, WebUri? url) {
+    // Leaving /printing/, where the print method is changed: whatever the
+    // user just saved there must win over the remembered copy.
+    if (_onPrintingPage) {
+      LabelPrefsService.instance.markStale();
+    }
     // A new page load supersedes any contextual banner the user hasn't acted
     // on, so it doesn't float over an unrelated screen — and invalidates any
     // offer still settling for the page we're leaving (see _claimBanner).
@@ -1653,6 +1685,20 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
   ) async {
     if (!(request.isForMainFrame ?? true) || !mounted) {
       return;
+    }
+    // A load that was replaced or deliberately stopped isn't a lost
+    // connection — on iOS every link tapped mid-load, and every off-site
+    // redirect this shell hands to the browser, lands here. See
+    // classifyLoadError.
+    switch (classifyLoadError(error)) {
+      case LoadErrorKind.superseded:
+        return;
+      case LoadErrorKind.interrupted:
+        setState(() => _loading = false);
+        unawaited(_refreshCanGoBack());
+        return;
+      case LoadErrorKind.failed:
+        break;
     }
     setState(() => _loading = false);
     _loadFailed = true;
@@ -1714,6 +1760,12 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
       setState(() => _loading = false);
     }
     unawaited(_refreshCanGoBack());
+    _onPrintingPage = url?.path.startsWith('/printing') ?? false;
+    if (_onPrintingPage) {
+      // Its dropdown saves in place, so a print started from this very page
+      // must not be answered from memory either.
+      LabelPrefsService.instance.markStale();
+    }
     if (url == null) {
       return;
     }
@@ -1843,7 +1895,7 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     if (lotPks.isEmpty) {
       return;
     }
-    final resolved = prefs ?? await LabelPrefsService.instance.fetch();
+    final resolved = prefs ?? await _printPrefs();
     if (!mounted) {
       return;
     }
@@ -1875,6 +1927,58 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     // server agrees, so there is no loop.
     _showSnack('Your label print method changed — reloading this page.');
     unawaited(_controller?.reload());
+  }
+
+  /// The user's print settings, with a visible "working on it" when the
+  /// lookup is slow. It answers from memory almost always; the rest of the
+  /// time it waits up to a few seconds on the network (LabelPrefsService),
+  /// and a tap that changes nothing for that long reads as a dead button.
+  Future<LabelPrefs?> _printPrefs() async {
+    final lookup = LabelPrefsService.instance.fetch();
+    var shown = false;
+    final timer = Timer(const Duration(milliseconds: 300), () {
+      if (!mounted) {
+        return;
+      }
+      shown = true;
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(
+            duration: Duration(seconds: 30),
+            content: Row(
+              children: [
+                SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+                SizedBox(width: 16),
+                Expanded(child: Text('Getting your print settings…')),
+              ],
+            ),
+          ),
+        );
+    });
+    try {
+      return await lookup;
+    } finally {
+      timer.cancel();
+      if (shown && mounted) {
+        ScaffoldMessenger.of(context).hideCurrentSnackBar();
+      }
+    }
+  }
+
+  /// Whether a download could be a PDF — unknown types count, so a server
+  /// that omits the type still gets the System-printer routing.
+  static bool _mayBePdf(DownloadStartRequest request) {
+    final type = (request.mimeType ?? '').toLowerCase();
+    if (type.contains('pdf')) {
+      return true;
+    }
+    final known = type.isNotEmpty && type != 'application/octet-stream';
+    return !known || request.url.path.toLowerCase().endsWith('.pdf');
   }
 
   /// A data-only push arrived. Today that is only a remote print job; anything
@@ -2497,7 +2601,7 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     );
     if (labelLotPk != null && action.isForMainFrame) {
       // Only pay for the prefs lookup once the path has already matched.
-      final prefs = await LabelPrefsService.instance.fetch();
+      final prefs = await _printPrefs();
       if (prefs?.printMethod == PrintMethod.bluetooth && mounted) {
         unawaited(_launchPrint([labelLotPk], prefs: prefs));
         return NavigationActionPolicy.CANCEL;
@@ -2670,7 +2774,9 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
     InAppWebViewController controller,
     DownloadStartRequest request,
   ) async {
-    final prefs = await LabelPrefsService.instance.fetch();
+    // The print method only decides what happens to a PDF; a CSV export or
+    // a calendar file shouldn't wait on it.
+    final prefs = _mayBePdf(request) ? await _printPrefs() : null;
     final error = await DownloadService.instance.handle(
       request,
       userAgent: AppConstants.userAgent,
@@ -3233,6 +3339,7 @@ class _WebViewScreenState extends ConsumerState<WebViewScreen>
                 initialUserScripts: UnmodifiableListView([
                   _hideWebSpeechApi,
                   _webLogoutHook,
+                  NativeBarcodeDetector.userScript,
                 ]),
                 onWebViewCreated: (c) => unawaited(_onWebViewCreated(c)),
                 onLoadStart: _onLoadStart,

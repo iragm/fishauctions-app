@@ -195,6 +195,10 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
       _fail(_detail(e) ?? 'Could not load invoice. Please try again.');
     } on FormatException catch (e) {
       _fail('Unexpected response from server: ${e.message}');
+    } on Object catch (e) {
+      // Anything else (a malformed field the parser didn't anticipate) must
+      // still end the spinner with a retry rather than strand the cashier.
+      _fail('Could not load invoice. Please try again. ($e)');
     }
   }
 
@@ -518,9 +522,21 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
         return;
       }
       _fail('Could not start the card reader: ${e.message}');
-    } on Exception catch (e) {
+    } on Object catch (e) {
+      // `Object`, not `Exception`: a TypeError or StateError out of a plugin
+      // is an `Error`, and escaping here left the sheet on "Starting the card
+      // reader…" with no way forward but dismissing it.
+      if (_capturedPaymentId != null) {
+        // Money was taken. `_confirmCaptured` handles its own failures, so
+        // this is belt and braces — but the one wrong answer here is calling
+        // a charged card a failed payment, which invites a second charge.
+        _fail(
+          'The card was charged, but we could not confirm it. Tap to finish '
+          '— you will not be charged again.',
+        );
+        return;
+      }
       unawaited(_closeAttempt('failed'));
-      // Any other SDK/platform failure — never leave the spinner hanging.
       _fail('Payment could not be completed: $e');
     }
   }
@@ -644,10 +660,12 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
       // (requirement 5.10) a real receipt rather than a reference number —
       // absent on deployments that don't return it yet, which the share text
       // handles (BACKEND_SPEC.md Part TTP).
-      _receiptUrl = (data['receipt_url'] as String?)?.trim();
-      if (_receiptUrl?.isEmpty ?? false) {
-        _receiptUrl = null;
-      }
+      // Read loosely: this runs after the card was charged, and a cast that
+      // threw here left the sheet on "Confirming payment…" for good.
+      final receiptUrl = data['receipt_url'];
+      _receiptUrl = receiptUrl is String && receiptUrl.trim().isNotEmpty
+          ? receiptUrl.trim()
+          : null;
       _captureOutstanding = false;
       // Intentionally keep the Square authorization after a settled charge. An
       // in-person checkout runs many invoices for the same seller back-to-back,
@@ -664,7 +682,7 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
       // its own is not a way to offer that. The cashier now taps "Done" — one
       // extra tap at the end of a charge, in exchange for the receipt action
       // actually being reachable.
-    } on DioException catch (e) {
+    } on Object catch (e) {
       _confirmAttempts++;
       if (_confirmAttempts >= _maxConfirmAttempts) {
         // Repeated confirm failures (offline, or the backend rejecting) would
@@ -680,7 +698,7 @@ class _PaymentSheetState extends ConsumerState<PaymentSheet> {
         return;
       }
       _fail(
-        _detail(e) ??
+        (e is DioException ? _detail(e) : null) ??
             'The card was charged, but we could not confirm it. Tap to finish '
                 '— you will not be charged again.',
       );

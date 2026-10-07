@@ -50,7 +50,7 @@ class ArCameraPlatformView: NSObject, FlutterPlatformView, ARSessionDelegate {
     } else {
       sendStatus(
         status: "unsupported",
-        message: "This device doesn't support ARKit, which AR lot mode needs for camera tracking."
+        message: "Lot scanning needs ARKit camera tracking, which this iPhone doesn't support."
       )
     }
   }

@@ -18,7 +18,12 @@ import com.google.ar.core.TrackingFailureReason
 import com.google.ar.core.TrackingState
 import com.google.ar.core.exceptions.CameraNotAvailableException
 import com.google.ar.core.exceptions.NotYetAvailableException
+import com.google.ar.core.exceptions.UnavailableApkTooOldException
+import com.google.ar.core.exceptions.UnavailableArcoreNotInstalledException
+import com.google.ar.core.exceptions.UnavailableDeviceNotCompatibleException
 import com.google.ar.core.exceptions.UnavailableException
+import com.google.ar.core.exceptions.UnavailableSdkTooOldException
+import com.google.ar.core.exceptions.UnavailableUserDeclinedInstallationException
 import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
@@ -60,7 +65,12 @@ class ArSessionManager(private val activity: Activity) {
     }
 
     interface StatusListener {
-        /** One of "checking", "unsupported", "installing", "ready", "error". */
+        /** One of "checking", "unsupported", "installing", "ready", "error".
+         *
+         * "unsupported" means AR can't run on this phone at all — not certified for ARCore (the
+         * Galaxy A15/A16 among them), Play Services for AR declined or out of date — and the Dart
+         * screen answers it by scanning with the plain camera instead. "error" is reserved for a
+         * camera that failed, which the plain camera couldn't fix either. */
         fun onStatus(status: String, message: String?)
     }
 
@@ -125,7 +135,7 @@ class ArSessionManager(private val activity: Activity) {
             if (!availability.isSupported) {
                 statusListener?.onStatus(
                     "unsupported",
-                    "This device doesn't support ARCore, which AR lot mode needs for camera tracking.",
+                    "Lot scanning needs Google Play Services for AR, which this phone doesn't support.",
                 )
                 return false
             }
@@ -140,7 +150,7 @@ class ArSessionManager(private val activity: Activity) {
                 ArCoreApk.InstallStatus.INSTALLED -> Unit
             }
         } catch (e: UnavailableException) {
-            statusListener?.onStatus("error", e.message ?: e.toString())
+            statusListener?.onStatus("unsupported", unavailableMessage(e))
             return false
         }
 
@@ -162,26 +172,44 @@ class ArSessionManager(private val activity: Activity) {
             statusListener?.onStatus("ready", null)
             true
         } catch (e: UnavailableException) {
-            statusListener?.onStatus("error", e.message ?: e.toString())
+            statusListener?.onStatus("unsupported", unavailableMessage(e))
             false
         } catch (e: Exception) {
-            statusListener?.onStatus("error", e.message ?: e.toString())
+            Log.w(TAG, "AR session creation failed", e)
+            statusListener?.onStatus("error", "Lot scanning couldn't start the camera. Go back and try again.")
             false
         }
     }
 
-    /** Prefers a camera config that also exposes a CPU (YUV) image stream — the one
-     * [Frame.acquireCameraImage] reads for ML Kit — over ARCore's default, which on some devices
-     * only enables the GPU texture stream. Falls back to the default silently if no such config
-     * is offered (detection then simply never gets an image; tracking is unaffected). */
+    /** Picks the camera config whose CPU (YUV) image — the one [Frame.acquireCameraImage] reads
+     * for ML Kit — is the largest up to [MAX_CPU_IMAGE_WIDTH].
+     *
+     * **That image is the scanner's resolution, and ARCore's default is its smallest**, typically
+     * 640x480. This used to take the first config offered (every config has a CPU image, so the
+     * old "has one" test always passed on the first), which in practice was usually that 640x480: a
+     * lot label's QR stopped decoding at roughly half the distance the same phone reads it from
+     * on iOS, where Vision gets ARKit's full 1920x1440 frame. 1280 wide doubles the pixels across
+     * a code without making the per-frame luma copy (below) or ML Kit's pass expensive enough to
+     * cut the detection rate. Configs at 30 fps are preferred, since a 60 fps config costs
+     * tracking headroom for nothing this screen draws. Falls back to ARCore's default silently.
+     *
+     * Unverified on hardware: if a device's tracking degrades with the larger image, lowering
+     * [MAX_CPU_IMAGE_WIDTH] to 640 restores the old behaviour exactly. */
     private fun selectCpuImageCameraConfig(session: Session) {
         try {
             val filter = CameraConfigFilter(session)
                 .setFacingDirection(CameraConfig.FacingDirection.BACK)
             val configs = session.getSupportedCameraConfigs(filter)
-            val withCpuImage = configs.firstOrNull { it.imageSize.width > 0 }
-            if (withCpuImage != null) {
-                session.cameraConfig = withCpuImage
+            val best = configs
+                .filter { it.imageSize.width in 1..MAX_CPU_IMAGE_WIDTH }
+                .maxWithOrNull(
+                    compareBy<CameraConfig>(
+                        { it.fpsRange.upper <= 30 },
+                        { it.imageSize.width * it.imageSize.height },
+                    ),
+                )
+            if (best != null) {
+                session.cameraConfig = best
             }
         } catch (e: Exception) {
             Log.w(TAG, "camera config selection failed, using ARCore default", e)
@@ -378,6 +406,29 @@ class ArSessionManager(private val activity: Activity) {
 
     companion object {
         private const val TAG = "ArSessionManager"
+
+        /** See [selectCpuImageCameraConfig]. */
+        private const val MAX_CPU_IMAGE_WIDTH = 1280
+
+        /** What the explainer screen says for each way ARCore can be missing. These used to show
+         * the exception's own text — often just its class name, e.g. after the user declined the
+         * Play Services for AR install — which tells a bidder nothing they can act on. */
+        private fun unavailableMessage(e: UnavailableException): String {
+            Log.w(TAG, "ARCore unavailable", e)
+            return when (e) {
+                is UnavailableUserDeclinedInstallationException ->
+                    "Lot scanning needs Google Play Services for AR. Install it when asked, or " +
+                        "from the Play Store, then open lot scanning again."
+                is UnavailableArcoreNotInstalledException, is UnavailableApkTooOldException ->
+                    "Lot scanning needs the latest Google Play Services for AR. Update it from " +
+                        "the Play Store, then open lot scanning again."
+                is UnavailableSdkTooOldException ->
+                    "Lot scanning needs a newer version of this app. Update it from the Play Store."
+                is UnavailableDeviceNotCompatibleException ->
+                    "Lot scanning needs Google Play Services for AR, which this phone doesn't support."
+                else -> "Lot scanning couldn't start on this phone. Go back and try again."
+            }
+        }
 
         private fun backCameraSensorOrientation(activity: Activity): Int = try {
             val manager = activity.getSystemService(Context.CAMERA_SERVICE) as CameraManager

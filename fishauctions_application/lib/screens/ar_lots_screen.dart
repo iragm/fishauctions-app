@@ -18,6 +18,7 @@ import '../utils/ar_geometry.dart';
 import '../utils/lot_qr.dart';
 import '../utils/platform_bridge.dart';
 import '../widgets/ar_camera_view.dart';
+import '../widgets/fallback_scanner_view.dart';
 
 /// Lot scanning: a live camera view that recognizes lot-label QR codes and
 /// overlays what they are. Reached from the web's app-only buttons —
@@ -127,6 +128,13 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
   /// mounted (that's what starts the native session in the first place).
   String _arStatus = 'checking';
   String? _arStatusMessage;
+
+  /// This phone can't run AR (not ARCore-certified, Play Services for AR
+  /// declined, or ARCore never answered), so the screen scans with the plain
+  /// camera instead ([FallbackScannerView]). Latched: once the AR view is
+  /// unmounted nothing can report a better answer, and flipping back would
+  /// hand the camera between two owners.
+  bool _plainCamera = false;
 
   late final ArSessionController _session;
 
@@ -293,10 +301,14 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
   void _onArCameraEvent(ArCameraEvent event) {
     switch (event) {
       case ArStatusUpdate(:final status, :final message):
-        if (mounted) {
+        if (mounted && !_plainCamera) {
           setState(() {
             _arStatus = status;
             _arStatusMessage = message;
+            if (status == 'unsupported') {
+              debugPrint('Lot scanning: no AR ($message); using the camera');
+              _plainCamera = true;
+            }
           });
         }
       case ArPoseUpdate(
@@ -651,9 +663,9 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
   );
 
   Widget _buildScanner() {
-    // ARCore/ARKit reported this device/build can't do AR tracking at all —
-    // nothing useful to show behind the camera view in that case.
-    if (_arStatus == 'unsupported' || _arStatus == 'error') {
+    // The camera itself failed. A phone that merely can't do AR never gets
+    // here — it scans with the plain camera ([_plainCamera]).
+    if (_arStatus == 'error' && !_plainCamera) {
       return _PermissionExplainer(
         message:
             _arStatusMessage ??
@@ -690,11 +702,14 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
         return Stack(
           fit: StackFit.expand,
           children: [
-            const ArCameraView(),
+            if (_plainCamera)
+              FallbackScannerView(onDetections: _onDetections)
+            else
+              const ArCameraView(),
             // Session still starting up (checking availability, or Google
             // Play Services for AR / an ARKit warm-up is installing) — the
             // camera view is mounted but has nothing to show yet.
-            if (_arStatus != 'ready')
+            if (!_plainCamera && _arStatus != 'ready')
               const ColoredBox(
                 color: Colors.black54,
                 child: Center(child: CircularProgressIndicator()),
@@ -706,7 +721,7 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
                 top: 8,
                 left: 12,
                 right: 12,
-                child: _LocateBanner(state: locate),
+                child: _LocateBanner(state: locate, tracking: !_plainCamera),
               ),
             if (cardMeta != null)
               Positioned(
@@ -774,13 +789,15 @@ class _ArLotsScreenState extends State<ArLotsScreen> {
       return null;
     }
     final aim = _session.aimTo(position.x, position.y);
+    // Without AR there is no yaw, so a pose solved from earlier sightings
+    // goes stale the moment the phone turns: only the labels in view count.
     final projected =
         mapToScreen?.project(Offset(position.x, position.y)) ??
-        _projectFromPose(aim, widgetSize);
+        (_plainCamera ? null : _projectFromPose(aim, widgetSize));
     if (projected == null) {
       return null;
     }
-    final distance = aim?.distanceM;
+    final distance = _plainCamera ? null : aim?.distanceM;
     final inset = Rect.fromLTWH(
       24,
       24,
@@ -1220,13 +1237,23 @@ String formatDistance(double distanceM) => distanceM < 3
 /// user's position relative to the lot isn't known yet, so all we can do is
 /// ask for scans (or say the lot isn't on the map at all).
 class _LocateBanner extends StatelessWidget {
-  const _LocateBanner({required this.state});
+  const _LocateBanner({required this.state, required this.tracking});
 
   final LocateState state;
+
+  /// False on the plain-camera fallback: no motion tracking, so the lot can
+  /// only be marked from mapped labels in view, never pointed to from memory.
+  final bool tracking;
 
   @override
   Widget build(BuildContext context) {
     final (Widget leading, String text) = switch (state) {
+      LocateNeedScans() || LocateAim() when !tracking => (
+        const Icon(Icons.explore, color: Colors.white),
+        'Point the camera at labels near this lot. With three mapped labels '
+            'in view, it\'s marked on screen. (This phone can\'t track '
+            'movement, so it can\'t point the way from farther off.)',
+      ),
       LocateUnmapped() => (
         const Icon(Icons.location_off, color: Colors.white70),
         "This lot hasn't been mapped yet. Scanning nearby labels helps "
