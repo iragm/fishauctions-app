@@ -1,4 +1,4 @@
-# Bug reports and feature requests go through the website (pick "App" there), into the queue the owner plans from.
+# Bug reports and feature requests go through the website, into the queue the owner plans from.
 blank_issues_enabled: false
 contact_links:
   - name: Report a bug or request a feature
