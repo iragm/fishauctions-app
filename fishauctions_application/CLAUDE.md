@@ -4,9 +4,9 @@
 
 A Flutter client for FishAuctions: **a thin WebView shell + a native hardware layer**. The WebView loads the Django web UI (JWT bridged into a cookie session); native code handles only what the web can't reach — Square Tap to Pay, Bluetooth label printing, camera/QR scanning, speech.
 
-Backend: https://github.com/iragm/fishauctions, with a read-only local checkout at `/home/user/staging/fishauctions`. Use it to check what endpoints and fields actually exist.
+Backend: https://github.com/iragm/fishauctions. Use a checkout of it to check what endpoints and fields actually exist.
 
-- **Never edit `/home/user/staging/fishauctions`.** Spec backend changes into `BACKEND_SPEC.md` and hand them over.
+- **A change that needs the backend changes the backend too.** Build that half in the backend repository, following its own `CLAUDE.md` and its `staging-flow` skill (it lands on `staging`), and say in this repo's PR which backend commit must be on production before the app is released. Never edit `/home/user/staging/fishauctions`: that checkout is the staging server's.
 - **Prefer the backend over native/local logic.** Native is only for hardware, true offline, or a platform API with no web equivalent.
 
 ## Running
@@ -55,7 +55,7 @@ ar/lots/ · ar/observations/ · ar/events/ · ar/positions/
 offline/snapshot/ · offline/sync/
 checkin/ping/ · checkin/join/ · checkin/set-location/
 payments/create/ · payments/confirm/ · payments/authorization/
-notifications/prefs/    ← NOT implemented (BACKEND_SPEC Part N)
+notifications/prefs/    ← NOT implemented (Part N)
 ```
 
 ## Auth — account required
@@ -342,4 +342,4 @@ Workflows in `.github/workflows/` (repo root, above `fishauctions_application/`)
 - **Recruit volunteers** (Part 7) — entirely web/backend.
 - **Voice set-winners has never completed a real session on hardware.** Two iOS defects that would have ended one were fixed 2026-09-03 (stale callbacks, audio session) — still unproven, but for better reasons than before. The settled-partial commit (2026-09-11) is unit-tested only; `commit_after_ms` wants tuning in a hall.
 - **Printing changes of 2026-09-11 shipped without a printer in hand**: batch fetch, connection priority, status-judged failures. The first hardware step is one run's `Label run:` log line on the Y486BT, plus a deliberate jam to see whether `failed` fills.
-- **`BACKEND_SPEC.md` is cleared after each round of backend changes**, so "Part X" references here may point at a section that already shipped and was removed.
+- **"Part X" and `BACKEND_SPEC.md Part X`** here and in the Dart sources name sections of a backend hand-off file that is gone: backend work is now done directly. A section that didn't ship is in its history (`git log -p -- fishauctions_application/BACKEND_SPEC.md`).
