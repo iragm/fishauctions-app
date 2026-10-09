@@ -4,9 +4,9 @@
 
 A Flutter client for FishAuctions: **a thin WebView shell + a native hardware layer**. The WebView loads the Django web UI (JWT bridged into a cookie session); native code handles only what the web can't reach — Square Tap to Pay, Bluetooth label printing, camera/QR scanning, speech.
 
-Backend: https://github.com/iragm/fishauctions, with a read-only local checkout at `/home/user/staging/fishauctions`. Use it to check what endpoints and fields actually exist.
+Backend: https://github.com/iragm/fishauctions. Use a checkout of it to check what endpoints and fields actually exist.
 
-- **Never edit `/home/user/staging/fishauctions`.** Spec backend changes into `BACKEND_SPEC.md` and hand them over.
+- **A change that needs the backend changes the backend too.** Build that half in the backend repository, following its own `CLAUDE.md` and its `staging-flow` skill (it lands on `staging`), and say in this repo's PR which backend commit must be on production before the app is released. Never edit `/home/user/staging/fishauctions`: that checkout is the staging server's.
 - **Prefer the backend over native/local logic.** Native is only for hardware, true offline, or a platform API with no web equivalent.
 
 ## Running
@@ -55,7 +55,7 @@ ar/lots/ · ar/observations/ · ar/events/ · ar/positions/
 offline/snapshot/ · offline/sync/
 checkin/ping/ · checkin/join/ · checkin/set-location/
 payments/create/ · payments/confirm/ · payments/authorization/
-notifications/prefs/    ← NOT implemented (BACKEND_SPEC Part N)
+notifications/prefs/    ← NOT implemented (Part N)
 ```
 
 ## Auth — account required
@@ -92,7 +92,7 @@ Only three signals: a completed **POST** `/logout/`, account deletion, and `auth
 - **Web Speech is deleted at document start** (`_hideWebSpeechApi`). Android's WebView *defines* `webkitSpeechRecognition` without wiring it to a service, so feature detection finds it, believes it, and silently does nothing.
 - **The WebView's own microphone is denied everywhere but set lot winners** (`allowsWebMicrophone`: our host, that path, OS permission behind it). That page can listen through OpenAI over WebRTC; this shell renders user-authored HTML, so no other page gets it. Granting stops native voice/dictation — last tap wins.
 - **A cancelled load is not an offline page** (`classifyLoadError`). WKWebView reports a superseded navigation (-999) and every redirect our own policy cancels (WebKit 102) as load failures; both used to raise "Can't reach the server" over a working page.
-- **The site's camera scanners get a native `BarcodeDetector` where the engine has none** (`NativeBarcodeDetector`, a document-start script + the `barcodeDetect` handler → Vision on iOS, ML Kit on Android). `camera_scanner.js` (lot queue, quick check-in, quick checkout) otherwise ran ZXing in JS on every iPhone. Installed only when `BarcodeDetector` is missing, so a WebView with Chromium's own keeps it. Page-side speedups are BACKEND_SPEC Part SCAN.
+- **The site's camera scanners get a native `BarcodeDetector` where the engine has none** (`NativeBarcodeDetector`, a document-start script + the `barcodeDetect` handler → Vision on iOS, ML Kit on Android). `camera_scanner.js` (lot queue, quick check-in, quick checkout) otherwise ran ZXing in JS on every iPhone. Installed only when `BarcodeDetector` is missing, so a WebView with Chromium's own keeps it. The page-side speedups (one POST per lot without stopping the camera, every code per frame, a visible-crop ZXing) are on the site too.
 - **No photo-library permission on Android.** The WebView file chooser is `ACTION_GET_CONTENT`/`ACTION_IMAGE_CAPTURE` and needs none; declaring `READ_MEDIA_IMAGES` puts the app under Play's Photo and Video Permissions policy.
 - **Config is re-fetched on resume if it never loaded** — Riverpod caches a `FutureProvider` failure for the process, so a cold start with no connectivity otherwise leaves Square uninitialized all session.
 
@@ -187,7 +187,7 @@ Native mirrors of the users / bulk-add / set-winners pages for the operator's **
 Hands-free selling on the set-winners page. Design and v1 post-mortem: `VOICE.md`. Both halves live; **the first real session is still unproven on hardware.**
 
 - **The server reads the words now** (iragm/fishauctions#987): the page posts transcripts to `VoiceInterpretView` and **ignores the app's `command` events**. The parser below still runs (and still bias-builds the recognizer), but what matters to the page is `transcript` with `final` + `phrase_id`, and `state` re-arms as phrase ends.
-- **The app owns only the microphone** — iOS WKWebView has no Web Speech API. The page keeps the form. It may instead use **its own microphone through OpenAI** (`web_microphone: true` in `voiceGetState`); which one is the page's choice (BACKEND_SPEC Part VOICE-APP). OpenAI is gated per account server-side (`UserData.voice_cloud_enabled`, folded into the page's `voiceConfig.cloud` and enforced by the key endpoint), so the app grants the microphone as a capability and never needs the flag.
+- **The app owns only the microphone** — iOS WKWebView has no Web Speech API. The page keeps the form. It may instead use **its own microphone through OpenAI** (`web_microphone: true` in `voiceGetState`); which one is the page's choice (its "Listen with" setting). OpenAI is gated per account server-side (`UserData.voice_cloud_enabled`, folded into the page's `voiceConfig.cloud` and enforced by the key endpoint), so the app grants the microphone as a capability and never needs the flag.
 - **Capability and permission are different questions.** `voiceGetState` runs on page load and must not prompt; it used to call `initialize()`, which requests `RECORD_AUDIO` and reports the permission as the capability — so the mic dialog fired on page render and the button hid itself on every phone that hadn't already granted it.
 - **One microphone, arbitrated by `Microphone`**; two `SpeechToText` objects contend for one platform service. Last thing tapped wins, and swapping backends stops the current holder first.
 - **Values are matched against a closed vocabulary, not parsed from free text.** `bidder_number` is a `CharField` and routinely text, which spills into lot numbers (`BOB-1`). The auction's real identifiers are expanded into spoken forms and looked up.
@@ -342,4 +342,4 @@ Workflows in `.github/workflows/` (repo root, above `fishauctions_application/`)
 - **Recruit volunteers** (Part 7) — entirely web/backend.
 - **Voice set-winners has never completed a real session on hardware.** Two iOS defects that would have ended one were fixed 2026-09-03 (stale callbacks, audio session) — still unproven, but for better reasons than before. The settled-partial commit (2026-09-11) is unit-tested only; `commit_after_ms` wants tuning in a hall.
 - **Printing changes of 2026-09-11 shipped without a printer in hand**: batch fetch, connection priority, status-judged failures. The first hardware step is one run's `Label run:` log line on the Y486BT, plus a deliberate jam to see whether `failed` fills.
-- **`BACKEND_SPEC.md` is cleared after each round of backend changes**, so "Part X" references here may point at a section that already shipped and was removed.
+- **"Part X" and `BACKEND_SPEC.md Part X`** here and in the Dart sources name sections of a backend hand-off file that is gone: backend work is now done directly. A section that didn't ship is in its history (`git log -p -- fishauctions_application/BACKEND_SPEC.md`).
