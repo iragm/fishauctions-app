@@ -2,7 +2,7 @@
 
 Status against Apple's *Tap to Pay on iPhone — App & Marketing Requirements and Review Guide* **v1.6**. We hold the **development** entitlement (2026-07-31); the **publishing** one gates TestFlight *and* the App Store and comes only after Apple reviews this checklist. Region: **US only** — so PIN-entry education is required, and fallback payment, surcharging and IFR are not applicable.
 
-Backend items are **TTP-n** in `BACKEND_SPEC.md`.
+Backend items are **TTP-n**, named after sections of the retired `BACKEND_SPEC.md` (see its git history).
 
 ## Where the code is
 
