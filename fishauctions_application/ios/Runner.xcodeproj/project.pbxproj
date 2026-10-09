@@ -20,6 +20,7 @@
 		7B4A9C0B0000000000000000 /* WalletPassPresenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B4A9C0A0000000000000000 /* WalletPassPresenter.swift */; };
 		7B4A9C0D0000000000000000 /* TapToPayEducation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B4A9C0C0000000000000000 /* TapToPayEducation.swift */; };
 		7B4A9C0F0000000000000000 /* BiasedSpeechBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B4A9C0E0000000000000000 /* BiasedSpeechBridge.swift */; };
+		7B4A9C110000000000000000 /* CrashCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B4A9C100000000000000000 /* CrashCapture.swift */; };
 		97C146FC1CF9000F007C117D /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FA1CF9000F007C117D /* Main.storyboard */; };
 		97C146FE1CF9000F007C117D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FD1CF9000F007C117D /* Assets.xcassets */; };
 		97C147011CF9000F007C117D /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FF1CF9000F007C117D /* LaunchScreen.storyboard */; };
@@ -65,6 +66,7 @@
 		7B4A9C0A0000000000000000 /* WalletPassPresenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WalletPassPresenter.swift; sourceTree = "<group>"; };
 		7B4A9C0C0000000000000000 /* TapToPayEducation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TapToPayEducation.swift; sourceTree = "<group>"; };
 		7B4A9C0E0000000000000000 /* BiasedSpeechBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BiasedSpeechBridge.swift; sourceTree = "<group>"; };
+		7B4A9C100000000000000000 /* CrashCapture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CrashCapture.swift; sourceTree = "<group>"; };
 		7AFA3C8E1D35360C0083082E /* Release.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = Release.xcconfig; path = Flutter/Release.xcconfig; sourceTree = "<group>"; };
 		9740EEB21CF90195004384FC /* Debug.xcconfig */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.xcconfig; name = Debug.xcconfig; path = Flutter/Debug.xcconfig; sourceTree = "<group>"; };
 		9740EEB31CF90195004384FC /* Generated.xcconfig */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.xcconfig; name = Generated.xcconfig; path = Flutter/Generated.xcconfig; sourceTree = "<group>"; };
@@ -141,6 +143,7 @@
 				7B4A9C0A0000000000000000 /* WalletPassPresenter.swift */,
 				7B4A9C0C0000000000000000 /* TapToPayEducation.swift */,
 				7B4A9C0E0000000000000000 /* BiasedSpeechBridge.swift */,
+				7B4A9C100000000000000000 /* CrashCapture.swift */,
 				74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */,
 				7B4A9C070000000000000000 /* Ar */,
 			);
@@ -320,6 +323,7 @@
 				7B4A9C0B0000000000000000 /* WalletPassPresenter.swift in Sources */,
 				7B4A9C0D0000000000000000 /* TapToPayEducation.swift in Sources */,
 				7B4A9C0F0000000000000000 /* BiasedSpeechBridge.swift in Sources */,
+				7B4A9C110000000000000000 /* CrashCapture.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

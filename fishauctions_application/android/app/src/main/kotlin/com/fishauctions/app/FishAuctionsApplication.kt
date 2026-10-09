@@ -22,6 +22,8 @@ import com.squareup.sdk.mobilepayments.MobilePaymentsSdk
 class FishAuctionsApplication : Application() {
     override fun onCreate() {
         super.onCreate()
+        // First, so a crash anywhere later in this process still reaches the next launch.
+        CrashCapture.install(this)
         val cached = cachedSquareApplicationId(this) ?: return
         try {
             MobilePaymentsSdk.initialize(cached, this)
