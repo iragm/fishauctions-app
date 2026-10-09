@@ -282,7 +282,6 @@ Also iOS-only: the plugin's `Location.toMap()` omits `merchantId` and `cardProce
 - **Reader status comes from the reader *list*, not only the change callback** (`syncStatusFromReaders`). Square emits reader events on change, and the app can't subscribe until it has authorized — which is the thing that arms the reader — so a warm reader routinely produces no event at all, `status` sits at `unknown` for the process, and the payment sheet burns its full 12 s "initializing" wait before *every* charge on a reader that was ready all along. Seeded after each subscribe, at the end of `prepare()`, in `diagnose()`, and polled during `_awaitReaderReady`.
 - **A declined charge must still be able to send a receipt** (5.10, "approved *or* declined"), so the success view no longer auto-dismisses — a window that closes itself isn't a way to offer an action.
 - **"Update your iOS" and "this iPhone will never work" are different messages** (1.4). Square collapses both into `isDeviceCapable() == false`, so the OS version is read natively; below 17.6 is reported as an update.
-- **Open**: the invoice page offers a card charge on a settled invoice (Part TTP-8). `invoice.html` gates on `status != "PAID"`, missing a zero balance, one covered by payments, and a seller the club owes. Template-only; not fixable app-side, since the app has no balance until `create` answers.
 
 ### Connect flows (Square, PayPal, Mailchimp, Google Calendar, Discord)
 
@@ -295,7 +294,8 @@ Also iOS-only: the plugin's `Location.toMap()` omits `merchantId` and `cardProce
 - **A dismissal is not a failure.** Only Square ends with a `fishauctions-oauth://` redirect; the rest succeed and leave the user on our page with the sheet open, and tapping Done is reported as a cancellation — indistinguishable from a real back-out, and both mean "re-read state and say nothing". Never show "connection failed" on a cancel.
 - **Not awaited from the navigation callbacks** — the sheet stays up for minutes and WKWebView holds its decision handler open until `shouldOverrideUrlLoading` returns.
 - **A separate `fishauctions-oauth://` scheme on purpose**: `fishauctions://` stays unregistered with the OS, and on Android the plugin uses Chrome's Auth Tab, which returns to the launching activity.
-- **Still owed** (Part TTP-7): the callback page should redirect to `fishauctions-oauth://square-connected` on the `session_opened_by_app` branch, with "tap Done" left visible underneath. Until then the auto-close never fires.
+- **Square's callback page closes the sheet**: on the `session_opened_by_app` branch it redirects to `fishauctions-oauth://square-connected`, with "tap Done" left visible underneath.
+- **`/tap-to-pay` shows the Square step before Apple's terms.** `payments/authorization/` sends `setup_step`/`setup_label`/`setup_path` when the admin's Square account isn't usable (not approved, not connected, connected before Tap to Pay); the button loads that page in the shell. Terms offered without a seller could only fail.
 
 ## CI/CD
 
@@ -338,7 +338,7 @@ Workflows in `.github/workflows/` (repo root, above `fishauctions_application/`)
 - **Remote print backend** (Part R1–R6).
 - **AR island detection/merging.**
 - **Check-in**: the `promote_this_auction` filter (Part CHECKIN-1); and the app half is untested — no `checkin_service_test.dart` at all.
-- **Tap to Pay**: the publishing entitlement (Apple's), Part TTP-7 (callback redirect), Part TTP-8 (settled-invoice gate).
+- **Tap to Pay**: the publishing entitlement (Apple's).
 - **Recruit volunteers** (Part 7) — entirely web/backend.
 - **Voice set-winners has never completed a real session on hardware.** Two iOS defects that would have ended one were fixed 2026-09-03 (stale callbacks, audio session) — still unproven, but for better reasons than before. The settled-partial commit (2026-09-11) is unit-tested only; `commit_after_ms` wants tuning in a hall.
 - **Printing changes of 2026-09-11 shipped without a printer in hand**: batch fetch, connection priority, status-judged failures. The first hardware step is one run's `Label run:` log line on the Y486BT, plus a deliberate jam to see whether `failed` fills.

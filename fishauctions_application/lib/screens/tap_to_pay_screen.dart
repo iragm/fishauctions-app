@@ -3,11 +3,13 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../config/environment.dart';
 import '../models/tap_to_pay_diagnostics.dart';
 import '../models/tap_to_pay_status.dart';
 import '../providers/config_provider.dart';
+import '../services/deep_link_service.dart';
 import '../services/square_payment_service.dart';
 import '../services/tap_to_pay_service.dart';
 import '../widgets/tap_to_pay_branding.dart';
@@ -148,6 +150,19 @@ class _TapToPayScreenState extends ConsumerState<TapToPayScreen> {
           ),
         ),
       );
+    }
+  }
+
+  /// Loads [path] in the shell underneath and closes this screen. The page
+  /// itself runs the Square connect flow, or the request-access email.
+  void _openSitePage(String path) {
+    DeepLinkService.instance.offer(
+      Uri.parse(EnvironmentConfig.webBaseUrl).resolve(path),
+    );
+    if (context.canPop()) {
+      context.pop();
+    } else {
+      context.go('/');
     }
   }
 
@@ -340,6 +355,30 @@ class _TapToPayScreenState extends ConsumerState<TapToPayScreen> {
                   'Only an auction or club admin with a connected Square '
                       'account can set up $tapToPayName. Ask the organizer to '
                       'connect Square and give you admin access.',
+            );
+          }
+          // An admin whose Square account isn't usable yet (approval pending,
+          // not connected, connected before Tap to Pay) can't be authorized,
+          // so Apple's terms would only fail. Name the step and open the page
+          // that takes it (TTP-9). Server-authored, like 3.8.1's message.
+          if (eligibility != null && eligibility.needsSquareSetup) {
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _StatusCard(
+                  icon: Icons.storefront_outlined,
+                  tone: _Tone.info,
+                  title: 'Set up card payments first',
+                  body:
+                      eligibility.message ??
+                      'Connect a Square account to use $tapToPayName.',
+                ),
+                const SizedBox(height: 16),
+                FilledButton(
+                  onPressed: () => _openSitePage(eligibility.setupPath!),
+                  child: Text(eligibility.setupLabel ?? 'Continue'),
+                ),
+              ],
             );
           }
           return Column(

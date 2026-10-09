@@ -82,6 +82,32 @@ void main() {
       expect(e.canCharge, isFalse);
     });
 
+    test('a Square step names the page that takes it', () {
+      final e = TapToPayEligibility.fromJson(const {
+        'eligible': true,
+        'can_accept_terms': true,
+        'setup_step': 'request_access',
+        'setup_label': 'Request access',
+        'setup_path': '/square/',
+        'message': 'Card payments are switched on by hand.',
+      });
+      expect(e.needsSquareSetup, isTrue);
+      expect(e.setupPath, '/square/');
+      expect(e.setupLabel, 'Request access');
+      expect(e.canCharge, isFalse);
+    });
+
+    test('a setup path that is not site-relative is ignored', () {
+      for (final path in ['https://evil.example/', '//evil.example/x', 'x']) {
+        final e = TapToPayEligibility.fromJson({
+          'eligible': true,
+          'can_accept_terms': true,
+          'setup_path': path,
+        });
+        expect(e.needsSquareSetup, isFalse, reason: path);
+      }
+    });
+
     test('empty credential strings count as absent', () {
       final e = TapToPayEligibility.fromJson(const {
         'eligible': true,
