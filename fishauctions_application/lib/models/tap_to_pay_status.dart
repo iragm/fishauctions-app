@@ -105,6 +105,8 @@ class TapToPayEligibility {
     this.locationId,
     this.sellerName,
     this.message,
+    this.setupLabel,
+    this.setupPath,
   });
 
   factory TapToPayEligibility.fromJson(Map<String, dynamic> json) =>
@@ -115,6 +117,8 @@ class TapToPayEligibility {
         locationId: _nonEmpty(json['location_id']),
         sellerName: _nonEmpty(json['seller_name']),
         message: _nonEmpty(json['message']),
+        setupLabel: _nonEmpty(json['setup_label']),
+        setupPath: _sitePath(json['setup_path']),
       );
 
   /// Whether this user can take Tap to Pay payments at all — an admin of at
@@ -143,11 +147,30 @@ class TapToPayEligibility {
   /// falls back to its own generic copy.
   final String? message;
 
+  /// The site page that takes an eligible admin past a missing Square account
+  /// (approval not granted yet, not connected, or connected before Tap to Pay),
+  /// with its button label. Null → nothing stands in the way of Apple's terms.
+  ///
+  /// Without it a new organizer was offered the terms, Square couldn't
+  /// authorize, and the only answer was "cancelled or failed" — a dead end
+  /// that reads as the feature not existing (TTP-9).
+  final String? setupLabel;
+  final String? setupPath;
+
+  /// Whether the Square account still needs a step before Tap to Pay.
+  bool get needsSquareSetup => setupPath != null;
+
   /// Whether there are credentials to warm the reader with.
   bool get canCharge =>
       eligible &&
       (accessToken?.isNotEmpty ?? false) &&
       (locationId?.isNotEmpty ?? false);
+
+  /// A site-relative path only: this is loaded in the shell.
+  static String? _sitePath(Object? v) {
+    final s = _nonEmpty(v);
+    return s != null && s.startsWith('/') && !s.startsWith('//') ? s : null;
+  }
 
   static String? _nonEmpty(Object? v) {
     final s = v?.toString() ?? '';

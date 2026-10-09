@@ -2,8 +2,6 @@
 
 Status against Apple's *Tap to Pay on iPhone — App & Marketing Requirements and Review Guide* **v1.6**. We hold the **development** entitlement (2026-07-31); the **publishing** one gates TestFlight *and* the App Store and comes only after Apple reviews this checklist. Region: **US only** — so PIN-entry education is required, and fallback payment, surcharging and IFR are not applicable.
 
-Backend items are **TTP-n** in `BACKEND_SPEC.md`.
-
 ## Where the code is
 
 | Piece | File |
@@ -43,7 +41,7 @@ Rule 1 was broken in three places until 2026-08-30, including the "Set up Tap to
 | # | Req | Status |
 |---|---|---|
 | 2.1 | New user can discover account creation + Tap to Pay | Done |
-| 2.2 | Fully digital onboarding, in-app on iPhone | **Two open.** Fixed 2026-09-01: `/square/connect/` bounced the merchant to the web login form, since the browser view carries Safari's cookies, not ours — now opened through an `auth/web-session/` handoff. Open: the flow strands the merchant with only the system Done button (**TTP-7**); and a new organizer can't start it until an admin trusts them (**TTP-9**) |
+| 2.2 | Fully digital onboarding, in-app on iPhone | Done. `/square/connect/` opens through an `auth/web-session/` handoff (2026-09-01), the callback closes the browser view with `fishauctions-oauth://square-connected` (**TTP-7**), and an admin whose Square account isn't usable yet sees the step and a button to the page that takes it, not Apple's terms (**TTP-9**) |
 | 2.3 | Onboarding under 15 minutes | Seconds of merchant effort, gated by a human approval step. Declared, not claimed as a clean pass |
 
 ## 3. Enabling
@@ -101,7 +99,7 @@ Rule 1 was broken in three places until 2026-08-30, including the "Set up Tap to
 
 `UserData.is_trusted` gates accepting payments and `UserData.square_enabled` gates the Square connect entry points; neither is set for a new account. **Keep it** — a marketplace letting anyone collect money from strangers has a fraud problem, and Apple's own 3.8/3.8.1 contemplate exactly this shape of control.
 
-Two things to be straight about in the submission: 2.3 is not a clean pass while a human presses a button (declaring it is cheaper than a reviewer finding it); and **the gate is currently invisible**, which is the part Apple would object to — with `square_enabled` false there is no "pending approval" anywhere, so the merchant meets a dead end and concludes the feature doesn't exist (**TTP-9**).
+Two things to be straight about in the submission: 2.3 is not a clean pass while a human presses a button (declaring it is cheaper than a reviewer finding it); and the gate must stay visible: `/tap-to-pay` names it ("Request access") from the authorization payload's `setup_step`, instead of offering terms that can only fail (**TTP-9**).
 
 **Do not disable it to film the videos.** Pre-approve the test account and narrate the review step in video 1.
 
