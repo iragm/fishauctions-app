@@ -24,6 +24,8 @@ import Vision
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
+    // First, so a crash anywhere later in this launch still reaches the next one (CrashCapture.swift).
+    CrashCapture.shared.start()
     // Square wants initialize() inside didFinishLaunching, but our app id is
     // server-driven (/api/mobile/config/ — one binary serves any deployment).
     // So: every launch after the first successful config fetch initializes
@@ -83,6 +85,9 @@ import Vision
         // getting it wrong here is invisible — it looks exactly like an iPhone
         // too old to have the sheet at all.
         TapToPayEducationPresenter.present(result: result)
+      case "takePendingCrashes":
+        // Native crashes and hangs iOS reported since the last call; Dart sends them on.
+        result(CrashCapture.shared.take())
       case "osVersion":
         // Drives the "update your iPhone" message Apple's requirement 1.4 asks
         // for: on iOS below the Tap to Pay floor the app must say the OS is the

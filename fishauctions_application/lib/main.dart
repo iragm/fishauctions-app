@@ -7,10 +7,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'config/router.dart';
 import 'config/theme.dart';
 import 'constants/app_constants.dart';
+import 'services/crash_reporter.dart';
 import 'services/shortcut_service.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  // First, so an error anywhere after this is reported; sends what earlier
+  // launches left behind, native crashes included, without blocking launch.
+  CrashReporter.instance.install();
   // Android 15+ forces edge-to-edge (the system bars can't be made opaque), so
   // the bars are transparent by design — the app reserves space for them with
   // SafeArea instead. Light icons keep the nav/status buttons legible over the

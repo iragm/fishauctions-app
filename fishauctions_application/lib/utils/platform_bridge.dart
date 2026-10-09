@@ -360,6 +360,23 @@ class PlatformBridge {
     _squareInitialized = true;
   }
 
+  /// Native crashes and hangs the OS reported since the last call, with this
+  /// phone's model and OS: `{device, os_version, crashes: [...]}`. The native
+  /// side deletes them once read (`CrashCapture.kt` / `CrashCapture.swift`).
+  /// An empty map on any channel error: a crash report is never worth a crash.
+  static Future<Map<String, Object?>> takePendingCrashes() async {
+    try {
+      final answer = await _channel.invokeMethod<Map<Object?, Object?>>(
+        'takePendingCrashes',
+      );
+      return answer?.cast<String, Object?>() ?? const {};
+    } on PlatformException {
+      return const {};
+    } on MissingPluginException {
+      return const {};
+    }
+  }
+
   /// Whether [initializeSquare] has completed successfully in this process.
   ///
   /// **This is a crash guard, not a convenience.** Every Square plugin module

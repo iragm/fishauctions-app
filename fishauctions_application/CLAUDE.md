@@ -44,6 +44,7 @@ GET  auth/me/
 POST auth/web-session/ → single-use handoff token (300 s TTL) for cookie sessions
 POST devices/register/ upsert by device_uuid; call after login
 GET  config/           square/firebase/voice/menu blocks, terms & privacy URLs
+POST crashes/          {crashes: [...]} the app's own crash reports; no auth needed
 ```
 
 Access tokens 60 min; refresh 30 days, rotated and blacklisted.
@@ -296,6 +297,14 @@ Also iOS-only: the plugin's `Location.toMap()` omits `merchantId` and `cardProce
 - **A separate `fishauctions-oauth://` scheme on purpose**: `fishauctions://` stays unregistered with the OS, and on Android the plugin uses Chrome's Auth Tab, which returns to the launching activity.
 - **Square's callback page closes the sheet**: on the `session_opened_by_app` branch it redirects to `fishauctions-oauth://square-connected`, with "tap Done" left visible underneath.
 - **`/tap-to-pay` shows the Square step before Apple's terms.** `payments/authorization/` sends `setup_step`/`setup_label`/`setup_path` when the admin's Square account isn't usable (not approved, not connected, connected before Tap to Pay); the button loads that page in the shell. Terms offered without a seller could only fail.
+
+### Crash reports
+
+Neither store lets an agent read its crash reports (Apple has no API at all), so the app sends its own to `crashes/`, and the backend's hourly check reads them through the admin connector's `list_app_crashes` and fixes new ones.
+
+- **Dart errors as they happen** (`CrashReporter`, hooked first thing in `main`); **native crashes and hangs on the next launch**, from `CrashCapture.kt` (an uncaught-exception handler, plus `ApplicationExitInfo` for native crashes and ANRs) and `CrashCapture.swift` (MetricKit). Off in debug builds.
+- **Reports wait in one file until the server has them**, so a crash offline at an auction hall goes out later. A 400 drops the batch; anything else keeps it.
+- **iOS native stacks are unsymbolicated** (`binary +offset`), and an Android native crash carries only its signal and description: its tombstone is a binary protobuf.
 
 ## CI/CD
 

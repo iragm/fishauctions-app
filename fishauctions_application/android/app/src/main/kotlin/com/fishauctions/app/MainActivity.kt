@@ -39,6 +39,8 @@ class MainActivity : FlutterActivity() {
             .setMethodCallHandler { call, result ->
                 when (call.method) {
                     "getSdkInt" -> result.success(Build.VERSION.SDK_INT)
+                    // Native crashes and ANRs since the last call; Dart sends them on.
+                    "takePendingCrashes" -> result.success(CrashCapture.take(applicationContext))
                     "isTapToPayCapable" -> result.success(isTapToPayCapable())
                     "isNfcEnabled" -> result.success(isNfcEnabled())
                     "isDeveloperModeEnabled" -> result.success(isDeveloperModeEnabled())
