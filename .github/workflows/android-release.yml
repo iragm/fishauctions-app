@@ -14,6 +14,11 @@ on:
         type: choice
         default: internal
         options: [internal, alpha, beta, production]
+      status:
+        description: "completed rolls out to testers; draft waits in the Play Console (the only status Play accepts until the app's first rollout)"
+        type: choice
+        default: completed
+        options: [completed, draft]
 
 concurrency:
   group: android-release-${{ github.ref }}
@@ -161,8 +166,10 @@ jobs:
       # PLAY_SERVICE_ACCOUNT_JSON secret.
       #
       # status: completed publishes the release to the chosen track's testers
-      # automatically. Switch back to `draft` if you ever want to review and
-      # promote a build by hand in the Play Console before it goes live.
+      # automatically. Play refuses it ("Only releases with status draft may be
+      # created on draft app") until the app's first release has been rolled
+      # out by hand in the Console, so run with status: draft until then, or
+      # whenever you want to review a build there before it goes live.
       - name: Upload to Google Play (${{ inputs.track }} track)
         uses: r0adkll/upload-google-play@v1
         with:
@@ -170,7 +177,7 @@ jobs:
           packageName: com.fishauctions.app
           releaseFiles: fishauctions_application/build/app/outputs/bundle/prodRelease/app-prod-release.aab
           track: ${{ inputs.track }}
-          status: completed
+          status: ${{ inputs.status }}
 
   # iOS builds live in the sibling ios-release.yml (a macOS runner can't share
   # this Linux job). It compiles unsigned today; its signed/TestFlight path is
