@@ -1,6 +1,6 @@
 // GENERATED CODE - DO NOT MODIFY BY HAND
 // coverage:ignore-file
-// ignore_for_file: type=lint
+// ignore_for_file: type=lint, type=warning, deprecated_member_use, deprecated_member_use_from_same_package
 // ignore_for_file: unused_element, deprecated_member_use, deprecated_member_use_from_same_package, use_function_type_syntax_for_parameters, unnecessary_const, avoid_init_to_null, invalid_override_different_default_values_named, prefer_expression_function_bodies, annotate_overrides, invalid_annotation_target, unnecessary_question_mark
 
 part of 'auth_models.dart';
@@ -9,6 +9,7 @@ part of 'auth_models.dart';
 // FreezedGenerator
 // **************************************************************************
 
+// GENERATED CODE - DO NOT MODIFY BY HAND
 // dart format off
 T _$identity<T>(T value) => value;
 
@@ -66,7 +67,7 @@ class _$TokenPairCopyWithImpl<$Res>
 /// Create a copy of TokenPair
 /// with the given fields replaced by the non-null parameter values.
 @pragma('vm:prefer-inline') @override $Res call({Object? access = null,Object? refresh = null,}) {
-  return _then(_self.copyWith(
+  return _then(TokenPair(
 access: null == access ? _self.access : access // ignore: cast_nullable_to_non_nullable
 as String,refresh: null == refresh ? _self.refresh : refresh // ignore: cast_nullable_to_non_nullable
 as String,
@@ -332,7 +333,7 @@ class _$AppUserCopyWithImpl<$Res>
 /// Create a copy of AppUser
 /// with the given fields replaced by the non-null parameter values.
 @pragma('vm:prefer-inline') @override $Res call({Object? id = null,Object? username = null,Object? email = null,Object? firstName = null,Object? lastName = null,Object? isStaff = null,Object? dateJoined = freezed,}) {
-  return _then(_self.copyWith(
+  return _then(AppUser(
 id: null == id ? _self.id : id // ignore: cast_nullable_to_non_nullable
 as int,username: null == username ? _self.username : username // ignore: cast_nullable_to_non_nullable
 as String,email: null == email ? _self.email : email // ignore: cast_nullable_to_non_nullable
@@ -613,7 +614,7 @@ class _$LoginCredentialsCopyWithImpl<$Res>
 /// Create a copy of LoginCredentials
 /// with the given fields replaced by the non-null parameter values.
 @pragma('vm:prefer-inline') @override $Res call({Object? credential = null,Object? password = null,}) {
-  return _then(_self.copyWith(
+  return _then(LoginCredentials(
 credential: null == credential ? _self.credential : credential // ignore: cast_nullable_to_non_nullable
 as String,password: null == password ? _self.password : password // ignore: cast_nullable_to_non_nullable
 as String,
