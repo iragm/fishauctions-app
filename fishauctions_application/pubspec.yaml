@@ -142,6 +142,9 @@ flutter:
     # sync. Do not recolor, crop, or re-export them.
     - assets/google/sign_in_with_google_light.png
     - assets/google/sign_in_with_google_dark.png
+    # Apple's Tap to Pay on iPhone toolkit, "Hero in-app banner" (US), cropped
+    # above its placeholder CTA. See TapToPayAwarenessSheet.
+    - assets/tap_to_pay/hero_card_to_iphone.jpg
 
 # App icon generation. Source is a single 1024×1024 transparent PNG; the tool
 # fans it out to every Android density + adaptive icon and the iOS appiconset.

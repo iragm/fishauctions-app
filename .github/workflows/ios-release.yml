@@ -49,6 +49,10 @@ on:
         type: choice
         default: app-store
         options: [app-store, development]
+      dev_tools:
+        description: "Keep Troubleshooting (diagnostics, Reset for re-recording) in the build, even on prod. For filming the Tap to Pay review videos; leave off for anything a reviewer sees"
+        type: boolean
+        default: false
 
 concurrency:
   group: ios-release-${{ github.ref }}
@@ -286,6 +290,7 @@ jobs:
         run: >
           flutter build ios --config-only --release --no-codesign
           --dart-define=FLAVOR=${{ inputs.flavor }}
+          ${{ inputs.dev_tools && '--dart-define=DEV_TOOLS=true' || '' }}
           --build-number=${{ github.run_number }}
           --build-name=$BUILD_NAME
 

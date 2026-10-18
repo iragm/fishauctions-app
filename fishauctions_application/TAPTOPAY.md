@@ -94,7 +94,7 @@ Rule 1 was broken in three places until 2026-08-30, including the "Set up Tap to
 | # | Req | Status |
 |---|---|---|
 | 6.1 | Launch email from the toolkit template | Backend command exists; copy must be the toolkit's |
-| 6.2 | In-app splash from the "Hero in-app banner" | App done; **swap in toolkit artwork/copy before launch** |
+| 6.2 | In-app splash from the "Hero in-app banner" | Done: the US "Card to iPhone" hero tile, toolkit CTA and "Terms apply." disclaimers |
 | 6.3 | Push using the toolkit's value-proposition copy | Backend command exists |
 
 ## Declared: the trust gate
@@ -180,7 +180,7 @@ The entitlements are correct **in the signed binary**, not just the profile; App
 
 **Troubleshooting is built only when `EnvironmentConfig.enableDeveloperTools` is set: any debug build, plus the dev and staging flavors — never a release prod build.** A merchant has no use for an SDK reader dump, "release this device's Square authorization" is a bad button to hand someone mid-auction, and Apple reviews Tap to Pay by working the merchant flows. The flag is a compile-time `const`, so the whole subtree is dropped from the App Store build rather than merely hidden; the same flag drops the raw `Square reported: <reason>` line from the status card, leaving `describeUnavailableReason`'s merchant-facing sentence.
 
-**`--dart-define=DEV_TOOLS=true` forces it on, whatever the flavor.** The flavor alone gets this wrong here: Square issues live seller credentials on production only, so hands-on Tap to Pay work happens on a *prod*-pointing build — exactly the one the flavor rule would strip the diagnostics from. `DEV_TOOLS=false` forces it off, which is how to see what a reviewer sees. Failing that, `--dart-define=FLAVOR=staging` also brings it back, which is what `ios-release.yml`'s `development` export should use whenever the backend can serve the test — that export is also the only one that can present education (above) and therefore the only one the review videos can be recorded from.
+**`--dart-define=DEV_TOOLS=true` forces it on, whatever the flavor.** The flavor alone gets this wrong here: Square issues live seller credentials on production only, so hands-on Tap to Pay work happens on a *prod*-pointing build — exactly the one the flavor rule would strip the diagnostics from. `DEV_TOOLS=false` forces it off, which is how to see what a reviewer sees. `ios-release.yml`'s `dev_tools` input passes it. The review videos need `export_method: development` (the only export that can present education, above), `flavor: prod` (Square's live credentials) and `dev_tools: true` (the reset button between takes).
 
 Two fields read `—` on iOS and always will: the plugin's iOS `Location.toMap()` omits `merchantId` and `cardProcessingActivated`, which also makes the payment sheet's `cardProcessingActivated == false` gate dead code there.
 
@@ -196,7 +196,7 @@ Multiple process names go in **one** `-p`, separated by `|`. Expect it to stall 
 ## Before submitting
 
 1. **Copy the entitlement into `Runner.entitlements`** — only once the publishing grant arrives.
-2. **Download the Marketing Guide and Toolkit** (access page + password on p. 23 of the review guide PDF) and swap the hero banner and approved copy into `tap_to_pay_awareness.dart`.
+2. **Download the Marketing Guide and Toolkit** (access page + password on p. 23 of the review guide PDF) (done: the hero banner is in `tap_to_pay_awareness.dart`, the launch email and push copy are on the site).
 3. Optional: export `wave.3.right.circle.fill` into `assets/tap_to_pay/` and set `tapToPaySymbolAsset`.
 4. **Record the three videos.** Apple's warning: **use a second device** — Tap to Pay screens are excluded from screen recording and come out blank.
    - Onboarding: account creation → Square connect → merchant approved.
