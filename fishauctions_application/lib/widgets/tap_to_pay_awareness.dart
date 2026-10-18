@@ -6,6 +6,34 @@ import 'package:path_provider/path_provider.dart';
 import '../utils/secure_storage.dart';
 import 'tap_to_pay_branding.dart';
 
+/// The toolkit tile, registered in `pubspec.yaml`.
+const tapToPayHeroAsset = 'assets/tap_to_pay/hero_card_to_iphone.jpg';
+
+/// The guide's legal disclaimers for the hero tile, word for word.
+const tapToPayDisclaimers = [
+  (
+    '$tapToPayName Requirements',
+    '$tapToPayName requires a supported payment app and the latest version '
+        'of iOS. Update to the latest version by going to Settings > General > '
+        'Software Update. Some contactless cards may not be accepted by your '
+        'payment app. Transaction limits may apply. $tapToPayName is not '
+        'available in all markets. For $tapToPayName countries and regions, '
+        'see https://developer.apple.com/tap-to-pay/regions/.',
+  ),
+  (
+    'Apple Pay',
+    'Apple Pay is a service provided by Apple Payments Services LLC, a '
+        'subsidiary of Apple Inc. Neither Apple Inc. nor Apple Payments '
+        'Services LLC is a bank. Any card used in Apple Pay is offered by the '
+        'card issuer.',
+  ),
+  (
+    'Contactless Indicator Mark',
+    'The Contactless Indicator mark, consisting of four graduating arcs, is a '
+        'trademark owned by and used with permission of EMVCo, LLC.',
+  ),
+];
+
 /// The in-app awareness moment for Tap to Pay on iPhone — a full-screen modal
 /// telling an eligible merchant the capability exists and offering setup.
 ///
@@ -17,14 +45,15 @@ import 'tap_to_pay_branding.dart';
 /// all eligible users at least once) and marketing item **6.2** (an in-app
 /// splash screen visible to all eligible users at least once).
 ///
-/// **The artwork and final copy must come from Apple's toolkit.** The guide is
-/// unambiguous that developers "may not develop your own customized marketing
-/// and communications content, images or videos" for Tap to Pay on iPhone, and
-/// that only the Apple-approved templates (with light customization — brand
-/// colours, fonts, logo) may be used. So this renders type only: no drawing of
-/// an iPhone, no depiction of the Tap to Pay interface, no stock imagery.
-/// Dropping in the toolkit's "Hero in-app banner" is the remaining step before
-/// launch marketing — see `TAPTOPAY.md`.
+/// **The artwork and copy come from Apple's toolkit**, which forbids writing
+/// your own ("you may not develop your own customized marketing and
+/// communications content, images or videos"). The picture is the US toolkit's
+/// "Hero in-app banner" tile *Card to iPhone* (9:16), cropped above its
+/// "[Your CTA]" placeholder and baked-in "Terms apply." line, both of which are
+/// drawn here instead: the toolkit lets a partner supply its own CTA button,
+/// and its "Terms apply." has to open the full disclaimer, which a picture
+/// can't do. The disclaimers are the ones the guide requires for what the tile
+/// shows: the requirements, Apple Pay, and the contactless mark on the card.
 ///
 /// Shown at most once per install, and only to users the backend says are
 /// eligible. "Once" is the floor Apple asks for; it is deliberately not
@@ -104,76 +133,93 @@ class TapToPayAwarenessSheet extends StatelessWidget {
       ) ??
       false;
 
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(28, 16, 28, 28),
+  /// The full disclaimers behind the tile's "Terms apply.".
+  static Future<void> showTerms(BuildContext context) => showDialog<void>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text('Legal Disclaimers'),
+      content: SingleChildScrollView(
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
           children: [
-            Align(
-              alignment: Alignment.centerRight,
-              child: IconButton(
-                icon: const Icon(Icons.close),
-                tooltip: 'Close',
-                onPressed: () => Navigator.of(context).pop(false),
-              ),
-            ),
-            Expanded(
-              child: Center(
-                child: SingleChildScrollView(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const TapToPaySymbol(size: 56),
-                      if (tapToPaySymbolAsset != null)
-                        const SizedBox(height: 20),
-                      Text(
-                        'Accept payments with $tapToPayName',
-                        style: theme.textTheme.headlineMedium?.copyWith(
-                          fontWeight: FontWeight.bold,
-                          height: 1.2,
-                        ),
-                      ),
-                      const SizedBox(height: 16),
-                      Text(
-                        'You can now take contactless payments at your '
-                        'auctions right on this iPhone — contactless cards, '
-                        'Apple Pay, and other digital wallets. No extra '
-                        'terminal, no card reader to carry, no cables.',
-                        style: theme.textTheme.bodyLarge?.copyWith(
-                          height: 1.45,
-                        ),
-                      ),
-                      const SizedBox(height: 16),
-                      Text(
-                        'Setting it up takes about a minute and you only do it '
-                        'once on this iPhone.',
-                        style: theme.textTheme.bodyMedium?.copyWith(
-                          height: 1.45,
-                          color: theme.colorScheme.onSurfaceVariant,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.of(context).pop(true),
-              child: const Text('Set up $tapToPayName'),
-            ),
-            const SizedBox(height: 8),
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(false),
-              child: const Text('Not now'),
-            ),
+            for (final (heading, text) in tapToPayDisclaimers) ...[
+              Text(heading, style: Theme.of(context).textTheme.titleSmall),
+              const SizedBox(height: 4),
+              SelectableText(text),
+              const SizedBox(height: 16),
+            ],
           ],
         ),
       ),
-    );
-  }
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Close'),
+        ),
+      ],
+    ),
+  );
+
+  @override
+  // The tile is drawn on white, so the sheet is too, in either theme.
+  Widget build(BuildContext context) => Theme(
+    data: ThemeData(colorSchemeSeed: Colors.black, useMaterial3: true),
+    child: Builder(
+      builder: (context) => ColoredBox(
+        color: Colors.white,
+        child: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: IconButton(
+                    icon: const Icon(Icons.close),
+                    tooltip: 'Close',
+                    onPressed: () => Navigator.of(context).pop(false),
+                  ),
+                ),
+                Expanded(
+                  child: Semantics(
+                    label:
+                        '$tapToPayName. A contactless card held to an '
+                        'iPhone. Accept physical debit and credit cards as '
+                        'well as Apple Pay and other digital wallets. Right '
+                        'on your iPhone.',
+                    image: true,
+                    child: Image.asset(
+                      tapToPayHeroAsset,
+                      fit: BoxFit.contain,
+                      excludeFromSemantics: true,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                FilledButton(
+                  onPressed: () => Navigator.of(context).pop(true),
+                  child: const Text('Get started with $tapToPayName'),
+                ),
+                const SizedBox(height: 4),
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(false),
+                  child: const Text('Not now'),
+                ),
+                TextButton(
+                  onPressed: () => showTerms(context),
+                  style: TextButton.styleFrom(
+                    foregroundColor: Colors.black54,
+                    textStyle: Theme.of(context).textTheme.bodySmall,
+                  ),
+                  child: const Text('Terms apply.'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
 }

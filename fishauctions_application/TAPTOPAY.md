@@ -94,7 +94,7 @@ Rule 1 was broken in three places until 2026-08-30, including the "Set up Tap to
 | # | Req | Status |
 |---|---|---|
 | 6.1 | Launch email from the toolkit template | Backend command exists; copy must be the toolkit's |
-| 6.2 | In-app splash from the "Hero in-app banner" | App done; **swap in toolkit artwork/copy before launch** |
+| 6.2 | In-app splash from the "Hero in-app banner" | Done: the US "Card to iPhone" hero tile, toolkit CTA and "Terms apply." disclaimers |
 | 6.3 | Push using the toolkit's value-proposition copy | Backend command exists |
 
 ## Declared: the trust gate
@@ -196,7 +196,7 @@ Multiple process names go in **one** `-p`, separated by `|`. Expect it to stall 
 ## Before submitting
 
 1. **Copy the entitlement into `Runner.entitlements`** — only once the publishing grant arrives.
-2. **Download the Marketing Guide and Toolkit** (access page + password on p. 23 of the review guide PDF) and swap the hero banner and approved copy into `tap_to_pay_awareness.dart`.
+2. **Download the Marketing Guide and Toolkit** (access page + password on p. 23 of the review guide PDF) (done: the hero banner is in `tap_to_pay_awareness.dart`, the launch email and push copy are on the site).
 3. Optional: export `wave.3.right.circle.fill` into `assets/tap_to_pay/` and set `tapToPaySymbolAsset`.
 4. **Record the three videos.** Apple's warning: **use a second device** — Tap to Pay screens are excluded from screen recording and come out blank.
    - Onboarding: account creation → Square connect → merchant approved.
