@@ -38,4 +38,21 @@ void main() {
     expect(find.textContaining('EMVCo'), findsOneWidget);
     expect(find.textContaining('Apple Payments Services LLC'), findsOneWidget);
   });
+
+  testWidgets('"Not now" resolves false', (tester) async {
+    final result = await open(tester);
+    await tester.tap(find.text('Not now'));
+    await tester.pumpAndSettle();
+    expect(result(), isFalse);
+  });
+
+  testWidgets('fits a landscape phone at large text', (tester) async {
+    tester.view.physicalSize = const Size(844, 390);
+    tester.view.devicePixelRatio = 1;
+    tester.platformDispatcher.textScaleFactorTestValue = 2;
+    addTearDown(tester.view.reset);
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+    await open(tester);
+    expect(tester.takeException(), isNull);
+  });
 }

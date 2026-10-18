@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../utils/secure_storage.dart';
@@ -162,60 +163,89 @@ class TapToPayAwarenessSheet extends StatelessWidget {
   );
 
   @override
-  // The tile is drawn on white, so the sheet is too, in either theme.
-  Widget build(BuildContext context) => Theme(
-    data: ThemeData(colorSchemeSeed: Colors.black, useMaterial3: true),
-    child: Builder(
-      builder: (context) => ColoredBox(
-        color: Colors.white,
-        child: SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(20, 8, 20, 16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Align(
-                  alignment: Alignment.centerRight,
-                  child: IconButton(
-                    icon: const Icon(Icons.close),
-                    tooltip: 'Close',
-                    onPressed: () => Navigator.of(context).pop(false),
-                  ),
-                ),
-                Expanded(
-                  child: Semantics(
-                    label:
-                        '$tapToPayName. A contactless card held to an '
-                        'iPhone. Accept physical debit and credit cards as '
-                        'well as Apple Pay and other digital wallets. Right '
-                        'on your iPhone.',
-                    image: true,
-                    child: Image.asset(
-                      tapToPayHeroAsset,
-                      fit: BoxFit.contain,
-                      excludeFromSemantics: true,
+  // The tile is drawn on white, so the sheet is too, in the app's dark theme:
+  // black buttons, and dark status-bar icons over it.
+  Widget build(BuildContext context) => AnnotatedRegion<SystemUiOverlayStyle>(
+    value: SystemUiOverlayStyle.dark,
+    child: Theme(
+      data: ThemeData(
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: Colors.black,
+          dynamicSchemeVariant: DynamicSchemeVariant.monochrome,
+        ),
+      ),
+      child: Builder(
+        builder: (context) => ColoredBox(
+          color: Colors.white,
+          child: SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(20, 8, 20, 16),
+              child: LayoutBuilder(
+                builder: (context, constraints) => Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: IconButton(
+                        icon: const Icon(Icons.close),
+                        tooltip: 'Close',
+                        onPressed: () => Navigator.of(context).pop(false),
+                      ),
                     ),
-                  ),
+                    Expanded(
+                      child: Semantics(
+                        label:
+                            '$tapToPayName. A contactless card held to an '
+                            'iPhone. Accept physical debit and credit cards '
+                            'as well as Apple Pay and other digital wallets. '
+                            'Right on your iPhone.',
+                        image: true,
+                        child: Image.asset(
+                          tapToPayHeroAsset,
+                          fit: BoxFit.contain,
+                          excludeFromSemantics: true,
+                        ),
+                      ),
+                    ),
+                    // Scrolls rather than overflows in landscape at large
+                    // text sizes, leaving the picture at least a third.
+                    ConstrainedBox(
+                      constraints: BoxConstraints(
+                        maxHeight: constraints.maxHeight * 2 / 3 - 48,
+                      ),
+                      child: SingleChildScrollView(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            const SizedBox(height: 12),
+                            FilledButton(
+                              onPressed: () => Navigator.of(context).pop(true),
+                              child: const Text(
+                                'Get started with $tapToPayName',
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            TextButton(
+                              onPressed: () => Navigator.of(context).pop(false),
+                              child: const Text('Not now'),
+                            ),
+                            TextButton(
+                              onPressed: () => showTerms(context),
+                              style: TextButton.styleFrom(
+                                foregroundColor: Colors.black54,
+                                textStyle: Theme.of(
+                                  context,
+                                ).textTheme.bodySmall,
+                              ),
+                              child: const Text('Terms apply.'),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
-                const SizedBox(height: 12),
-                FilledButton(
-                  onPressed: () => Navigator.of(context).pop(true),
-                  child: const Text('Get started with $tapToPayName'),
-                ),
-                const SizedBox(height: 4),
-                TextButton(
-                  onPressed: () => Navigator.of(context).pop(false),
-                  child: const Text('Not now'),
-                ),
-                TextButton(
-                  onPressed: () => showTerms(context),
-                  style: TextButton.styleFrom(
-                    foregroundColor: Colors.black54,
-                    textStyle: Theme.of(context).textTheme.bodySmall,
-                  ),
-                  child: const Text('Terms apply.'),
-                ),
-              ],
+              ),
             ),
           ),
         ),
