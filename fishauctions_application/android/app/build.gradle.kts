@@ -159,6 +159,6 @@ dependencies {
     // detection — the same detection engine the mobile_scanner package used
     // for this screen, so detection quality is unchanged. See
     // ar/ArSessionManager.kt for why these two must share one camera client.
-    implementation("com.google.ar:core:1.56.0")
+    implementation("com.google.ar:core:1.57.0")
     implementation("com.google.mlkit:barcode-scanning:17.3.0")
 }
