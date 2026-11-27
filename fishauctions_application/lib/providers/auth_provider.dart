@@ -31,6 +31,13 @@ class AuthNotifier extends AsyncNotifier<AppUser?> {
     );
   }
 
+  /// Completes an emailed-code sign-in; the error, if any, lands on [state].
+  Future<void> loginWithCode(String challenge, String code) async {
+    state = await AsyncValue.guard(
+      () => AuthService.instance.loginWithCode(challenge, code),
+    );
+  }
+
   /// Signs in with a native social credential (Google or Apple).
   ///
   /// Returns the backend's answer so the caller can act on the one outcome this

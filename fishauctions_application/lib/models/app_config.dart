@@ -14,6 +14,7 @@ class AppConfig {
     required this.googleServerClientId,
     required this.brandName,
     this.appleSignInEnabled = false,
+    this.emailCodeSignInEnabled = false,
     this.termsPath = defaultTermsPath,
     this.privacyPath = '',
     this.firebase,
@@ -26,6 +27,7 @@ class AppConfig {
     squareEnvironment: _str(json['square_environment']),
     googleServerClientId: _str(json['google_server_client_id']),
     appleSignInEnabled: json['apple_sign_in_enabled'] == true,
+    emailCodeSignInEnabled: json['email_code_sign_in_enabled'] == true,
     brandName: _str(json['brand_name']),
     termsPath: _pathOr(json['terms_url'], defaultTermsPath),
     privacyPath: _pathOr(json['privacy_policy_url'], ''),
@@ -72,6 +74,11 @@ class AppConfig {
   /// The button additionally requires iOS 13+; `SocialAuthService` checks that
   /// separately, so this being true doesn't guarantee the button appears.
   final bool appleSignInEnabled;
+
+  /// Whether the server can sign in or create an account by an emailed code
+  /// (`auth/code/request/`). False when the key is absent, so an older server
+  /// keeps the username/password screen.
+  final bool emailCodeSignInEnabled;
 
   // `facebook_app_id` is ignored. Facebook login was removed on 2026-08-10
   // (Facebook doesn't verify the email addresses it returns), and the key is

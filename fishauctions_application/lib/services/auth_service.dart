@@ -38,6 +38,39 @@ class AuthService {
     return _storeTokensAndFetchUser(res.data as Map<String, dynamic>);
   }
 
+  /// Asks the server to email a sign-in code to [email] and returns the opaque
+  /// challenge that [loginWithCode] needs. The server answers identically
+  /// whether or not the address has an account, because a code signs in or
+  /// creates one. Throws [DioException]: 400 for an invalid address, 429 when
+  /// rate-limited.
+  ///
+  /// Backend endpoint: POST /api/mobile/auth/code/request/
+  Future<String> requestLoginCode(String email) async {
+    final res = await _api.dio.post(
+      'auth/code/request/',
+      data: {'email': email},
+    );
+    final challenge = (res.data as Map<String, dynamic>)['challenge'];
+    if (challenge is! String || challenge.isEmpty) {
+      throw const FormatException('Sign-in code response had no challenge');
+    }
+    return challenge;
+  }
+
+  /// Completes an emailed-code sign-in. Stores tokens and returns the user,
+  /// exactly like [login]. Throws [DioException]: 401 for a wrong or expired
+  /// code; after three wrong tries the challenge is dead and a new code must
+  /// be requested.
+  ///
+  /// Backend endpoint: POST /api/mobile/auth/code/confirm/
+  Future<AppUser> loginWithCode(String challenge, String code) async {
+    final res = await _api.dio.post(
+      'auth/code/confirm/',
+      data: {'challenge': challenge, 'code': code},
+    );
+    return _storeTokensAndFetchUser(res.data as Map<String, dynamic>);
+  }
+
   /// Log in with a credential from a native social sign-in (Google or Apple).
   ///
   /// The backend verifies the provider token and runs django-allauth's

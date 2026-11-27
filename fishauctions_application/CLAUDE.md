@@ -39,6 +39,8 @@ All except login/refresh need `Authorization: Bearer <access>`.
 
 ```
 POST auth/login/       {credential, password} → {access, refresh}
+POST auth/code/request/ {email} → {challenge}        same answer for every address
+POST auth/code/confirm/ {challenge, code} → {access, refresh}   3 tries, 10 min
 POST auth/refresh/     {refresh} → {access, refresh}   ← rotation on
 GET  auth/me/
 POST auth/web-session/ → single-use handoff token (300 s TTL) for cookie sessions
@@ -63,7 +65,8 @@ notifications/prefs/    ← NOT implemented (Part N)
 
 No anonymous browsing. The router traps signed-out users on `/login`, `/signup`, `/password-reset`; `/legal/terms` and `/legal/privacy` work signed in *and* out.
 
-- **Apple and Google only**, each rendered only when `config/` says the deployment configured it. The app sends allauth's own provider ids, so native and web land on the same `SocialAccount`.
+- **Three ways in: Apple, Google, and an emailed code** (`auth/code/request/` → `{challenge}`, then `auth/code/confirm/` `{challenge, code}` → `{access, refresh}`). The code signs in an existing account or creates one, so there is no Create account button. Shown only when `config/` sends `email_code_sign_in_enabled`; an older server keeps the old screen. The password form stays behind "Sign in with a username and password", for anyone who lost the inbox.
+- **Apple and Google** are each rendered only when `config/` says the deployment configured it. The app sends allauth's own provider ids, so native and web land on the same `SocialAccount`.
 - **Apple leads on iOS** — guideline 4.8 requires Sign in with Apple once any third-party login exists, at least as prominent. Use each vendor's own artwork; never restyle.
 - **Apple sends name/email exactly once**, on first authorization. Hints, never identity — that's the verified token's `sub`.
 - **Sign in with Apple is nonce-bound**: SHA-256(nonce) to Apple, raw to the backend, which must check them.
