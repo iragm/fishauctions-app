@@ -52,6 +52,25 @@ class _OfflineNotice extends StatelessWidget {
   }
 }
 
+/// Uppercases the code and drops anything a pasted code might carry that isn't
+/// part of one (spaces, newlines). Codes are letters, digits and a dash.
+class _CodeFormatter extends TextInputFormatter {
+  @override
+  TextEditingValue formatEditUpdate(
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
+    final cleaned = newValue.text.toUpperCase().replaceAll(
+      RegExp('[^A-Z0-9-]'),
+      '',
+    );
+    return TextEditingValue(
+      text: cleaned,
+      selection: TextSelection.collapsed(offset: cleaned.length),
+    );
+  }
+}
+
 /// The app's front door. An account is required to use the app at all — the
 /// router traps signed-out users here (plus the signup and password-reset
 /// screens) until a sign-in succeeds, at which point the router redirect
@@ -74,25 +93,6 @@ class _OfflineNotice extends StatelessWidget {
 /// returns a web continuation the user completes in the restricted allauth
 /// WebView, after which the app swaps a pending token for the session. See
 /// `_finishInWebFlow` and `BACKEND_SPEC.md` Part SOCIAL.
-/// Uppercases the code and drops anything a pasted code might carry that isn't
-/// part of one (spaces, newlines). Codes are letters, digits and a dash.
-class _CodeFormatter extends TextInputFormatter {
-  @override
-  TextEditingValue formatEditUpdate(
-    TextEditingValue oldValue,
-    TextEditingValue newValue,
-  ) {
-    final cleaned = newValue.text.toUpperCase().replaceAll(
-      RegExp('[^A-Z0-9-]'),
-      '',
-    );
-    return TextEditingValue(
-      text: cleaned,
-      selection: TextSelection.collapsed(offset: cleaned.length),
-    );
-  }
-}
-
 class LoginScreen extends ConsumerStatefulWidget {
   const LoginScreen({super.key});
 
